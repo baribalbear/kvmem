@@ -11,7 +11,8 @@ param(
     [ValidateSet('Release', 'Debug', 'RelWithDebInfo', 'MinSizeRel')][string]$BuildType = 'Release',
     [ValidateRange(1, 64)][int]$Jobs = 4,
     [switch]$HostOnly,
-    [switch]$BuildOnly
+    [switch]$BuildOnly,
+    [string[]]$CMakeArgs = @()
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -111,6 +112,7 @@ if ($HostOnly) {
         $options += '-DGGML_VULKAN=ON'
     }
 }
+$options += $CMakeArgs
 Invoke-Checked cmake $options
 if ($resetCppDependencies) {
     Write-Host 'MSVC dependency prefix changed; rebuilding C/C++ objects to record valid include dependencies.'

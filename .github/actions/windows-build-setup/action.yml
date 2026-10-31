@@ -1,7 +1,8 @@
-name: Prepare a Windows NInfer build
+name: Prepare a Windows KVMem build
 description: >-
-  Apply the pinned NInfer patch series, install the CUDA Toolkit, import Visual Studio 2022, install
-  the pinned ccache and configure backends/ninfer/build-release against vcpkg's FFmpeg and curl.
+  Install the CUDA Toolkit and import Visual Studio 2022. For the NInfer worker, also apply the
+  pinned NInfer patch series, install the pinned ccache and configure backends/ninfer/build-release
+  against vcpkg's FFmpeg and curl.
 inputs:
   cuda:
     description: Full CUDA Toolkit version, e.g. 13.4.3
@@ -12,6 +13,9 @@ inputs:
   packages:
     description: JSON list of CUDA network-installer packages
     required: true
+  ninfer:
+    description: Prepare and configure the NInfer worker build
+    default: 'true'
 outputs:
   vcpkg-key:
     description: Cache key of the vcpkg binary archives
@@ -26,6 +30,7 @@ runs:
       with:
         python-version: '3.11'
     - name: Prepare the pinned NInfer patch series
+      if: inputs.ninfer == 'true'
       shell: pwsh
       run: |
         python scripts/prepare-backends.py --backend ninfer
@@ -67,29 +72,34 @@ runs:
           }
         }
     - name: Install the pinned ccache
+      if: inputs.ninfer == 'true'
       shell: pwsh
       working-directory: backends/ninfer
       run: |
         python .github/scripts/install-compiler-cache.py
         if ($LASTEXITCODE -ne 0) { throw 'ccache installation failed' }
     - name: Resolve the pinned vcpkg revision
+      if: inputs.ninfer == 'true'
       id: vcpkg
       shell: pwsh
       run: |
         $baseline = (Get-Content backends/ninfer/vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
         "baseline=$baseline" >> $env:GITHUB_OUTPUT
         "key=ninfer-vcpkg-$baseline-${{ hashFiles('backends/ninfer/vcpkg.json') }}-${{ inputs.cuda }}" >> $env:GITHUB_OUTPUT
-    - uses: actions/checkout@v4
+    - if: inputs.ninfer == 'true'
+      uses: actions/checkout@v4
       with:
         repository: microsoft/vcpkg
         ref: ${{ steps.vcpkg.outputs.baseline }}
         path: .vcpkg
-    - id: vcpkg-cache
+    - if: inputs.ninfer == 'true'
+      id: vcpkg-cache
       uses: actions/cache/restore@v4
       with:
         path: ~/AppData/Local/vcpkg/archives
         key: ${{ steps.vcpkg.outputs.key }}
-    - name: Configure with vcpkg's FFmpeg and curl
+    - name: Configure the NInfer worker with vcpkg's FFmpeg and curl
+      if: inputs.ninfer == 'true'
       shell: pwsh
       working-directory: backends/ninfer
       env:
@@ -98,14 +108,17 @@ runs:
         $vcpkg = Join-Path $env:GITHUB_WORKSPACE '.vcpkg'
         & "$vcpkg\bootstrap-vcpkg.bat" -disableMetrics
         if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
-        # The same options as NInfer's own native Windows release build.
+        # kvmem's worker options (scripts/windows/build-backends.ps1): a standalone ninfer-serve.exe
+        # with its DLLs beside it, which scripts/windows/package-backends.ps1 packages. The object
+        # shards also compile ninfer and ninfer_bench, so benchmarks stay on.
+        $native = if ($env:ARCHS -eq '120a') { @('-DNINFER_SM120_NATIVE=ON') } else { @() }
         cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release `
           "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake" `
           -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_HOST_TRIPLET=x64-windows `
-          "-DCMAKE_CUDA_COMPILER=$env:CUDA_PATH/bin/nvcc.exe" `
+          "-DCMAKE_CUDA_COMPILER=$env:CUDA_PATH/bin/nvcc.exe" "-DCUDAToolkit_ROOT=$env:CUDA_PATH" `
           "-DCMAKE_CUDA_ARCHITECTURES=$env:ARCHS" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
           -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache `
-          -DNINFER_NVCC_SPLIT_COMPILE=2 -DNINFER_CUDA_PRUNE_PTX=ON -DNINFER_WINDOWS_KERNEL_DLL=ON -DNINFER_SHARED_RUNTIME=ON `
-          -DBUILD_TESTING=OFF -DNINFER_BUILD_BENCHMARKS=ON
+          -DNINFER_NVCC_SPLIT_COMPILE=2 -DNINFER_CUDA_PRUNE_PTX=ON `
+          -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=OFF -DNINFER_BUILD_BENCHMARKS=ON @native
         if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
