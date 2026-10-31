@@ -111,7 +111,9 @@ runs:
         # kvmem's worker options (scripts/windows/build-backends.ps1): a standalone ninfer-serve.exe
         # with its DLLs beside it, which scripts/windows/package-backends.ps1 packages. The object
         # shards also compile ninfer and ninfer_bench, so benchmarks stay on.
-        $native = if ($env:ARCHS -eq '120a') { @('-DNINFER_SM120_NATIVE=ON') } else { @() }
+        # A one-element array from an if statement unwraps to a string, so build the list explicitly.
+        $native = @()
+        if ($env:ARCHS -eq '120a') { $native += '-DNINFER_SM120_NATIVE=ON' }
         cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release `
           "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake" `
           -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_HOST_TRIPLET=x64-windows `
@@ -120,5 +122,5 @@ runs:
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
           -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache `
           -DNINFER_NVCC_SPLIT_COMPILE=2 -DNINFER_CUDA_PRUNE_PTX=ON `
-          -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=OFF -DNINFER_BUILD_BENCHMARKS=ON @native
+          -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=OFF -DNINFER_BUILD_BENCHMARKS=ON $native
         if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }

@@ -126,7 +126,7 @@ if ($resetCppDependencies) {
 }
 $targets = @('backend_rebind_test', 'kvmem-lane-pool-test', 'kvmem_store_test', 'pinned_kv_tier_test',
     'kvmem-conversation-store-test', 'kvmem-session-snapshot-test',
-    'kvmem-session-transfer-test', 'kvmem-session-cache-lifecycle-worker')
+    'kvmem-session-transfer-test')
 if (!$HostOnly) {
     $targets += @('llama-kvmem-server', 'llama-kvmem-cli', 'llama-quantize',
         'kvmem-chat-id-test', 'kvmem-reasoning-budget-test', 'kvmem-chat-template-test', 'kvmem-server-options-test',
