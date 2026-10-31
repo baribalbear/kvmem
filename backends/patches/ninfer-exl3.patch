@@ -1,0 +1,3547 @@
+diff --git a/src/artifact/CMakeLists.txt b/src/artifact/CMakeLists.txt
+index 5988c1b1a321d4b9ab9506ac62b78ed8f58cc6d0..3db1312629a613634d40ee7e1be7db36dfbbdc86 100644
+--- a/src/artifact/CMakeLists.txt
++++ b/src/artifact/CMakeLists.txt
+@@ -2,6 +2,7 @@ add_library(ninfer_artifact STATIC
+   schema.cpp
+   formats.cpp
+   layouts.cpp
++  exl3_trellis.cpp
+   file_io.cpp
+   reader.cpp
+   binder.cpp
+diff --git a/src/artifact/exl3_trellis.cpp b/src/artifact/exl3_trellis.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..1dcced5c5ffc69586e9c0e2e50380f41c4c56dd6
+--- /dev/null
++++ b/src/artifact/exl3_trellis.cpp
+@@ -0,0 +1,115 @@
++#include "artifact/exl3_trellis.h"
++
++#include <cstddef>
++#include <cstdint>
++#include <span>
++#include <stdexcept>
++#include <vector>
++
++namespace ninfer::artifact {
++namespace {
++
++void validate_rate(std::uint64_t bitrate_half_bits) {
++    if (bitrate_half_bits < 2 || bitrate_half_bits > 16) {
++        throw std::invalid_argument("EXL3 bitrate_half_bits must be in [2, 16]");
++    }
++}
++
++std::size_t tile_bytes(std::uint64_t bitrate_half_bits) {
++    validate_rate(bitrate_half_bits);
++    return static_cast<std::size_t>(16 * bitrate_half_bits);
++}
++
++std::size_t step_width(std::uint64_t bitrate_half_bits, std::size_t weight) {
++    const auto low = static_cast<std::size_t>(bitrate_half_bits / 2);
++    return low + ((bitrate_half_bits & 1U) && (weight & 1U) ? 1U : 0U);
++}
++
++std::size_t end_bit(std::uint64_t bitrate_half_bits, std::size_t weight) {
++    const auto count = weight + 1;
++    const auto low = static_cast<std::size_t>(bitrate_half_bits / 2);
++    const auto extra = (bitrate_half_bits & 1U) ? count / 2 : 0;
++    return count * low + extra;
++}
++
++std::uint32_t read_bit(std::span<const std::byte> bytes, std::size_t bit) {
++    const auto word = std::to_integer<std::uint8_t>(bytes[bit / 8]);
++    return (word >> (bit % 8)) & 1U;
++}
++
++void write_bit(std::span<std::byte> bytes, std::size_t bit, std::uint32_t value) {
++    auto word = std::to_integer<std::uint8_t>(bytes[bit / 8]);
++    const auto mask = static_cast<std::uint8_t>(1U << (bit % 8));
++    word = value ? static_cast<std::uint8_t>(word | mask)
++                 : static_cast<std::uint8_t>(word & static_cast<std::uint8_t>(~mask));
++    bytes[bit / 8] = static_cast<std::byte>(word);
++}
++
++} // namespace
++
++std::uint16_t exl3_trellis_state(std::span<const std::byte> tile,
++                                 std::uint64_t bitrate_half_bits, std::size_t weight) {
++    if (weight >= kExl3WeightsPerTile) {
++        throw std::out_of_range("EXL3 tile weight index must be in [0, 255]");
++    }
++    if (tile.size() != tile_bytes(bitrate_half_bits)) {
++        throw std::invalid_argument("EXL3 tile byte count does not match bitrate");
++    }
++    const auto total_bits = tile.size() * 8;
++    const auto end = end_bit(bitrate_half_bits, weight);
++    const auto begin = (end + total_bits - 16) % total_bits;
++    std::uint16_t state = 0;
++    for (std::size_t bit = 0; bit < 16; ++bit) {
++        state |= static_cast<std::uint16_t>(read_bit(tile, (begin + bit) % total_bits) << bit);
++    }
++    return state;
++}
++
++void exl3_unpack_trellis_tile(std::span<const std::byte> tile,
++                              std::uint64_t bitrate_half_bits,
++                              std::span<std::uint16_t> states) {
++    if (states.size() != kExl3WeightsPerTile) {
++        throw std::invalid_argument("EXL3 tile must decode exactly 256 states");
++    }
++    for (std::size_t weight = 0; weight < states.size(); ++weight) {
++        states[weight] = exl3_trellis_state(tile, bitrate_half_bits, weight);
++    }
++}
++
++std::vector<std::byte> exl3_pack_trellis_tile(std::span<const std::uint16_t> states,
++                                             std::uint64_t bitrate_half_bits) {
++    if (states.size() != kExl3WeightsPerTile) {
++        throw std::invalid_argument("EXL3 tile must contain exactly 256 states");
++    }
++    const auto bytes = tile_bytes(bitrate_half_bits);
++    std::vector<std::byte> packed(bytes);
++    std::size_t cursor = 0;
++    for (std::size_t weight = 0; weight < states.size(); ++weight) {
++        const auto width = step_width(bitrate_half_bits, weight);
++        const auto mask = (1U << width) - 1U;
++        const auto suffix = (static_cast<std::uint32_t>(states[weight]) >> (16 - width)) & mask;
++        const auto previous = states[(weight + states.size() - 1) % states.size()];
++        const auto expected = static_cast<std::uint16_t>(
++            (previous >> width) | (suffix << (16 - width)));
++        if (states[weight] != expected) {
++            throw std::invalid_argument("EXL3 states do not form a circular trellis path");
++        }
++        for (std::size_t bit = 0; bit < width; ++bit) {
++            write_bit(packed, cursor + bit, (suffix >> bit) & 1U);
++        }
++        cursor += width;
++    }
++    if (cursor != packed.size() * 8) {
++        throw std::logic_error("EXL3 bitrate did not fill its tile bitstream");
++    }
++    return packed;
++}
++
++std::int32_t exl3_mul1_value(std::uint16_t state) noexcept {
++    const auto product = static_cast<std::uint32_t>(state) * kExl3Mul1Multiplier;
++    const auto sum = (product & 0xFFU) + ((product >> 8) & 0xFFU) +
++                     ((product >> 16) & 0xFFU) + ((product >> 24) & 0xFFU);
++    return static_cast<std::int32_t>(sum) - 510;
++}
++
++} // namespace ninfer::artifact
+diff --git a/src/artifact/exl3_trellis.h b/src/artifact/exl3_trellis.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b699f32af8a48a14c394f8d022bd249e32fbbcb4
+--- /dev/null
++++ b/src/artifact/exl3_trellis.h
+@@ -0,0 +1,31 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <span>
++#include <vector>
++
++namespace ninfer::artifact {
++
++inline constexpr std::uint32_t kExl3Mul1Multiplier = 0x83DCD12DU;
++inline constexpr std::size_t kExl3WeightsPerTile   = 256;
++
++// The bitstream is little-endian within each byte. A decoded state's low bit is the oldest bit in
++// its 16-bit circular window. Odd half-bit rates give odd-numbered weights the extra bit.
++//
++// Every entry point requires bitrate_half_bits in [2, 16] and tile.size() == 16 *
++// bitrate_half_bits (std::invalid_argument otherwise), and a weight index below
++// kExl3WeightsPerTile (std::out_of_range). The unpack/pack helpers additionally require exactly
++// kExl3WeightsPerTile states.
++[[nodiscard]] std::uint16_t exl3_trellis_state(std::span<const std::byte> tile,
++                                               std::uint64_t bitrate_half_bits,
++                                               std::size_t weight);
++void exl3_unpack_trellis_tile(std::span<const std::byte> tile,
++                              std::uint64_t bitrate_half_bits,
++                              std::span<std::uint16_t> states);
++[[nodiscard]] std::vector<std::byte>
++exl3_pack_trellis_tile(std::span<const std::uint16_t> states,
++                       std::uint64_t bitrate_half_bits);
++[[nodiscard]] std::int32_t exl3_mul1_value(std::uint16_t state) noexcept;
++
++} // namespace ninfer::artifact
+diff --git a/src/artifact/formats.cpp b/src/artifact/formats.cpp
+index 9a729577c168a736aac0691c7adc3104678843dc..ddb5c21bd37bf96f605d320604c00a40adeab944 100644
+--- a/src/artifact/formats.cpp
++++ b/src/artifact/formats.cpp
+@@ -20,6 +20,7 @@ constexpr std::array kFormats = {
+     std::pair{QType::PTQ1_G128_FP16, std::string_view{"ptq1_g128_fp16"}},
+     std::pair{QType::T5_G128_FP16, std::string_view{"t5_g128_fp16"}},
+     std::pair{QType::NVFP4, std::string_view{"nvfp4"}},
++    std::pair{QType::EXL3_MUL1, std::string_view{"exl3_mul1"}},
+     std::pair{QType::FP8_E4M3FN_ROW_BF16, std::string_view{"fp8_e4m3fn_row_bf16"}},
+     std::pair{QType::FP8_E4M3FN_ROW_FP16, std::string_view{"fp8_e4m3fn_row_fp16"}},
+     std::pair{QType::GGUF_Q8_0, std::string_view{"gguf_q8_0"}},
+@@ -46,6 +47,7 @@ constexpr std::array kLayouts = {
+     std::pair{QuantLayout::RowSplit, std::string_view{"row_split_k128_v1"}},
+     std::pair{QuantLayout::RowScale, std::string_view{"row_scale_v1"}},
+     std::pair{QuantLayout::RowInterleaved, std::string_view{"row_interleaved_v1"}},
++    std::pair{QuantLayout::TrellisT16, std::string_view{"trellis_t16_v1"}},
+     std::pair{QuantLayout::BlockScaleK16M128x4, std::string_view{"block_scale_k16_m128x4_v1"}},
+     std::pair{QuantLayout::GgufBlocks, std::string_view{"gguf_blocks_v1"}},
+ };
+diff --git a/src/artifact/layouts.cpp b/src/artifact/layouts.cpp
+index e7b4114ee28205c1ebff518629b024a7b5dd3ae7..6357114141428f5d8e545bfa0b81fd508fc7d691 100644
+--- a/src/artifact/layouts.cpp
++++ b/src/artifact/layouts.cpp
+@@ -8,7 +8,8 @@ namespace ninfer::artifact {
+ WeightGeometry describe_tensor(const TensorObject& object) {
+     try {
+         auto geometry = weight_geometry(parse_format(object.format), parse_layout(object.layout),
+-                                        object.shape, object.divisors);
++                                        object.shape, object.divisors,
++                                        object.bitrate_half_bits);
+         if (geometry.bytes != object.bytes || object.offset % geometry.alignment) {
+             throw ArtifactError("encoded size or object alignment differs from layout");
+         }
+diff --git a/src/artifact/schema.cpp b/src/artifact/schema.cpp
+index 6efee3e9deda562bcbe379d7a383c4e9fe29548f..d1514122cb268fc32d9d5422d52690ac9ef57591 100644
+--- a/src/artifact/schema.cpp
++++ b/src/artifact/schema.cpp
+@@ -234,7 +234,7 @@ void parse_objects(Directory& out, const Json& objects) {
+         const auto kind = require_id(value.at("kind"), "object kind");
+         if (kind == "tensor") {
+             require_members(value, {"id", "kind", "shape", "format", "layout", "offset", "bytes"},
+-                            {"divisors"}, "tensor");
++                            {"divisors", "bitrate_half_bits"}, "tensor");
+         } else if (kind == "resource") {
+             require_members(value, {"id", "kind", "encoding", "offset", "bytes"}, {}, "resource");
+         } else {
+@@ -254,9 +254,13 @@ void parse_objects(Directory& out, const Json& objects) {
+         if (kind == "tensor") {
+             const std::uint64_t divisors =
+                 value.contains("divisors") ? require_u64(value.at("divisors"), id, true) : 1;
++            const std::uint64_t bitrate_half_bits =
++                value.contains("bitrate_half_bits")
++                    ? require_u64(value.at("bitrate_half_bits"), id, true)
++                    : 0;
+             out.objects.emplace_back(TensorObject{
+                 id, parse_shape(value.at("shape"), id), require_id(value.at("format"), id),
+-                require_id(value.at("layout"), id), offset, bytes, divisors});
++                require_id(value.at("layout"), id), offset, bytes, divisors, bitrate_half_bits});
+         } else {
+             out.objects.emplace_back(
+                 ResourceObject{id, require_id(value.at("encoding"), id), offset, bytes});
+diff --git a/src/artifact/schema.h b/src/artifact/schema.h
+index cd4b8fd49837ca4fe103cb7155bbc4bb18f6fa7f..ca9f417234f59fb069d7f3414214596cf4f79477 100644
+--- a/src/artifact/schema.h
++++ b/src/artifact/schema.h
+@@ -41,6 +41,8 @@ struct TensorObject {
+     // Source matrices this plane was assembled from, each with its own NVFP4 divisor. Absent means
+     // one, which is every plane that is not a stack of separately quantised matrices.
+     std::uint64_t divisors = 1;
++    // EXL3 bitrate in half-bit units (2..16); zero means not an EXL3 tensor.
++    std::uint64_t bitrate_half_bits = 0;
+ };
+ 
+ struct ResourceObject {
+diff --git a/src/core/weight.h b/src/core/weight.h
+index 53fd9eda968ae2eea259ac50a8a531a9e44443ea..41c04e7bef0c424ab5bdc4932fe531d1f8a3520d 100644
+--- a/src/core/weight.h
++++ b/src/core/weight.h
+@@ -49,6 +49,9 @@ enum class QType : std::uint16_t {
+     PTQ1_G128_FP16 = 30,
+     // Exact ternary reordering: two 13-byte T5 units plus FP16 scale per 128.
+     T5_G128_FP16 = 31,
++    // EXL3 mul1 trellis codes over 16x16 tiles with folded 128-point Hadamard rotations
++    // (giveen/ninfer-ext). TrellisT16 layout only.
++    EXL3_MUL1 = 32,
+ };
+ 
+ [[nodiscard]] constexpr bool is_gguf(QType format) {
+@@ -127,6 +130,8 @@ enum class QuantLayout : std::uint16_t {
+     // Rows of whole ggml blocks, as a GGUF stores them.
+     GgufBlocks = 5,
+     RowInterleaved = 6,
++    // EXL3 trellis_t16_v1: 16x16 trellis tiles, then FP32 su[K] and sv[N] (EXL3_MUL1 only).
++    TrellisT16 = 7,
+ };
+ 
+ // Rows per stored panel. Four 32-byte records is exactly one 128-byte line, which is all the
+@@ -166,6 +171,12 @@ struct Weight {
+     float weight_scale_divisor = 0.0F;
+     float input_scale_divisor  = 0.0F;
+ 
++    // EXL3 mul1 only. `qdata` is the fail-safe trellis_t16_v1 plane, `input_scales` the FP32
++    // per-input-channel scales su[K], and `scales` the FP32 per-output-channel scales sv[N];
++    // `bitrate_half_bits` is the tensor's stored rate.
++    const void* input_scales        = nullptr;
++    std::uint32_t bitrate_half_bits = 0;
++
+     // An NVFP4 plane assembled from several source matrices carries one divisor per source, in the
+     // payload after the scales. `weight_divisors` addresses them and `weight_divisor_rows` says how
+     // many consecutive rows each covers, so the divisor of row r is element r /
+diff --git a/src/core/weight_view.cpp b/src/core/weight_view.cpp
+index d5535bf61f6b3be7142b9cdd59d44b27c69de762..22b5ce6ddd78998559e504fd8ccad19cb415a38e 100644
+--- a/src/core/weight_view.cpp
++++ b/src/core/weight_view.cpp
+@@ -77,9 +77,14 @@ std::uint64_t weight_element_count(std::span<const std::uint64_t> shape) {
+ }
+ 
+ WeightGeometry weight_geometry(QType format, QuantLayout layout,
+-                               std::span<const std::uint64_t> shape, std::uint64_t divisors) {
+-    if (divisors == 0 || (divisors != 1 && format != QType::NVFP4)) {
+-        throw std::invalid_argument("only an NVFP4 plane carries more than one divisor");
++                               std::span<const std::uint64_t> shape, std::uint64_t divisors,
++                               std::uint64_t bitrate_half_bits) {
++    if (divisors == 0 || (divisors != 1 && format != QType::NVFP4 && format != QType::EXL3_MUL1)) {
++        throw std::invalid_argument(
++            "only an NVFP4 or EXL3 plane carries more than one divisor or scale set");
++    }
++    if (bitrate_half_bits != 0 && format != QType::EXL3_MUL1) {
++        throw std::invalid_argument("only EXL3 tensors carry bitrate_half_bits");
+     }
+     WeightGeometry out;
+     out.format        = format;
+@@ -157,6 +162,38 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
+         out.scale_bytes_per_row = k / 16;
+         out.code_bytes          = out.elements / 2;
+         out.scale_offset        = aligned(out.code_bytes, 256);
++    } else if (layout == QuantLayout::TrellisT16) {
++        if (format != QType::EXL3_MUL1) {
++            throw std::invalid_argument("TrellisT16 requires EXL3 mul1");
++        }
++        if (bitrate_half_bits < 2 || bitrate_half_bits > 16) {
++            throw std::invalid_argument("EXL3 bitrate_half_bits must be in [2, 16]");
++        }
++        if (n % 128 || k % 128) {
++            throw std::invalid_argument("EXL3 TrellisT16 requires N%128=0 and K%128=0");
++        }
++        // `divisors` stacked matrices of n / divisors rows each own one suh[k]; a 128-row Hadamard
++        // block may not span two of them. One set is the plain matrix.
++        if (n % divisors || (n / divisors) % 128) {
++            throw std::invalid_argument(
++                "each EXL3 scale set must cover a whole number of 128-row blocks");
++        }
++        out.bitrate_half_bits   = bitrate_half_bits;
++        out.tiles_n             = n / 16;
++        out.tiles_k             = k / 16;
++        out.tile_bytes          = mul(16, bitrate_half_bits);
++        out.trellis_bytes       = mul(mul(out.tiles_n, out.tiles_k), out.tile_bytes);
++        out.code_bytes          = out.trellis_bytes;
++        out.input_scale_offset  = aligned(out.trellis_bytes, 256);
++        out.input_scale_bytes   = mul(mul(k, 4), divisors);
++        out.output_scale_offset = aligned(add(out.input_scale_offset, out.input_scale_bytes), 256);
++        out.output_scale_bytes  = mul(n, 4);
++        out.scale_offset        = out.output_scale_offset;
++        out.scale_bytes         = out.output_scale_bytes;
++        out.high_offset         = out.input_scale_offset;
++        out.high_bytes          = out.input_scale_bytes;
++        out.bytes               = add(out.output_scale_offset, out.output_scale_bytes);
++        return out;
+     } else {
+         throw std::invalid_argument("unknown quantized weight layout");
+     }
+@@ -232,6 +269,9 @@ WeightRowPlanes weight_row_planes(const WeightRegion& region) {
+         region.end % g.shape[1]) {
+         throw std::invalid_argument("row view requires resident complete logical rows");
+     }
++    if (g.layout == QuantLayout::TrellisT16) {
++        throw std::invalid_argument("EXL3 planes require an EXL3-specific row view");
++    }
+     WeightRowPlanes out;
+     out.row_begin       = region.begin / g.shape[1];
+     out.row_count       = (region.end - region.begin) / g.shape[1];
+@@ -294,6 +334,30 @@ Weight native_weight(const WeightView& view, float input_divisor) {
+         out.qdata = region.parent->data + mul(region.begin, word_bytes(g.format));
+         return out;
+     }
++    if (g.layout == QuantLayout::TrellisT16) {
++        // EXL3 planes are whole-object: the 128-point Hadamard blocks and tile geometry need the
++        // complete parent, so a row slice is not a valid operand.
++        if (g.format != QType::EXL3_MUL1 || !is_complete_weight(view)) {
++            throw std::invalid_argument("EXL3 native Weight requires the complete parent");
++        }
++        // A dense Linear reads one suh; a bank of separately scaled matrices is not supported.
++        if (g.divisor_count != 1) {
++            throw std::invalid_argument("EXL3 native Weight cannot be a stacked bank");
++        }
++        out.qdata             = region.parent->data;
++        out.input_scales      = region.parent->data + g.input_scale_offset;
++        out.scales            = region.parent->data + g.output_scale_offset;
++        out.group_size        = 16;
++        out.group             = 16;
++        out.scale_dtype       = DType::FP32;
++        out.bitrate_half_bits = static_cast<std::uint32_t>(g.bitrate_half_bits);
++        // `scales` is svh, one FP32 per output channel, so the scale plane is 1-D; suh is
++        // addressed by `input_scales`, which carries no extent of its own.
++        out.scale_ne[0] = out.n;
++        out.scale_nb[0] = 4;
++        out.scale_nb[1] = out.scale_nb[2] = out.scale_nb[3] = static_cast<std::int64_t>(out.n) * 4;
++        return out;
++    }
+     if (g.shape.size() != 2 || view.shape[1] != g.shape[1]) {
+         throw std::invalid_argument("quantized native Weight requires unchanged parent K");
+     }
+diff --git a/src/core/weight_view.h b/src/core/weight_view.h
+index debac5eaddc8fa01f0000dc71062dcac57789fd6..a802e59d5bac9ce74613493e289bb306637610af 100644
+--- a/src/core/weight_view.h
++++ b/src/core/weight_view.h
+@@ -50,11 +50,22 @@ struct WeightGeometry {
+     std::uint64_t scale_bytes         = 0;
+     std::uint64_t divisor_offset      = 0;
+     std::uint64_t divisor_count       = 1;
++    // EXL3 TrellisT16 only: 16x16 tiles, then FP32 su[K] per scale set and sv[N].
++    std::uint64_t bitrate_half_bits   = 0;
++    std::uint64_t tiles_n             = 0;
++    std::uint64_t tiles_k             = 0;
++    std::uint64_t tile_bytes          = 0;
++    std::uint64_t trellis_bytes       = 0;
++    std::uint64_t input_scale_offset  = 0;
++    std::uint64_t input_scale_bytes   = 0;
++    std::uint64_t output_scale_offset = 0;
++    std::uint64_t output_scale_bytes  = 0;
+ };
+ 
+ [[nodiscard]] WeightGeometry weight_geometry(QType format, QuantLayout layout,
+                                              std::span<const std::uint64_t> shape,
+-                                             std::uint64_t divisors = 1);
++                                             std::uint64_t divisors          = 1,
++                                             std::uint64_t bitrate_half_bits = 0);
+ [[nodiscard]] std::uint64_t weight_element_count(std::span<const std::uint64_t> shape);
+ 
+ // RowSplitPanel is a permutation of RowSplit's bytes, so every byte-counting question about the
+diff --git a/src/models/qwen3_5/execution/parameters.cpp b/src/models/qwen3_5/execution/parameters.cpp
+index e57f685041fde3e14d8198fbc0d02548724d0594..f1ec1830a95d89e75ea8a8b6eef2e476739c1ecf 100644
+--- a/src/models/qwen3_5/execution/parameters.cpp
++++ b/src/models/qwen3_5/execution/parameters.cpp
+@@ -446,7 +446,11 @@ public:
+             nvfp4_w4a16_route(out.projection.packed, 14336, 5120);
+             nvfp4_int8_route(out.projection.packed, 14336, 5120);
+         }
+-        if (model_.config().text.architecture == Architecture::Qwen3_5) {
++        // A row slice of an EXL3 parent is not a valid native Weight, so an EXL3 bank leaves
++        // `rows` empty and projects through the complete packed parent (ops::attn_input_proj).
++        const bool exl3_packed =
++            packable && out.projection.packed.weight.qtype == QType::EXL3_MUL1;
++        if (model_.config().text.architecture == Architecture::Qwen3_5 && !exl3_packed) {
+             out.projection.rows = {linear(a.query), linear(a.key), linear(a.gate), linear(a.value)};
+         }
+         out.query_norm  = tensor(a.query_norm);
+diff --git a/src/ops/linear/exl3/exl3_decode.cuh b/src/ops/linear/exl3/exl3_decode.cuh
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef717b040a833cbcec684e2f69c68226490d3c05
+--- /dev/null
++++ b/src/ops/linear/exl3/exl3_decode.cuh
+@@ -0,0 +1,252 @@
++#pragma once
++
++// EXL3 mul1 trellis decode shared by the dense linear and the routed-expert kernels. A tile is
++// 16*half_bits bytes; every helper returns the integer mul1 codebook value (before the Hadamard
++// and scale planes).
++
++#include <cuda_runtime.h>
++
++#include <cstdint>
++
++namespace ninfer::ops::detail {
++
++constexpr std::uint32_t kMul1Multiplier = 0x83DCD12DU;
++
++__device__ __forceinline__ float mul1_value(std::uint16_t state) {
++    // The byte sum of the multiplied state is the mul1 codebook; one dp4a replaces six shift/mask/add
++    // ops, which matters because every weight of the model passes through here.
++    const std::uint32_t product = static_cast<std::uint32_t>(state) * kMul1Multiplier;
++    const std::uint32_t sum     = __dp4a(product, 0x01010101U, 0U);
++    return static_cast<float>(static_cast<std::int32_t>(sum) - 510);
++}
++
++// 16-bit circular window of the tile's tail-biting bitstream that decodes weight `t`.
++__device__ __forceinline__ std::uint16_t tile_state(const std::uint8_t* tile, int half_bits,
++                                                    int t) {
++    const int low   = half_bits >> 1;
++    const int count = t + 1;
++    const int end   = count * low + ((half_bits & 1) ? count / 2 : 0);
++    const int total = 128 * half_bits;
++    const int begin = (end + total - 16) % total;
++    std::uint32_t state = 0;
++    for (int b = 0; b < 16; ++b) {
++        const int position = (begin + b) % total;
++        state |= (static_cast<std::uint32_t>(tile[position >> 3] >> (position & 7)) & 1U) << b;
++    }
++    return static_cast<std::uint16_t>(state);
++}
++
++// A window's position in the tile, precomputed once per thread and packed into 16 bits (word in the
++// low byte, shift in the high byte) so a 16-window plan costs eight registers instead of forty-eight.
++// The state index, bitrate and tile width are loop-invariant, so the two integer modulos that located
++// the window move out of the K loop entirely; only the two loads and the funnel shift remain.
++__device__ __forceinline__ std::uint16_t exl3_window(int state, int bits, int words) {
++    const int total = words * 32;
++    int start       = (state + 1) * bits - 16;
++    if (start < 0) { start += total; }
++    return static_cast<std::uint16_t>((start >> 5) | ((start & 31) << 8));
++}
++
++__device__ __forceinline__ float exl3_window_value(const std::uint32_t* tile,
++                                                   std::uint16_t window, int words) {
++    const int word  = window & 0xFF;
++    const int shift = (window >> 8) & 0x1F;
++    const int next  = (word + 1 == words) ? 0 : word + 1;
++    return mul1_value(static_cast<std::uint16_t>(
++        __funnelshift_r(tile[word], tile[next], shift) & 0xFFFFU));
++}
++
++// The eight B-fragment windows of one 16x16 tile at a 4-bit rate, resolved from the lane's word and
++// its circular predecessor with one funnel shift and five bit-field extracts (exllamav3's
++// dq8_regs_4bits). d[r] is the window for state 8*lane + r, which is the state the contraction
++// indexes. The tile is 32 words, so `lane - 1` wraps inside it.
++__device__ __forceinline__ void exl3_windows_4bit(const std::uint32_t* tile, int lane, float d[8]) {
++    const std::uint32_t b = tile[lane];
++    const std::uint32_t a = tile[(lane + 31) & 31];
++    const std::uint32_t s = __funnelshift_r(a, b, 20);
++    d[0] = mul1_value(static_cast<std::uint16_t>(s & 0xFFFFU));
++    d[1] = mul1_value(static_cast<std::uint16_t>((s >> 4) & 0xFFFFU));
++    d[2] = mul1_value(static_cast<std::uint16_t>((s >> 8) & 0xFFFFU));
++    d[3] = mul1_value(static_cast<std::uint16_t>(b & 0xFFFFU));
++    d[4] = mul1_value(static_cast<std::uint16_t>((b >> 4) & 0xFFFFU));
++    d[5] = mul1_value(static_cast<std::uint16_t>((b >> 8) & 0xFFFFU));
++    d[6] = mul1_value(static_cast<std::uint16_t>((b >> 12) & 0xFFFFU));
++    d[7] = mul1_value(static_cast<std::uint16_t>((b >> 16) & 0xFFFFU));
++}
++
++// Odd half bits (KA + 0.5 bpw, mul1): positions alternate KA and KA+1 bits, so four consecutive
++// windows share one 18 + 3*KA bit field and a lane's eight windows are two such fields. One funnel
++// shift per field yields four windows by shifting the 32-bit result, the structure exllamav3's
++// dq8_half uses. The field must fit the funnel result, i.e. 18 + 3*KA <= 32 (up to 4.5 bpw, where
++// exllamav3's half-rate kernels stop); wider half rates keep the bitwise decode.
++__device__ __forceinline__ bool exl3_half_fast(int half_bits) {
++    return (half_bits & 1) != 0 && 18 + 3 * (half_bits >> 1) <= 32;
++}
++
++__device__ __forceinline__ void exl3_windows_half(const std::uint32_t* tile, int lane,
++                                                  int half_bits, float d[8]) {
++    const int ka     = half_bits >> 1;
++    const int span   = 18 + 3 * ka;
++    const int words  = 4 * half_bits;
++    const int total  = words * 32;
++    const int off[4] = {0, ka + 1, 2 * ka + 1, 3 * ka + 2};
++#pragma unroll
++    for (int g = 0; g < 2; ++g) {
++        const int t0    = 8 * lane + 4 * g;
++        const int end   = (t0 + 4) * ka + (t0 + 4) / 2; // end bit of the group's last window
++        int begin       = end - span;
++        if (begin < 0) { begin += total; }
++        const int w0    = begin >> 5;
++        const int shift = begin & 31;
++        const int w1    = (w0 + 1 == words) ? 0 : w0 + 1;
++        const std::uint32_t field = __funnelshift_r(tile[w0], tile[w1], shift);
++#pragma unroll
++        for (int j = 0; j < 4; ++j) {
++            d[4 * g + j] = mul1_value(static_cast<std::uint16_t>((field >> off[j]) & 0xFFFFU));
++        }
++    }
++}
++
++
++// One lane's view of a 16x16 trellis tile at any rate: the eight codebook values d[r] of states
++// 8*lane + r, which are the m16n8k16 B-fragment elements (d[0..3] feed the first n8 half, d[4..7]
++// the second). The per-lane window offsets of the even rates are resolved once at construction.
++// Raw tile words held in registers between the load and the decode.
++struct Exl3TileWords {
++    std::uint32_t w[4];
++};
++
++struct Exl3TileDecoder {
++    int half_bits;
++    int bits;
++    int words;
++    bool fast; // even rate: eight windows from two 64-bit funnel reads
++    bool half_fast; // odd rate with a 32-bit field per four windows (exl3_half_fast)
++    bool prefetchable; // the tile words this lane reads are fixed by (lane, rate): load_words applies
++    int wlo0 = 0, wn0 = 0, sft0 = 0, wlo1 = 0, wn1 = 0, sft1 = 0;
++
++    __device__ __forceinline__ Exl3TileDecoder(int half_bits_in, int lane)
++        : half_bits(half_bits_in), bits(half_bits_in >> 1), words(4 * half_bits_in),
++          fast((half_bits_in & 1) == 0), half_fast(exl3_half_fast(half_bits_in)),
++          prefetchable(half_bits_in == 8 || ((half_bits_in & 1) == 0) || exl3_half_fast(half_bits_in)) {
++        if (fast && bits != 4) {
++            const int total = words * 32;
++            const int s0    = ((8 * lane + 1) * bits - 16 + total) % total;
++            const int s1    = ((8 * lane + 5) * bits - 16 + total) % total;
++            wlo0            = s0 >> 5;
++            sft0            = s0 & 31;
++            wn0             = (wlo0 + 1 == words) ? 0 : wlo0 + 1;
++            wlo1            = s1 >> 5;
++            sft1            = s1 & 31;
++            wn1             = (wlo1 + 1 == words) ? 0 : wlo1 + 1;
++        } else if (half_fast) {
++            // Two 4-window fields (see exl3_windows_half), each from one funnel shift of two words.
++            const int ka    = half_bits >> 1;
++            const int span  = 18 + 3 * ka;
++            const int total = words * 32;
++            for (int g = 0; g < 2; ++g) {
++                const int t0  = 8 * lane + 4 * g;
++                const int end = (t0 + 4) * ka + (t0 + 4) / 2;
++                int begin     = end - span;
++                if (begin < 0) { begin += total; }
++                const int w0 = begin >> 5;
++                const int w1 = (w0 + 1 == words) ? 0 : w0 + 1;
++                if (g == 0) {
++                    wlo0 = w0;
++                    wn0  = w1;
++                    sft0 = begin & 31;
++                } else {
++                    wlo1 = w0;
++                    wn1  = w1;
++                    sft1 = begin & 31;
++                }
++            }
++        }
++    }
++
++    // `tile` is the tile's 16*half_bits bytes, 4-byte aligned.
++    __device__ __forceinline__ void decode(const std::uint8_t* tile, int lane, float d[8]) const {
++        const auto* tile32 = reinterpret_cast<const std::uint32_t*>(tile);
++        if (half_bits == 8) {
++            exl3_windows_4bit(tile32, lane, d);
++        } else if (fast) {
++            const unsigned long long w0 =
++                (static_cast<unsigned long long>(tile32[wn0]) << 32) | tile32[wlo0];
++            const unsigned long long w1 =
++                (static_cast<unsigned long long>(tile32[wn1]) << 32) | tile32[wlo1];
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                d[i] = mul1_value(static_cast<std::uint16_t>((w0 >> (sft0 + bits * i)) & 0xFFFFU));
++            }
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                d[4 + i] =
++                    mul1_value(static_cast<std::uint16_t>((w1 >> (sft1 + bits * i)) & 0xFFFFU));
++            }
++        } else if (exl3_half_fast(half_bits)) {
++            exl3_windows_half(tile32, lane, half_bits, d);
++        } else {
++#pragma unroll
++            for (int r = 0; r < 8; ++r) { d[r] = mul1_value(tile_state(tile, half_bits, 8 * lane + r)); }
++        }
++    }
++
++    // The words one lane reads of a tile at a prefetchable rate: the 4-bit rate (kHB == 8) reads its
++    // own word and its circular predecessor; other even rates read the four words of their two
++    // 64-bit funnel windows. Loading them ahead of the decode lets many tiles' loads overlap.
++    template <int kHB>
++    __device__ __forceinline__ Exl3TileWords load_words(const std::uint8_t* tile, int lane) const {
++        const auto* tile32 = reinterpret_cast<const std::uint32_t*>(tile);
++        Exl3TileWords r{};
++        if constexpr (kHB == 8) {
++            r.w[0] = tile32[lane];
++            r.w[1] = tile32[(lane + 31) & 31];
++        } else {
++            r.w[0] = tile32[wlo0];
++            r.w[1] = tile32[wn0];
++            r.w[2] = tile32[wlo1];
++            r.w[3] = tile32[wn1];
++        }
++        return r;
++    }
++
++    template <int kHB>
++    __device__ __forceinline__ void decode_words(const Exl3TileWords& r, float d[8]) const {
++        if constexpr (kHB == 8) {
++            const std::uint32_t b = r.w[0];
++            const std::uint32_t s = __funnelshift_r(r.w[1], b, 20);
++            d[0] = mul1_value(static_cast<std::uint16_t>(s & 0xFFFFU));
++            d[1] = mul1_value(static_cast<std::uint16_t>((s >> 4) & 0xFFFFU));
++            d[2] = mul1_value(static_cast<std::uint16_t>((s >> 8) & 0xFFFFU));
++            d[3] = mul1_value(static_cast<std::uint16_t>(b & 0xFFFFU));
++            d[4] = mul1_value(static_cast<std::uint16_t>((b >> 4) & 0xFFFFU));
++            d[5] = mul1_value(static_cast<std::uint16_t>((b >> 8) & 0xFFFFU));
++            d[6] = mul1_value(static_cast<std::uint16_t>((b >> 12) & 0xFFFFU));
++            d[7] = mul1_value(static_cast<std::uint16_t>((b >> 16) & 0xFFFFU));
++        } else if (half_fast) {
++            const int ka     = half_bits >> 1;
++            const int off[4] = {0, ka + 1, 2 * ka + 1, 3 * ka + 2};
++            const std::uint32_t f0 = __funnelshift_r(r.w[0], r.w[1], sft0);
++            const std::uint32_t f1 = __funnelshift_r(r.w[2], r.w[3], sft1);
++#pragma unroll
++            for (int j = 0; j < 4; ++j) {
++                d[j]     = mul1_value(static_cast<std::uint16_t>((f0 >> off[j]) & 0xFFFFU));
++                d[4 + j] = mul1_value(static_cast<std::uint16_t>((f1 >> off[j]) & 0xFFFFU));
++            }
++        } else {
++            const unsigned long long w0 = (static_cast<unsigned long long>(r.w[1]) << 32) | r.w[0];
++            const unsigned long long w1 = (static_cast<unsigned long long>(r.w[3]) << 32) | r.w[2];
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                d[i] = mul1_value(static_cast<std::uint16_t>((w0 >> (sft0 + bits * i)) & 0xFFFFU));
++            }
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                d[4 + i] =
++                    mul1_value(static_cast<std::uint16_t>((w1 >> (sft1 + bits * i)) & 0xFFFFU));
++            }
++        }
++    }
++};
++
++} // namespace ninfer::ops::detail
+diff --git a/src/ops/linear/exl3/exl3_dispatch.cu b/src/ops/linear/exl3/exl3_dispatch.cu
+new file mode 100644
+index 0000000000000000000000000000000000000000..710220aa3e27829dcd69964cfa8f80f7db5eaa9f
+--- /dev/null
++++ b/src/ops/linear/exl3/exl3_dispatch.cu
+@@ -0,0 +1,763 @@
++// EXL3 mul1 linear decode. Correctness-first SIMT implementation of the stored reconstruction:
++//
++//   W[n,k] = su[k] · sv[n] · (H128 · Z · H128)[k,n],   out[n,t] = Σ_k W[n,k] x[k,t]
++//
++// A first kernel scales the activation rows by su and applies the input Hadamard over K. A second
++// kernel contracts the decoded trellis with that rotated activation, applies the output Hadamard
++// over N, and scales by sv. The 1/sqrt(128) factor of each Hadamard is folded into one 1/128 at the
++// end. This is the "simple correct" M3 route; M4 replaces it with MMA kernels.
++
++#include "ops/linear/exl3/exl3_dispatch.h"
++#include "ops/linear/exl3/exl3_decode.cuh"
++
++#include "core/device.h"
++#include "ops/common/memory.cuh"
++#include "ops/common/mma.cuh"
++
++#include <cuda_bf16.h>
++#include <cuda_runtime.h>
++
++#include <algorithm>
++#include <cstdint>
++#include <stdexcept>
++
++namespace ninfer::ops::detail {
++namespace {
++
++
++// The contraction kernels decode a trellis window per weight, so they are latency-bound rather
++// than DRAM-bound: NCU shows them register-limited at 2 blocks/SM (about 16% occupancy, SMs active
++// 8% of elapsed cycles). launch_bounds makes nvcc spend registers on occupancy instead, which is
++// the whole lever for decode and prefill alike. The two families peak differently -- the GEMV wants
++// 5 blocks/SM and the MMA 6, where a tighter cap starts spilling its accumulators -- so they carry
++// separate targets.
++constexpr int kExl3Threads        = 256;
++constexpr int kExl3GemvMinBlocks = 6;
++// The MMA block keeps a [2][TILE_T/16][4] FP32 accumulator per thread; the 6-block register budget
++// (42 registers) cannot hold it and ptxas spills to local memory, so the register target is 3
++// blocks (85 registers) and the 16 KiB shared footprint leaves room for more if registers allow.
++// Measured: at 4 blocks the accumulator no longer fits and prefill falls to 832 tok/s from 1,420.
++constexpr int kExl3MmaTarget     = 3;
++
++// In-place unnormalized 128-point Sylvester Hadamard over 128 shared floats; all 128 threads join.
++__device__ __forceinline__ void butterfly128(float* s, int lane) {
++    for (int stride = 1; stride < 128; stride <<= 1) {
++        const float a = s[lane];
++        const float b = s[lane ^ stride];
++        __syncthreads();
++        s[lane] = (lane & stride) ? (b - a) : (a + b);
++        __syncthreads();
++    }
++}
++
++// u[k,t] = BF16(H128(su[k] * x[k,t])) over 128-blocks of k. u is BF16 scratch [K,T] in the same
++// column-major order as the caller's tensors (dim 0 is contiguous). The Hadamard runs in FP32 and
++// rounds once on store: every contraction consumes a BF16 A operand (the MMA atoms are BF16, and
++// the GEMV rounds on pack), so a FP32 stage would only round later while costing twice the scratch
++// traffic and, in the MMA, a bank-conflicted strided A read.
++__global__ void exl3_input_transform(const __nv_bfloat16* __restrict__ x,
++                                     const float* __restrict__ su, __nv_bfloat16* __restrict__ u,
++                                     int k_extent, int columns) {
++    const int block = blockIdx.x;
++    const int t     = blockIdx.y;
++    const int lane  = threadIdx.x;
++    const int k     = block * 128 + lane;
++    if (k >= k_extent) { return; }
++    __shared__ float s[128];
++    s[lane] = su[k] * __bfloat162float(x[k + static_cast<std::size_t>(t) * k_extent]);
++    __syncthreads();
++    butterfly128(s, lane);
++    u[static_cast<std::size_t>(t) * k_extent + k] = __float2bfloat16(s[lane]);
++}
++
++// Decode contraction: one column, so parallelism comes from splitting K across the grid. A warp owns
++// one 16-row trellis tile (n = 16w..16w+15) and lane L decodes the eight windows t = 8L..8L+7, which
++// are the m16n8k16 B-fragment windows: for 4-bit rates that is exactly one 32-bit word per lane, so
++// the tile loads are coalesced instead of scattered. The lane's four h=0 windows sum into n = L/4 and
++// the four h=1 windows into n = L/4+8; a four-lane shuffle folds the k-split and one lane per n
++// atomically adds into a small FP32 buffer. A second kernel applies the 128-point output Hadamard.
++constexpr int kExl3GemvSplits = 32;
++
++// Seeded per-element Gaussian noise for the sensitivity probe. A 32-bit hash of (n, k, seed) drives
++// Box-Muller, so a trellis decode is exact but the perturbation is repeatable and independent of the
++// launch geometry.
++__device__ __forceinline__ float probe_gaussian(std::uint32_t n, std::uint32_t k,
++                                                std::uint32_t seed) {
++    const auto hash = [](std::uint32_t x) {
++        x ^= x >> 16;
++        x *= 0x7feb352dU;
++        x ^= x >> 15;
++        x *= 0x846ca68bU;
++        x ^= x >> 16;
++        return x;
++    };
++    const std::uint32_t h0 = hash(n * 0x9e3779b9U ^ k ^ seed);
++    const std::uint32_t h1 = hash(h0 ^ 0x85ebca6bU);
++    const float u0         = (static_cast<float>(h0 >> 8) + 0.5F) * (1.0F / 16777216.0F);
++    const float u1         = (static_cast<float>(h1 >> 8) + 0.5F) * (1.0F / 16777216.0F);
++    return sqrtf(-2.0F * logf(u0)) * cosf(6.283185307179586F * u1);
++}
++constexpr int kExl3GemvMaxM   = 8; // largest m the per-column GEMV beats the tiled MMA at
++
++// T_MAX columns share one decode of the trellis tile: the weight is the expensive operand, and the
++// verify pass runs the same weight against every drafted token. Each lane keeps T_MAX x 8
++// accumulators (its two n8 groups by four k positions), which the tensor-core GEMV of the reference
++// gets from the C fragment; here it is 8 floats per column.
++// `kProbe` is a compile-time switch. The sensitivity probe's per-window Gaussian is dead weight in
++// the served path, where `probe_sigma` is zero: keeping it in the same instantiation costs a uniform
++// branch per k-tile per column and, worse, the probe's temporaries sit in the kernel's register
++// budget, which is what caps this GEMV at five blocks per SM.
++// `kRate4Bit` pins the 4-bit decode, which is the bulk of the model's projections by call count. As
++// a template parameter it removes the per-k-tile rate branch chain from the hot loop and keeps the
++// wide rates' six window registers out of this instantiation's register budget.
++template <int T_MAX, bool kProbe, bool kRate4Bit>
++__global__ void __launch_bounds__(kExl3Threads, kExl3GemvMinBlocks) exl3_gemv_split(
++    const __nv_bfloat16* __restrict__ u, const std::uint8_t* __restrict__ trellis,
++    float* __restrict__ partial, int k_extent, int n_extent, int half_bits, int columns,
++    float probe_sigma, std::uint32_t probe_seed) {
++    if constexpr (!kProbe) {
++        (void)probe_sigma;
++        (void)probe_seed;
++    }
++    const int lane    = threadIdx.x & 31;
++    const int warp    = threadIdx.x >> 5;
++    const int n_tile  = blockIdx.x * 8 + warp;
++    const int n_base  = n_tile * 16;
++    if (n_base >= n_extent) { return; }
++    const int kt_tiles = k_extent / 16;
++    const int splits   = gridDim.y;
++    const int per      = (kt_tiles + splits - 1) / splits;
++    const int kt_begin = blockIdx.y * per;
++    const int kt_end   = min(kt_tiles, kt_begin + per);
++    const int bits  = half_bits >> 1;
++    const int words = 4 * half_bits;
++    const bool fast = (half_bits & 1) == 0;
++    if constexpr (kRate4Bit) {
++        (void)bits;
++        (void)words;
++        (void)fast;
++    }
++
++    // Even rates resolve the two four-window groups with two lane-constant funnel shifts (exllamav3's
++    // dq4 applied twice); the word indices and shifts do not depend on the k-tile.
++    int wlo0 = 0, wn0 = 0, sft0 = 0, wlo1 = 0, wn1 = 0, sft1 = 0;
++    if constexpr (!kRate4Bit) {
++        if (fast && bits != 4) {
++            const int total = words * 32;
++            const int s0    = ((8 * lane + 1) * bits - 16 + total) % total;
++            const int s1    = ((8 * lane + 5) * bits - 16 + total) % total;
++            wlo0            = s0 >> 5;
++            sft0            = s0 & 31;
++            wn0             = (wlo0 + 1 == words) ? 0 : wlo0 + 1;
++            wlo1            = s1 >> 5;
++            sft1            = s1 & 31;
++            wn1             = (wlo1 + 1 == words) ? 0 : wlo1 + 1;
++        }
++    }
++
++    float a0[T_MAX][4];
++    float a1[T_MAX][4];
++#pragma unroll
++    for (int t = 0; t < T_MAX; ++t)
++#pragma unroll
++        for (int i = 0; i < 4; ++i) {
++            a0[t][i] = 0.0F;
++            a1[t][i] = 0.0F;
++        }
++
++    const std::uint8_t* tile_base =
++        trellis + static_cast<std::size_t>(n_tile) * kt_tiles * (16 * half_bits);
++    for (int kt = kt_begin; kt < kt_end; ++kt) {
++        const std::uint8_t* tile8 =
++            tile_base + static_cast<std::size_t>(kt) * (16 * half_bits);
++        const std::uint32_t* tile32 = reinterpret_cast<const std::uint32_t*>(tile8);
++        float d[8];
++        if constexpr (kRate4Bit) {
++            exl3_windows_4bit(tile32, lane, d);
++        } else if (half_bits == 8) {
++            exl3_windows_4bit(tile32, lane, d);
++        } else if (fast) {
++            // A four-window group can span more than 32 bits at 5 and 6 bits per weight, so resolve it
++            // from a 64-bit window over the lane's word and its successor.
++            const unsigned long long w0 =
++                (static_cast<unsigned long long>(tile32[wn0]) << 32) | tile32[wlo0];
++            const unsigned long long w1 =
++                (static_cast<unsigned long long>(tile32[wn1]) << 32) | tile32[wlo1];
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                d[i] = mul1_value(
++                    static_cast<std::uint16_t>((w0 >> (sft0 + bits * i)) & 0xFFFFU));
++            }
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                d[4 + i] = mul1_value(
++                    static_cast<std::uint16_t>((w1 >> (sft1 + bits * i)) & 0xFFFFU));
++            }
++        } else if (exl3_half_fast(half_bits)) {
++            exl3_windows_half(tile32, lane, half_bits, d);
++        } else {
++#pragma unroll
++            for (int r = 0; r < 8; ++r) {
++                d[r] = mul1_value(tile_state(tile8, half_bits, 8 * lane + r));
++            }
++        }
++        if constexpr (kProbe) {
++            if (probe_sigma > 0.0F) {
++#pragma unroll
++                for (int r = 0; r < 8; ++r) {
++                    const int nn = n_base + (lane >> 2) + 8 * (r >> 2);
++                    const int kk = kt * 16 + 2 * (lane & 3) + (r & 1) + 8 * ((r >> 1) & 1);
++                    d[r] += probe_sigma * probe_gaussian(static_cast<std::uint32_t>(nn),
++                                                         static_cast<std::uint32_t>(kk),
++                                                         probe_seed);
++                }
++            }
++        }
++#pragma unroll
++        for (int t = 0; t < T_MAX; ++t) {
++            const bool active = t < columns;
++            const __nv_bfloat16* uk =
++                u + static_cast<std::size_t>(active ? t : 0) * k_extent + kt * 16;
++            // The lane's four k positions are the adjacent pairs 2c, 2c+1 and 2c+8, 2c+9, so one
++            // 32-bit BF16 pair load serves each half of the fragment instead of two 16-bit halves:
++            // two latency-bearing loads per column instead of four, on a kernel NCU calls latency
++            // bound rather than pipe bound.
++            const int c = 2 * (lane & 3);
++            const __nv_bfloat162 lo = *reinterpret_cast<const __nv_bfloat162*>(uk + c);
++            const __nv_bfloat162 hi = *reinterpret_cast<const __nv_bfloat162*>(uk + c + 8);
++            const float op[4] = {active ? __low2float(lo) : 0.0F, active ? __high2float(lo) : 0.0F,
++                                 active ? __low2float(hi) : 0.0F,
++                                 active ? __high2float(hi) : 0.0F};
++            a0[t][0] = fmaf(d[0], op[0], a0[t][0]);
++            a0[t][1] = fmaf(d[1], op[1], a0[t][1]);
++            a0[t][2] = fmaf(d[2], op[2], a0[t][2]);
++            a0[t][3] = fmaf(d[3], op[3], a0[t][3]);
++            a1[t][0] = fmaf(d[4], op[0], a1[t][0]);
++            a1[t][1] = fmaf(d[5], op[1], a1[t][1]);
++            a1[t][2] = fmaf(d[6], op[2], a1[t][2]);
++            a1[t][3] = fmaf(d[7], op[3], a1[t][3]);
++        }
++    }
++#pragma unroll
++    for (int t = 0; t < T_MAX; ++t) {
++        if (t >= columns) { break; }
++        float acc0 = (a0[t][0] + a0[t][1]) + (a0[t][2] + a0[t][3]);
++        float acc1 = (a1[t][0] + a1[t][1]) + (a1[t][2] + a1[t][3]);
++        acc0 += __shfl_down_sync(0xFFFFFFFFU, acc0, 2);
++        acc0 += __shfl_down_sync(0xFFFFFFFFU, acc0, 1);
++        acc1 += __shfl_down_sync(0xFFFFFFFFU, acc1, 2);
++        acc1 += __shfl_down_sync(0xFFFFFFFFU, acc1, 1);
++        if ((lane & 3) == 0) {
++            const int g = lane >> 2;
++            float* column = partial + static_cast<std::size_t>(t) * n_extent;
++            atomicAdd(&column[n_base + g], acc0);
++            atomicAdd(&column[n_base + g + 8], acc1);
++        }
++    }
++}
++
++__global__ void exl3_gemv_finish(const float* __restrict__ partial, const float* __restrict__ sv,
++                                 __nv_bfloat16* __restrict__ out, int n_extent) {
++    const int lane = threadIdx.x;
++    const int n    = blockIdx.x * 128 + lane;
++    if (n >= n_extent) { return; }
++    __shared__ float s[128];
++    s[lane] = partial[n];
++    __syncthreads();
++    butterfly128(s, lane);
++    out[n] = __float2bfloat16(s[lane] * sv[n] * (1.0F / 128.0F));
++}
++
++// Two bf16 values in the 32-bit register the MMA atom consumes.
++__device__ __forceinline__ std::uint32_t pack_bf16x2(float lo, float hi) {
++    const __nv_bfloat162 value = __halves2bfloat162(__float2bfloat16(lo), __float2bfloat16(hi));
++    std::uint32_t bits;
++    memcpy(&bits, &value, sizeof(bits));
++    return bits;
++}
++
++// The same register for a pair that is already packed in storage: an aligned 32-bit load instead of
++// two converts and a permute. Both operands are BF16 in memory, so no rounding happens here.
++__device__ __forceinline__ std::uint32_t load_bf16x2(const __nv_bfloat16* pair) {
++    const __nv_bfloat162 value = *reinterpret_cast<const __nv_bfloat162*>(pair);
++    std::uint32_t bits;
++    memcpy(&bits, &value, sizeof(bits));
++    return bits;
++}
++
++// The shared helper issues the same bf16 m16n8k16 instruction on sm_80+ and the emulated forms
++// on the sm_70 and sm_75 tiers, which have no bf16 tensor-core mma.
++__device__ __forceinline__ void mma_m16n8k16(float d[4], const std::uint32_t a[4],
++                                             const std::uint32_t b[2]) {
++    ops::mma_bf16(d[0], d[1], d[2], d[3], a[0], a[1], a[2], a[3], b[0], b[1]);
++}
++
++// Small-m tensor-core GEMV: the verify pass runs one weight against up to eight drafted tokens, so
++// the m16n8k16 A fragment carries the tokens and one C fragment carries all of them. The reference's
++// exl3_gemv_kernel does exactly this for 2 <= m <= 8. The FFMA alternative needs eight accumulators
++// per column (128 registers at four columns, halving occupancy), which is why it loses.
++__global__ void __launch_bounds__(kExl3Threads, kExl3GemvMinBlocks) exl3_gemv_mma(
++    const __nv_bfloat16* __restrict__ u, const std::uint8_t* __restrict__ trellis,
++    float* __restrict__ partial, int k_extent, int n_extent, int half_bits, int columns) {
++    const int lane    = threadIdx.x & 31;
++    const int warp    = threadIdx.x >> 5;
++    const int n_tile  = blockIdx.x * 8 + warp;
++    const int n_base  = n_tile * 16;
++    if (n_base >= n_extent) { return; }
++    const int kt_tiles = k_extent / 16;
++    const int splits   = gridDim.y;
++    const int per      = (kt_tiles + splits - 1) / splits;
++    const int kt_begin = blockIdx.y * per;
++    const int kt_end   = min(kt_tiles, kt_begin + per);
++    const int bits     = half_bits >> 1;
++    const int words    = 4 * half_bits;
++    const bool fast    = (half_bits & 1) == 0;
++
++    int wlo0 = 0, wn0 = 0, sft0 = 0, wlo1 = 0, wn1 = 0, sft1 = 0;
++    if (fast && bits != 4) {
++        const int total = words * 32;
++        const int s0    = ((8 * lane + 1) * bits - 16 + total) % total;
++        const int s1    = ((8 * lane + 5) * bits - 16 + total) % total;
++        wlo0            = s0 >> 5;
++        sft0            = s0 & 31;
++        wn0             = (wlo0 + 1 == words) ? 0 : wlo0 + 1;
++        wlo1            = s1 >> 5;
++        sft1            = s1 & 31;
++        wn1             = (wlo1 + 1 == words) ? 0 : wlo1 + 1;
++    }
++
++    // A fragment: rows are the drafted tokens (only rows < columns exist), the k pair is the lane's.
++    const int row = lane >> 2;
++    const int col = (lane & 3) * 2;
++    float c[2][4] = {{0.0F, 0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F, 0.0F}};
++
++    const std::uint8_t* tile_base =
++        trellis + static_cast<std::size_t>(n_tile) * kt_tiles * (16 * half_bits);
++    for (int kt = kt_begin; kt < kt_end; ++kt) {
++        const std::uint8_t* tile8 =
++            tile_base + static_cast<std::size_t>(kt) * (16 * half_bits);
++        const std::uint32_t* tile32 = reinterpret_cast<const std::uint32_t*>(tile8);
++        float d[8];
++        if (half_bits == 8) {
++            exl3_windows_4bit(tile32, lane, d);
++        } else if (fast) {
++            const unsigned long long w0 =
++                (static_cast<unsigned long long>(tile32[wn0]) << 32) | tile32[wlo0];
++            const unsigned long long w1 =
++                (static_cast<unsigned long long>(tile32[wn1]) << 32) | tile32[wlo1];
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                d[i] = mul1_value(
++                    static_cast<std::uint16_t>((w0 >> (sft0 + bits * i)) & 0xFFFFU));
++            }
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                d[4 + i] = mul1_value(
++                    static_cast<std::uint16_t>((w1 >> (sft1 + bits * i)) & 0xFFFFU));
++            }
++        } else if (exl3_half_fast(half_bits)) {
++            exl3_windows_half(tile32, lane, half_bits, d);
++        } else {
++#pragma unroll
++            for (int r = 0; r < 8; ++r) {
++                d[r] = mul1_value(tile_state(tile8, half_bits, 8 * lane + r));
++            }
++        }
++        const std::uint32_t b[2][2] = {{pack_bf16x2(d[0], d[1]), pack_bf16x2(d[2], d[3])},
++                                       {pack_bf16x2(d[4], d[5]), pack_bf16x2(d[6], d[7])}};
++        std::uint32_t a[4] = {0U, 0U, 0U, 0U};
++        if (row < columns) {
++            const __nv_bfloat16* urow =
++                u + static_cast<std::size_t>(row) * k_extent + kt * 16;
++            a[0] = load_bf16x2(urow + col);
++            a[2] = load_bf16x2(urow + col + 8);
++        }
++        mma_m16n8k16(c[0], a, b[0]);
++        mma_m16n8k16(c[1], a, b[1]);
++    }
++    if (row < columns) {
++        float* out = partial + static_cast<std::size_t>(row) * n_extent + n_base + col;
++        atomicAdd(out, c[0][0]);
++        atomicAdd(out + 1, c[0][1]);
++        atomicAdd(out + 8, c[1][0]);
++        atomicAdd(out + 9, c[1][1]);
++    }
++}
++
++// Tensor-core contraction. A block covers one 128-row Hadamard block and up to TILE_T tokens.
++// The stored tile order is the m16n8k16 B-fragment order, so each warp decodes the trellis tile for
++// its own 16 output rows straight into its two B fragments with no shuffle: every lane reads and
++// converts its eight windows exactly once per k-tile, instead of re-reading a full [TILE_T][16]
++// A tile from shared memory for every (fragment, h) pair after a whole-block barrier. The A stage
++// is a double-buffered __pipeline copy (the next k-tile overlaps the current mma chain). A first
++// version of this kernel shared one decoded B across the whole block and measured 2 blocks/SM and
++// 18.8 ms per [5120,34816]x64 call at 4.0 bpw; the per-warp form reaches 6 blocks/SM and 3.2 ms on
++// the same shape.
++constexpr int kExl3MmaN       = 128;
++constexpr int kExl3MmaThreads = 256;
++constexpr int kExl3MmaT       = 64; // columns per block at large T
++constexpr int kExl3MmaSmallT  = 16; // columns per block at small T, so the grid still has blocks
++
++// Double-buffered A staging via __pipeline: the next k-tile's 4 KiB copy overlaps the current
++// mma chain, so the shared-memory read and the u load stop serializing on the same barrier pair.
++constexpr int kExl3AStages = 2;
++
++// TILE_T is a multiple of 16 (the m16n8k16 m). A smaller tile gives the grid more blocks when the
++// column count is small, which is the difference between an occupancy-starved and a busy kernel.
++//
++// `kProbe` and `kRate4Bit` are compile-time switches for the two branches that otherwise sit in the
++// hot K loop: the sensitivity probe's per-window Gaussian (never taken in service) and the
++// half_bits-class chain, which also carries the wide even rates' eight-register window plan. The
++// 4-bit rate is the bulk of the model, and nothing else needs `plan`, so the served 4-bit
++// instantiation carries neither.
++template <int TILE_T, bool kProbe = true, bool kRate4Bit = false>
++__global__ void __launch_bounds__(kExl3Threads, kExl3MmaTarget)
++exl3_mma(const __nv_bfloat16* __restrict__ u, const std::uint8_t* __restrict__ trellis,
++         const float* __restrict__ sv, __nv_bfloat16* __restrict__ out,
++         int k_extent, int n_extent, int columns, int half_bits,
++         float probe_sigma, std::uint32_t probe_seed) {
++    constexpr int MT = TILE_T / 16;
++    if constexpr (!kProbe) {
++        (void)probe_sigma;
++        (void)probe_seed;
++    }
++    const int n_base   = blockIdx.x * kExl3MmaN;
++    const int t0       = blockIdx.y * TILE_T;
++    const int lane     = threadIdx.x & 31;
++    const int warp     = threadIdx.x >> 5;
++    const int t_count  = min(TILE_T, columns - t0);
++    const int n_tile   = blockIdx.x * 8 + warp;
++    const int kt_tiles = k_extent / 16;
++    const int bits     = half_bits >> 1;
++    const int words    = 4 * half_bits;
++    const bool fast    = (half_bits & 1) == 0;
++
++    // A is staged as BF16 split into two k-planes: plane p holds k = 8p..8p+7 of the k-tile, so a
++    // plane row is 16 bytes (four shared banks) and the eight rows a fragment spans land on the 32
++    // banks one word apart. Each of a lane's four A-fragment registers is then a single 32-bit load
++    // with no conflict. Staging FP32 in one 16-wide row instead cost a measured 3.9-way conflict on
++    // every A load -- 74% of this kernel's shared wavefronts.
++    __shared__ __nv_bfloat16 us[kExl3AStages][2][TILE_T][8];
++    // One 16-row sub-tile of pre-Hadamard outputs, reused across the MT rounds of the epilogue.
++    // A full [TILE_T][128] buffer would double the block's footprint and cut occupancy in half.
++    __shared__ float vs[16][kExl3MmaN];
++    float acc[2][MT][4];
++#pragma unroll
++    for (int h = 0; h < 2; ++h)
++#pragma unroll
++        for (int m = 0; m < MT; ++m)
++#pragma unroll
++            for (int c = 0; c < 4; ++c) { acc[h][m][c] = 0.0F; }
++
++    const std::size_t tile_stride = static_cast<std::size_t>(16 * half_bits);
++    const std::uint8_t* warp_tile =
++        trellis + static_cast<std::size_t>(n_tile) * kt_tiles * tile_stride;
++
++    // The wide even rates resolve a window pair from a lane-constant word/shift plan; the 4-bit
++    // instantiation decodes the tile with `exl3_windows_4bit` and does not carry its eight registers.
++    std::uint16_t plan[8];
++    if constexpr (kRate4Bit) {
++        (void)plan;
++        (void)bits;
++        (void)words;
++        (void)fast;
++    } else {
++#pragma unroll
++        for (int i = 0; i < 8; ++i) { plan[i] = exl3_window(8 * lane + i, bits, words); }
++    }
++
++    // One [TILE_T][16] BF16 tile copies as TILE_T*2 16-byte copies (all 256 threads at
++    // TILE_T = 64): copy 2c + p fetches token column c's plane p, i.e. its eight k values
++    // 8p..8p+7, as one contiguous 16-byte row. Columns past t_count zero-fill, which the mma
++    // consumes as padding.
++    const auto stage_tile = [&](int tile) {
++        const int copy_id = static_cast<int>(threadIdx.x);
++        if (copy_id < TILE_T * 2) {
++            const int src_col = copy_id >> 1;      // 0..TILE_T-1: token column
++            const int plane   = copy_id & 1;       // k 0..7 or 8..15 of the k-tile
++            const int bytes   = (src_col < t_count) ? 16 : 0;
++            const __nv_bfloat16* source =
++                u + static_cast<std::size_t>(t0 + src_col) * k_extent + tile * 16 + plane * 8;
++            cp_async_zfill<16>(&us[tile & (kExl3AStages - 1)][plane][src_col][0], source, bytes);
++        }
++    };
++
++    // Iteration kt consumes the group staged for kt and issues the stage for kt + 1, whose DRAM
++    // latency hides behind kt's mma chain. The wait leaves only the groups issued after kt's
++    // pending, so kt's stage is complete; the trailing barrier keeps the next stage from
++    // overwriting a slot a warp is still reading. A first version staged and waited inside the
++    // same iteration with wait_group 0, which serialized every k-tile on its own load -- and,
++    // missing the wait at kt = 0, let the first mma read uninitialized shared memory.
++    if (kt_tiles > 0) { stage_tile(0); }
++    cp_commit();
++    for (int kt = 0; kt < kt_tiles; ++kt) {
++        // When a new stage joins the queue the wait can leave one group outstanding (the one just
++        // staged); the last iteration stages nothing, so its own tile is the only group left and
++        // the wait must drain it completely before the mma reads the slot.
++        if (kt + 1 < kt_tiles) { stage_tile(kt + 1); }
++        cp_commit();
++        if (kt + 1 < kt_tiles) { cp_wait<kExl3AStages - 1>(); } else { cp_wait<0>(); }
++        __syncthreads();
++
++        const int slot = kt & (kExl3AStages - 1);
++
++        const std::uint8_t* tile8 = warp_tile + static_cast<std::size_t>(kt) * tile_stride;
++        const std::uint32_t* tile32 = reinterpret_cast<const std::uint32_t*>(tile8);
++        if (!kRate4Bit && fast) {
++#pragma unroll
++            for (int h = 0; h < 2; ++h) {
++                float d[4];
++#pragma unroll
++                for (int i = 0; i < 4; ++i) {
++                    d[i] = exl3_window_value(tile32, plan[4 * h + i], words);
++                }
++                if constexpr (kProbe) {
++                    if (probe_sigma > 0.0F) {
++#pragma unroll
++                        for (int r = 0; r < 4; ++r) {
++                            const int nn = n_base + h * 8 + (lane >> 2);
++                            const int kk = kt * 16 + 2 * (lane & 3) + (r & 1) + 8 * (r >> 1);
++                            d[r] += probe_sigma *
++                                    probe_gaussian(static_cast<std::uint32_t>(nn),
++                                                   static_cast<std::uint32_t>(kk), probe_seed);
++                        }
++                    }
++                }
++                const std::uint32_t b0 = pack_bf16x2(d[0], d[1]);
++                const std::uint32_t b1 = pack_bf16x2(d[2], d[3]);
++                const std::uint32_t b[2] = {b0, b1};
++                // The m16n8k16 A fragment: rows groupID and groupID + 8, the lane's k pair and
++                // its +8 partner. Plane 0 carries k 0..7 and plane 1 k 8..15, so the +8 partner of
++                // a[0]/a[1] is a[2]/a[3] at the same in-plane offset.
++                const int col = (lane & 3) * 2; // bf16 index within a plane row
++                const int grp = lane >> 2;
++#pragma unroll
++                for (int mt = 0; mt < MT; ++mt) {
++                    const int t = mt * 16 + grp;
++                    const std::uint32_t a0 = load_bf16x2(&us[slot][0][t][col]);
++                    const std::uint32_t a1 = load_bf16x2(&us[slot][0][t + 8][col]);
++                    const std::uint32_t a2 = load_bf16x2(&us[slot][1][t][col]);
++                    const std::uint32_t a3 = load_bf16x2(&us[slot][1][t + 8][col]);
++                    const std::uint32_t a[4] = {a0, a1, a2, a3};
++                    mma_m16n8k16(acc[h][mt], a, b);
++                }
++            }
++        } else {
++            float d[8];
++            if constexpr (kRate4Bit) {
++                exl3_windows_4bit(tile32, lane, d);
++            } else if (exl3_half_fast(half_bits)) {
++                exl3_windows_half(tile32, lane, half_bits, d);
++            } else {
++#pragma unroll
++                for (int i = 0; i < 8; ++i) {
++                    d[i] = mul1_value(tile_state(tile8, half_bits, 8 * lane + i));
++                }
++            }
++            if constexpr (kProbe) {
++                if (probe_sigma > 0.0F) {
++#pragma unroll
++                    for (int h = 0; h < 2; ++h) {
++#pragma unroll
++                        for (int r = 0; r < 4; ++r) {
++                            const int nn = n_base + h * 8 + (lane >> 2);
++                            const int kk = kt * 16 + 2 * (lane & 3) + (r & 1) + 8 * (r >> 1);
++                            d[4 * h + r] += probe_sigma * probe_gaussian(
++                                                        static_cast<std::uint32_t>(nn),
++                                                        static_cast<std::uint32_t>(kk), probe_seed);
++                        }
++                    }
++                }
++            }
++            std::uint32_t b[2][2];
++#pragma unroll
++            for (int h = 0; h < 2; ++h) {
++                b[h][0] = pack_bf16x2(d[4 * h + 0], d[4 * h + 1]);
++                b[h][1] = pack_bf16x2(d[4 * h + 2], d[4 * h + 3]);
++            }
++            const int col = (lane & 3) * 2; // bf16 index within a plane row
++            const int grp = lane >> 2;
++#pragma unroll
++            for (int mt = 0; mt < MT; ++mt) {
++                const int t = mt * 16 + grp;
++                const std::uint32_t a0 = load_bf16x2(&us[slot][0][t][col]);
++                const std::uint32_t a1 = load_bf16x2(&us[slot][0][t + 8][col]);
++                const std::uint32_t a2 = load_bf16x2(&us[slot][1][t][col]);
++                const std::uint32_t a3 = load_bf16x2(&us[slot][1][t + 8][col]);
++                const std::uint32_t a[4] = {a0, a1, a2, a3};
++                mma_m16n8k16(acc[0][mt], a, b[0]);
++                mma_m16n8k16(acc[1][mt], a, b[1]);
++            }
++        }
++
++        __syncthreads();
++    }
++    __syncthreads();
++
++    // Publish one 16-row sub-tile at a time, apply the output Hadamard over its 128 columns, and
++    // store, then reuse the buffer for the next sub-tile. Threads 0..127 transform even rows and
++    // 128..255 odd ones; every thread reaches every barrier.
++    const int half_lane = threadIdx.x & 127;
++#pragma unroll
++    for (int mt = 0; mt < MT; ++mt) {
++#pragma unroll
++        for (int h = 0; h < 2; ++h) {
++            const int n0     = (2 * warp + h) * 8 + (lane & 3) * 2;
++            const int t_a    = lane >> 2;
++            vs[t_a][n0]      = acc[h][mt][0];
++            vs[t_a][n0 + 1]  = acc[h][mt][1];
++            vs[t_a + 8][n0]  = acc[h][mt][2];
++            vs[t_a + 8][n0 + 1] = acc[h][mt][3];
++        }
++        __syncthreads();
++        for (int pair = 0; pair < 8; ++pair) {
++            const int t_even = 2 * pair;
++            const int t_odd  = 2 * pair + 1;
++            float* target    = (threadIdx.x < 128) ? &vs[t_even][0] : &vs[t_odd][0];
++            butterfly128(target, half_lane);
++            const int t = (threadIdx.x < 128) ? t_even : t_odd;
++            if (mt * 16 + t < t_count) {
++                const int n = n_base + half_lane;
++                out[n + static_cast<std::size_t>(t0 + mt * 16 + t) * n_extent] =
++                    __float2bfloat16(target[half_lane] * sv[n] * (1.0F / 128.0F));
++            }
++        }
++        __syncthreads();
++    }
++}
++
++} // namespace
++
++void exl3_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
++                   WorkspaceArena& workspace, cudaStream_t stream) {
++    if (policy != LinearPolicy::A16Only) {
++        throw std::invalid_argument("exl3 linear: only A16Only is supported");
++    }
++    if (w.qtype != QType::EXL3_MUL1 || w.layout != QuantLayout::TrellisT16 ||
++        w.input_scales == nullptr || w.scales == nullptr) {
++        throw std::invalid_argument("exl3 linear: weight is not a complete EXL3 parent");
++    }
++    if (w.bitrate_half_bits < 2 || w.bitrate_half_bits > 16) {
++        throw std::invalid_argument("exl3 linear: unsupported bitrate");
++    }
++    if (w.k % 128 != 0 || w.n % 128 != 0) {
++        throw std::invalid_argument("exl3 linear: N and K must be 128-aligned");
++    }
++    const std::int32_t columns = x.ne[1];
++    if (columns <= 0) { throw std::invalid_argument("exl3 linear: T must be positive"); }
++
++    const std::size_t u_bytes =
++        static_cast<std::size_t>(w.k) * static_cast<std::size_t>(columns) * sizeof(__nv_bfloat16);
++    const std::size_t partial_bytes =
++        columns <= kExl3GemvMaxM ? static_cast<std::size_t>(columns) * w.n * sizeof(float) : 0;
++    auto scope               = workspace.scope();
++    const DeviceSpan scratch = workspace.alloc_bytes(u_bytes + partial_bytes, 16);
++    __nv_bfloat16* u         = static_cast<__nv_bfloat16*>(scratch.data);
++    float* partial = reinterpret_cast<float*>(static_cast<std::uint8_t*>(scratch.data) + u_bytes);
++
++    const auto* input = static_cast<const __nv_bfloat16*>(x.data);
++    auto* output      = static_cast<__nv_bfloat16*>(out.data);
++    // The sensitivity probe perturbs one weight's decoded values; it is off unless the registry names
++    // this weight's trellis plane. `probe_sigma` is the per-element standard deviation, so
++    // ||noise||_F = rfn * ||W||_F.
++    const Exl3WeightProbe& probe = exl3_weight_probe();
++    const float probe_sigma =
++        (probe.target == w.qdata && probe.rfn > 0.0F) ? probe.rfn * probe.rms : 0.0F;
++    const std::uint32_t probe_seed = probe.seed;
++    exl3_input_transform<<<dim3(static_cast<unsigned>(w.k / 128), columns), 128, 0, stream>>>(
++        input, static_cast<const float*>(w.input_scales), u, w.k, columns);
++    if (columns > kExl3GemvMaxM) {
++        // A small column count takes the smaller tile so the grid keeps enough blocks to fill the GPU.
++        // The 4-bit rate is pinned for service -- it carries most of the model's projections -- and
++        // the probe instantiation is only entered by `ninfer-sensitivity`.
++        const int mma_half_bits = static_cast<int>(w.bitrate_half_bits);
++        const auto* mma_trellis   = static_cast<const std::uint8_t*>(w.qdata);
++        const auto* mma_scales    = static_cast<const float*>(w.scales);
++        const bool rate4          = mma_half_bits == 8;
++        const bool probe_on       = probe_sigma > 0.0F;
++        if (columns <= 64) {
++            const dim3 tile_grid(static_cast<unsigned>(w.n / 128),
++                                 static_cast<unsigned>((columns + kExl3MmaSmallT - 1) /
++                                                       kExl3MmaSmallT));
++            if (probe_on) {
++                exl3_mma<kExl3MmaSmallT, true, false><<<tile_grid, kExl3MmaThreads, 0, stream>>>(
++                    u, mma_trellis, mma_scales, output, w.k, w.n, columns, mma_half_bits,
++                    probe_sigma, probe_seed);
++            } else if (rate4) {
++                exl3_mma<kExl3MmaSmallT, false, true><<<tile_grid, kExl3MmaThreads, 0, stream>>>(
++                    u, mma_trellis, mma_scales, output, w.k, w.n, columns, mma_half_bits,
++                    probe_sigma, probe_seed);
++            } else {
++                exl3_mma<kExl3MmaSmallT, false, false><<<tile_grid, kExl3MmaThreads, 0, stream>>>(
++                    u, mma_trellis, mma_scales, output, w.k, w.n, columns, mma_half_bits,
++                    probe_sigma, probe_seed);
++            }
++        } else {
++            const dim3 tile_grid(static_cast<unsigned>(w.n / 128),
++                                 static_cast<unsigned>((columns + kExl3MmaT - 1) / kExl3MmaT));
++            if (probe_on) {
++                exl3_mma<kExl3MmaT, true, false><<<tile_grid, kExl3MmaThreads, 0, stream>>>(
++                    u, mma_trellis, mma_scales, output, w.k, w.n, columns, mma_half_bits,
++                    probe_sigma, probe_seed);
++            } else if (rate4) {
++                exl3_mma<kExl3MmaT, false, true><<<tile_grid, kExl3MmaThreads, 0, stream>>>(
++                    u, mma_trellis, mma_scales, output, w.k, w.n, columns, mma_half_bits,
++                    probe_sigma, probe_seed);
++            } else {
++                exl3_mma<kExl3MmaT, false, false><<<tile_grid, kExl3MmaThreads, 0, stream>>>(
++                    u, mma_trellis, mma_scales, output, w.k, w.n, columns, mma_half_bits,
++                    probe_sigma, probe_seed);
++            }
++        }
++    } else {
++        // One decode of every trellis tile serves all columns: the verify pass runs each weight
++        // against every drafted token, and the decode, not the multiply, is the cost. T_MAX = 1
++        // keeps the single-column decode byte-for-byte the same. Splitting K only pays while the grid
++        // is short of blocks; a vocabulary-sized head already has thousands of row blocks, so it takes
++        // one slice and avoids a scheduling- and atomic-bound grid.
++        const int n_blocks = static_cast<int>(w.n / 128);
++        const int splits   = std::min<int>(kExl3GemvSplits, std::max<int>(1, 8192 / n_blocks));
++        const int half_bits = static_cast<int>(w.bitrate_half_bits);
++        const auto* trellis = static_cast<const std::uint8_t*>(w.qdata);
++        CUDA_CHECK(cudaMemsetAsync(partial, 0, partial_bytes, stream));
++        const dim3 grid(static_cast<unsigned>(n_blocks), static_cast<unsigned>(splits));
++        if (columns == 1) {
++            // The 4-bit rate covers most of the model's projections by call count, so pinning it
++            // keeps the rate branch chain and the wide rates' window registers out of that
++            // instantiation; the probe variant is only entered by `ninfer-sensitivity`.
++            const bool rate4 = half_bits == 8;
++            const bool probe = probe_sigma > 0.0F;
++            if (probe) {
++                if (rate4) {
++                    exl3_gemv_split<1, true, true><<<grid, 256, 0, stream>>>(
++                        u, trellis, partial, w.k, w.n, half_bits, 1, probe_sigma, probe_seed);
++                } else {
++                    exl3_gemv_split<1, true, false><<<grid, 256, 0, stream>>>(
++                        u, trellis, partial, w.k, w.n, half_bits, 1, probe_sigma, probe_seed);
++                }
++            } else if (rate4) {
++                exl3_gemv_split<1, false, true><<<grid, 256, 0, stream>>>(
++                    u, trellis, partial, w.k, w.n, half_bits, 1, probe_sigma, probe_seed);
++            } else {
++                exl3_gemv_split<1, false, false><<<grid, 256, 0, stream>>>(
++                    u, trellis, partial, w.k, w.n, half_bits, 1, probe_sigma, probe_seed);
++            }
++        } else {
++            exl3_gemv_mma<<<grid, 256, 0, stream>>>(u, trellis, partial, w.k, w.n, half_bits,
++                                                    columns);
++        }
++        for (int t = 0; t < columns; ++t) {
++            exl3_gemv_finish<<<dim3(static_cast<unsigned>(w.n / 128)), 128, 0, stream>>>(
++                partial + static_cast<std::size_t>(t) * w.n, static_cast<const float*>(w.scales),
++                output + static_cast<std::size_t>(t) * w.n, w.n);
++        }
++    }
++    CUDA_CHECK(cudaGetLastError());
++}
++
++Exl3WeightProbe& exl3_weight_probe() {
++    static Exl3WeightProbe probe;
++    return probe;
++}
++
++} // namespace ninfer::ops::detail
+diff --git a/src/ops/linear/exl3/exl3_dispatch.h b/src/ops/linear/exl3/exl3_dispatch.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8547475aa7d784e0aba84d42a4015f710fdf49f7
+--- /dev/null
++++ b/src/ops/linear/exl3/exl3_dispatch.h
+@@ -0,0 +1,55 @@
++#pragma once
++
++#include "core/device.h"
++#include "core/weight.h"
++#include "ninfer/ops/linear.h"
++
++#include <cstddef>
++
++#include <cstdint>
++#include <stdexcept>
++
++namespace ninfer::ops::detail {
++
++// Executes an EXL3 mul1 projection: out[N,T] = x[K,T] · W[N,K]ᵀ with
++// W = diag(su) · H128 · Z · H128 · diag(sv), the stored trellis_t16_v1 representation.
++void exl3_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
++                   WorkspaceArena& workspace, cudaStream_t stream);
++
++// Measurement hook: one EXL3 weight can be perturbed by seeded Gaussian noise while a sensitivity
++// run is in flight, without touching the artifact. `target` is that weight's trellis plane; `rfn`
++// is the relative Frobenius norm of the added noise and `rms` the weight's per-element rms (the
++// noise anchor), both zero when disabled. The dispatch copies the active probe into its kernels as
++// scalars, so the host registry never races a launch that is already queued.
++struct Exl3WeightProbe {
++    const void* target = nullptr;
++    float rfn          = 0.0F;
++    float rms          = 0.0F;
++    std::uint32_t seed = 0;
++};
++
++[[nodiscard]] Exl3WeightProbe& exl3_weight_probe();
++
++// Copy `rows` complete rows of a column-major BF16 [*, columns] tensor to another from
++// `source_row`. The rows of a column-major tensor are packed along nb[0] and the columns are
++// strided by nb[1], so this is a pitched 2D copy. The fused consumers split one decoded parent into
++// its member outputs this way.
++inline void exl3_copy_rows(const Tensor& source, std::int32_t source_row, Tensor& destination,
++                           std::int32_t rows, std::int32_t columns, cudaStream_t stream) {
++    constexpr std::int64_t kElementBytes = static_cast<std::int64_t>(sizeof(std::uint16_t));
++    if (source.dtype != DType::BF16 || destination.dtype != DType::BF16 || source_row < 0 ||
++        rows <= 0 || columns <= 0 || static_cast<std::int64_t>(source_row) + rows > source.ne[0] ||
++        columns > source.ne[1] || rows > destination.ne[0] || columns > destination.ne[1] ||
++        source.nb[0] != kElementBytes || destination.nb[0] != kElementBytes) {
++        throw std::invalid_argument("exl3_copy_rows: copy exceeds the tensor geometry");
++    }
++    CUDA_CHECK(cudaMemcpy2DAsync(
++        destination.data, static_cast<std::size_t>(destination.nb[1]),
++        static_cast<const std::uint8_t*>(source.data) +
++            static_cast<std::size_t>(source_row) * static_cast<std::size_t>(source.nb[0]),
++        static_cast<std::size_t>(source.nb[1]),
++        static_cast<std::size_t>(rows) * sizeof(std::uint16_t),
++        static_cast<std::size_t>(columns), cudaMemcpyDeviceToDevice, stream));
++}
++
++} // namespace ninfer::ops::detail
+diff --git a/src/ops/linear/exl3/sources.cmake b/src/ops/linear/exl3/sources.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..21cac8791963accf7e3b021cec6ba094e8ca2b94
+--- /dev/null
++++ b/src/ops/linear/exl3/sources.cmake
+@@ -0,0 +1,3 @@
++target_sources(ninfer_ops PRIVATE
++  "${CMAKE_CURRENT_LIST_DIR}/exl3_dispatch.cu"
++)
+diff --git a/src/ops/linear/linear.cpp b/src/ops/linear/linear.cpp
+index 1fe17e044f436576cefae03d783ad54b2e4ce702..0ce7073c5c428f9dc6998d254896810c59c24552 100644
+--- a/src/ops/linear/linear.cpp
++++ b/src/ops/linear/linear.cpp
+@@ -4,6 +4,7 @@
+ #include "ninfer/ops/linear.h"
+ 
+ #include "ops/linear/bf16/bf16_dispatch.h"
++#include "ops/linear/exl3/exl3_dispatch.h"
+ #include "ops/linear/fp8/fp8_dispatch.h"
+ #include "ops/linear/gguf/gguf_linear.h"
+ #include "ops/linear/nvfp4/nvfp4_dispatch.h"
+@@ -160,6 +161,13 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
+     case QType::FP8_E4M3FN_ROW_BF16:
+         detail::fp8_dispatch(x, w, out, policy, workspace, stream);
+         return;
++    case QType::EXL3_MUL1: {
++        if (workspace == nullptr) {
++            throw std::invalid_argument("linear: EXL3 requires caller-owned workspace");
++        }
++        detail::exl3_dispatch(x, w, out, policy, *workspace, stream);
++        return;
++    }
+     case QType::FP32:
+     case QType::INT32:
+     default:
+@@ -209,6 +217,17 @@ std::size_t linear_route_workspace_bytes(QType qtype, std::int32_t output_rows,
+     case QType::FP8_E4M3FN_ROW_BF16:
+         return detail::fp8_linear_workspace_capacity_bytes(output_rows, input_rows, policy,
+                                                            min_tokens, max_tokens);
++    case QType::EXL3_MUL1: {
++        if (output_rows <= 0 || input_rows <= 0) {
++            throw std::invalid_argument("linear workspace: exl3 n/k must be positive");
++        }
++        // The rotated activation scratch [K,T] BF16 plus, for T <= 8, the multi-column GEMV's [N,T]
++        // partial accumulator.
++        return static_cast<std::size_t>(input_rows) * static_cast<std::size_t>(max_tokens) *
++                   sizeof(std::uint16_t) +
++               static_cast<std::size_t>(output_rows) *
++                   std::min<std::size_t>(static_cast<std::size_t>(max_tokens), 8) * sizeof(float);
++    }
+     case QType::FP32:
+     case QType::INT32:
+     default:
+diff --git a/src/ops/linear/sources.cmake b/src/ops/linear/sources.cmake
+index 2d88074793cc6d48d58ffb3d5cb17e4a3bd6c9cc..82289cefc8b5fb04a5fe99410cfb435f3e394548 100644
+--- a/src/ops/linear/sources.cmake
++++ b/src/ops/linear/sources.cmake
+@@ -4,6 +4,7 @@ target_sources(ninfer_ops PRIVATE
+ )
+ 
+ include("${CMAKE_CURRENT_LIST_DIR}/bf16/sources.cmake")
++include("${CMAKE_CURRENT_LIST_DIR}/exl3/sources.cmake")
+ include("${CMAKE_CURRENT_LIST_DIR}/fp8/sources.cmake")
+ include("${CMAKE_CURRENT_LIST_DIR}/nvfp4/sources.cmake")
+ include("${CMAKE_CURRENT_LIST_DIR}/q4/sources.cmake")
+diff --git a/src/ops/weight_input.cpp b/src/ops/weight_input.cpp
+index b12e9ec98c69242f00b48b9311a9a3fae2633543..2fddd7bca15f446dd16b88df081c83c6ace4e359 100644
+--- a/src/ops/weight_input.cpp
++++ b/src/ops/weight_input.cpp
+@@ -205,7 +205,7 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool
+         const bool supported =
+             (moe && format == QType::Q8_G32_FP16) ||
+             (dense && (format == QType::NVFP4 || format == QType::FP8_E4M3FN_ROW_BF16 ||
+-                       (attention && format == QType::BF16)));
++                       format == QType::EXL3_MUL1 || (attention && format == QType::BF16)));
+         require(supported, "input projection: unsupported single-parent format");
+         return result;
+     }
+diff --git a/src/ops/wrapper/attn_input_proj.cpp b/src/ops/wrapper/attn_input_proj.cpp
+index e1dea8e5797af1e9c4c6c8740264e2b64028b09d..844b6c798204ec4482de71a97f6291562a364c69 100644
+--- a/src/ops/wrapper/attn_input_proj.cpp
++++ b/src/ops/wrapper/attn_input_proj.cpp
+@@ -3,6 +3,7 @@
+ #include "core/weight.h"
+ #include "core/weight_view.h"
+ #include "ninfer/ops/attn_input_proj.h"
++#include "ops/linear/exl3/exl3_dispatch.h"
+ #include "ninfer/ops/linear.h"
+ #include "ops/linear/gguf/gguf_linear.h"
+ #include "ops/linear/sm70/sm70_dequantize.h"
+@@ -179,6 +180,35 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Te
+     validate_policy(policy);
+     policy = without_integer(policy);
+     // The parent's rows are [query; key; gate; value].
++    if (weight.qtype == QType::EXL3_MUL1) {
++        constexpr std::int32_t kHidden = 5120;
++        constexpr std::int32_t kQRows  = 6144;
++        constexpr std::int32_t kKvRows = 1024;
++        constexpr std::int32_t kRows   = kQRows + kKvRows + kQRows + kKvRows;
++        const std::int32_t columns     = x.ne[1];
++        if (columns <= 0) { throw std::invalid_argument("attn_input_proj: T must be positive"); }
++        if (weight.n != kRows || weight.k != kHidden) {
++            throw std::invalid_argument("exl3 attn_input_proj: unsupported weight shape");
++        }
++        if (workspace == nullptr) {
++            throw std::invalid_argument("exl3 attn_input_proj requires caller workspace");
++        }
++        require_matrix(x, kHidden, columns, "x");
++        require_matrix(q, kQRows, columns, "q");
++        require_matrix(gate, kQRows, columns, "gate");
++        require_matrix(k, kKvRows, columns, "k");
++        require_matrix(v, kKvRows, columns, "v");
++        auto scope = workspace->scope();
++        const DeviceSpan whole_storage =
++            workspace->alloc_bytes(static_cast<std::size_t>(kRows) * columns * 2, 16);
++        Tensor whole(whole_storage.data, DType::BF16, {kRows, columns});
++        detail::exl3_dispatch(x, weight, whole, policy, *workspace, stream);
++        detail::exl3_copy_rows(whole, 0, q, kQRows, columns, stream);
++        detail::exl3_copy_rows(whole, kQRows, k, kKvRows, columns, stream);
++        detail::exl3_copy_rows(whole, kQRows + kKvRows, gate, kQRows, columns, stream);
++        detail::exl3_copy_rows(whole, kQRows + kKvRows + kQRows, v, kKvRows, columns, stream);
++        return;
++    }
+     if (policy != LinearPolicy::AllowNvfp4Int8 && workspace != nullptr &&
+         detail::sm70::covers(weight, x.ne[1]) && weight.n == 2 * q.ne[0] + 2 * k.ne[0] &&
+         gate.ne[0] == q.ne[0] && v.ne[0] == k.ne[0]) {
+@@ -300,6 +330,14 @@ std::size_t single_parent_route_bytes(QType parent_qtype, std::int32_t parent_ro
+     case QType::FP32:
+     case QType::INT32:
+         break;
++    case QType::EXL3_MUL1:
++        if (parent_rows != 14336 || input_rows != 5120) {
++            throw std::invalid_argument("attn_input_proj workspace: unsupported EXL3 profile");
++        }
++        // The decoded parent [14336,T] plus the rotated activation [5120,T] BF16 and, for T <= 8,
++        // the multi-column GEMV's [14336,T] partial accumulator.
++        return static_cast<std::size_t>(max_tokens) * (14336ULL * 2 + 5120ULL * 2) +
++               14336ULL * std::min<std::size_t>(static_cast<std::size_t>(max_tokens), 8) * 4;
+     }
+     throw std::invalid_argument("attn_input_proj workspace: unsupported parent qtype");
+ }
+diff --git a/src/ops/wrapper/gdn_input_proj.cpp b/src/ops/wrapper/gdn_input_proj.cpp
+index 9ac5ad68a2b52d5ef5b4434b6ec5fd6c169bece6..dc2b684efe66477093991ef35a6fd50ee4d14c35 100644
+--- a/src/ops/wrapper/gdn_input_proj.cpp
++++ b/src/ops/wrapper/gdn_input_proj.cpp
+@@ -7,6 +7,7 @@
+ #include "core/device.h"
+ #include "core/layout.h"
+ #include "ninfer/ops/linear.h"
++#include "ops/linear/exl3/exl3_dispatch.h"
+ #include "ops/linear/gguf/gguf_linear.h"
+ #include "ops/linear/sm70/sm70_dequantize.h"
+ #include "ops/linear/sm70/sm70_gemm.h"
+@@ -411,6 +412,28 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& qkv,
+     policy = without_integer(policy);
+     const std::int32_t cols = x.ne[1];
+     if (cols <= 0) { throw std::invalid_argument("gdn_input_proj: T must be positive"); }
++    if (weight.qtype == QType::EXL3_MUL1) {
++        // One parent holds query, key, value and z in that row order.
++        constexpr std::int32_t kHidden  = 5120;
++        constexpr std::int32_t kQkvRows = 10240;
++        constexpr std::int32_t kZRows   = 6144;
++        constexpr std::int32_t kRows    = kQkvRows + kZRows;
++        if (weight.n != kRows || weight.k != kHidden || workspace == nullptr) {
++            throw std::invalid_argument("exl3 gdn_input_proj: unsupported weight shape");
++        }
++        require_matrix(x, kHidden, cols, "x");
++        require_matrix(qkv, kQkvRows, cols, "qkv");
++        require_matrix(z, kZRows, cols, "z");
++        require_single_parent_nonoverlap(x, qkv, z);
++        auto scope = workspace->scope();
++        const DeviceSpan whole_storage =
++            workspace->alloc_bytes(static_cast<std::size_t>(kRows) * cols * 2, 16);
++        Tensor whole(whole_storage.data, DType::BF16, {kRows, cols});
++        detail::exl3_dispatch(x, weight, whole, policy, *workspace, stream);
++        detail::exl3_copy_rows(whole, 0, qkv, kQkvRows, cols, stream);
++        detail::exl3_copy_rows(whole, kQkvRows, z, kZRows, cols, stream);
++        return;
++    }
+     // NVFP4 and FP8 parents keep their own composites (and workspace contracts) on sm_70; NVFP4
+     // artifacts need a 120a build anyway.
+     if (workspace != nullptr && weight.qtype != QType::NVFP4 &&
+@@ -555,6 +578,51 @@ void dispatch_single_parent_snapshot(const Tensor& x, const Weight& weight,
+                                      WorkspaceArena& workspace, cudaStream_t stream) {
+     validate_policy(policy);
+ 
++    if (weight.qtype == QType::EXL3_MUL1) {
++        constexpr std::int32_t kHidden     = 5120;
++        constexpr std::int32_t kQueryRows  = 2048;
++        constexpr std::int32_t kKeyRows    = 2048;
++        constexpr std::int32_t kValueRows  = 6144;
++        constexpr std::int32_t kZRows      = 6144;
++        constexpr std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
++        constexpr std::int32_t kParentRows = kChannels + kZRows;
++        const ConvGeometry geometry        = require_snapshot_input(x, kHidden);
++        if (weight.n != kParentRows || weight.k != kHidden) {
++            throw std::invalid_argument(
++                "exl3 gdn_input_proj_conv_snapshot: unsupported weight shape");
++        }
++        require_snapshot_operands(conv_weight, conv_states, valid_columns, initial_state_slots,
++                                  snapshot_base_slots, kChannels, geometry);
++        require_conv_tensor(query, kQueryRows, geometry.width, geometry.batch,
++                            "gdn_input_proj_conv_snapshot", "query");
++        require_conv_tensor(key, kKeyRows, geometry.width, geometry.batch,
++                            "gdn_input_proj_conv_snapshot", "key");
++        require_conv_tensor(value, kValueRows, geometry.width, geometry.batch,
++                            "gdn_input_proj_conv_snapshot", "value");
++        require_conv_tensor(z, kZRows, geometry.width, geometry.batch,
++                            "gdn_input_proj_conv_snapshot", "z");
++        require_snapshot_nonoverlap(x, conv_weight, conv_states, valid_columns, initial_state_slots,
++                                    snapshot_base_slots, query, key, value, z, workspace);
++        if (geometry.batch > 1) {
++            compose_batched_snapshot(x, conv_weight, conv_states, valid_columns, initial_state_slots,
++                                     snapshot_base_slots, query, key, value, z, kQueryRows, kKeyRows,
++                                     kValueRows, geometry, workspace, stream,
++                                     [&](const Tensor& x_flat, Tensor& projected, Tensor& z_flat) {
++                                         gdn_input_proj(x_flat, weight, projected, z_flat, policy,
++                                                        workspace, stream);
++                                     });
++            return;
++        }
++        auto scope                 = workspace.scope();
++        ProjectedWorkspace scratch =
++            allocate_projected_workspace(workspace, kChannels, geometry.width);
++        gdn_input_proj(x, weight, scratch.projected, z, policy, workspace, stream);
++        detail::gdn_projected_conv_snapshot_launch(scratch.projected, conv_weight, conv_states,
++                                                   valid_columns, initial_state_slots,
++                                                   snapshot_base_slots, query, key, value, stream);
++        return;
++    }
++
+     if (weight.qtype == QType::NVFP4) {
+         constexpr std::int32_t kHidden     = 5120;
+         constexpr std::int32_t kQueryRows  = 2048;
+@@ -706,6 +774,49 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const
+                                    cudaStream_t stream) {
+     validate_policy(policy);
+ 
++    if (weight.qtype == QType::EXL3_MUL1) {
++        constexpr std::int32_t kHidden     = 5120;
++        constexpr std::int32_t kQueryRows  = 2048;
++        constexpr std::int32_t kKeyRows    = 2048;
++        constexpr std::int32_t kValueRows  = 6144;
++        constexpr std::int32_t kZRows      = 6144;
++        constexpr std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
++        constexpr std::int32_t kParentRows = kChannels + kZRows;
++        const ConvGeometry geometry        = require_record_input(x, kHidden);
++        if (weight.n != kParentRows || weight.k != kHidden) {
++            throw std::invalid_argument("exl3 gdn_input_proj_conv_record: unsupported weight shape");
++        }
++        require_record_operands(conv_weight, conv_states, valid_columns, initial_state_slots,
++                                kChannels, geometry);
++        require_conv_tensor(conv_record, kChannels, geometry.width, geometry.batch,
++                            "gdn_input_proj_conv_record", "conv record");
++        require_conv_tensor(query, kQueryRows, geometry.width, geometry.batch,
++                            "gdn_input_proj_conv_record", "query");
++        require_conv_tensor(key, kKeyRows, geometry.width, geometry.batch,
++                            "gdn_input_proj_conv_record", "key");
++        require_conv_tensor(value, kValueRows, geometry.width, geometry.batch,
++                            "gdn_input_proj_conv_record", "value");
++        require_conv_tensor(z, kZRows, geometry.width, geometry.batch,
++                            "gdn_input_proj_conv_record", "z");
++        require_record_nonoverlap(x, conv_weight, conv_states, valid_columns, initial_state_slots,
++                                  conv_record, query, key, value, z, workspace);
++        if (geometry.batch > 1) {
++            compose_record(x, conv_weight, conv_states, valid_columns, initial_state_slots,
++                           conv_record, query, key, value, z, geometry, workspace, stream,
++                           [&](const Tensor& x_flat, Tensor& record_flat, Tensor& z_flat) {
++                               gdn_input_proj(x_flat, weight, record_flat, z_flat, policy,
++                                              workspace, stream);
++                           });
++            return;
++        }
++        auto scope = workspace.scope();
++        gdn_input_proj(x, weight, conv_record, z, policy, workspace, stream);
++        detail::gdn_projected_conv_record_launch(conv_record, conv_weight, conv_states,
++                                                 valid_columns, initial_state_slots, query, key,
++                                                 value, stream);
++        return;
++    }
++
+     if (weight.qtype == QType::NVFP4) {
+         constexpr std::int32_t kHidden     = 5120;
+         constexpr std::int32_t kQueryRows  = 2048;
+@@ -1082,6 +1193,15 @@ std::size_t single_parent_route_bytes(QType parent_qtype, std::int32_t parent_ro
+             {input_rows, 8192, 4096, parent_rows, input_rows, max_tokens});
+         return 0;
+     }
++    if (parent_qtype == QType::EXL3_MUL1) {
++        if (parent_rows != 16384 || input_rows != 5120) {
++            throw std::invalid_argument("gdn_input_proj workspace: unsupported EXL3 profile");
++        }
++        // The decoded parent [16384,T] plus the rotated activation [5120,T] BF16 and, for T <= 8,
++        // the multi-column GEMV's [16384,T] partial accumulator.
++        return static_cast<std::size_t>(max_tokens) * (16384ULL * 2 + 5120ULL * 2) +
++               16384ULL * std::min<std::size_t>(static_cast<std::size_t>(max_tokens), 8) * 4;
++    }
+     throw std::invalid_argument("gdn_input_proj workspace: unsupported parent profile");
+ }
+ 
+@@ -1165,6 +1285,17 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
+     std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
+     validate_policy(policy);
+     require_snapshot_capacity_domain(batch_size, min_width, max_width);
++    if (parent_qtype == QType::EXL3_MUL1) {
++        if (parent_rows != 16384 || input_rows != 5120) {
++            throw std::invalid_argument(
++                "gdn_input_proj_conv_snapshot workspace: unsupported EXL3 profile");
++        }
++        constexpr std::int32_t kChannels       = 10240;
++        const std::int32_t columns             = batch_size == 1 ? max_width : batch_size * max_width;
++        const std::size_t projection_workspace = gdn_input_proj_workspace_capacity_bytes(
++            parent_qtype, parent_rows, input_rows, policy, batch_size * min_width, columns);
++        return composed_snapshot_capacity(kChannels, columns, projection_workspace);
++    }
+     if (parent_qtype == QType::FP8_E4M3FN_ROW_BF16 &&
+         parent_rows == detail::Fp8N16384K5120::kOutputRows &&
+         input_rows == detail::Fp8N16384K5120::kInputRows) {
+@@ -1266,6 +1397,15 @@ std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
+     std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
+     validate_policy(policy);
+     require_record_capacity_domain(batch_size, min_width, max_width);
++    if (parent_qtype == QType::EXL3_MUL1) {
++        if (parent_rows != 16384 || input_rows != 5120) {
++            throw std::invalid_argument(
++                "gdn_input_proj_conv_record workspace: unsupported EXL3 profile");
++        }
++        return gdn_input_proj_workspace_capacity_bytes(parent_qtype, parent_rows, input_rows,
++                                                       policy, batch_size * min_width,
++                                                       batch_size * max_width);
++    }
+     if (parent_qtype == QType::FP8_E4M3FN_ROW_BF16 &&
+         parent_rows == detail::Fp8N16384K5120::kOutputRows &&
+         input_rows == detail::Fp8N16384K5120::kInputRows) {
+diff --git a/src/ops/wrapper/linear_add.cpp b/src/ops/wrapper/linear_add.cpp
+index 3c6685b6b96335343e2c424c86e41f32cca8ac59..e4b56ecc7aa81a6b1616221153755b8d1ef18cb4 100644
+--- a/src/ops/wrapper/linear_add.cpp
++++ b/src/ops/wrapper/linear_add.cpp
+@@ -5,6 +5,7 @@
+ #include "ninfer/ops/linear.h"
+ #include "ninfer/ops/linear_add.h"
+ #include "ninfer/ops/residual_add.h"
++#include "ops/linear/exl3/exl3_dispatch.h"
+ 
+ #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
+ #include "ops/linear/fp8/fp8_config.h"
+@@ -208,6 +209,15 @@ std::size_t linear_add_route_workspace_bytes(QType qtype, std::int32_t output_ro
+         return detail::fp8_linear_add_workspace_capacity_bytes(output_rows, input_rows, policy,
+                                                                min_tokens, max_tokens);
+     }
++    if (qtype == QType::EXL3_MUL1) {
++        // The decoded output [output_rows,T] plus the rotated activation [input_rows,T] and, for
++        // T <= 8, the multi-column GEMV's [output_rows,T] partial accumulator.
++        return static_cast<std::size_t>(max_tokens) *
++                   (static_cast<std::uint64_t>(output_rows) * 2 +
++                    static_cast<std::uint64_t>(input_rows) * 2) +
++               static_cast<std::size_t>(output_rows) *
++                   std::min<std::size_t>(static_cast<std::size_t>(max_tokens), 8) * 4;
++    }
+     throw std::invalid_argument("linear_add workspace: unsupported weight format");
+ }
+ 
+@@ -247,6 +257,15 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
+         return;
+     }
+ 
++    if (w.qtype == QType::EXL3_MUL1) {
++        auto scope               = ws.scope();
++        const DeviceSpan storage = ws.alloc_bytes(static_cast<std::size_t>(w.n) * t * 2, 16);
++        Tensor whole(storage.data, DType::BF16, {w.n, t});
++        detail::exl3_dispatch(x, w, whole, policy, ws, stream);
++        ops::residual_add(whole, residual_out, stream);
++        return;
++    }
++
+     if (policy != LinearPolicy::AllowNvfp4Int8 && detail::sm70::covers(w, t)) {
+         auto scope            = ws.scope();
+         const auto activation = detail::sm70::prepare_for(
+diff --git a/src/ops/wrapper/linear_swiglu.cpp b/src/ops/wrapper/linear_swiglu.cpp
+index 7ed2eebbc40695daefa55e930a361743f2affa66..7690773e645dd216b24a97b8be294bfb8e295746 100644
+--- a/src/ops/wrapper/linear_swiglu.cpp
++++ b/src/ops/wrapper/linear_swiglu.cpp
+@@ -6,6 +6,7 @@
+ #include "ninfer/ops/linear.h"
+ #include "ninfer/ops/linear_swiglu.h"
+ #include "ninfer/ops/silu_mul.h"
++#include "ops/linear/exl3/exl3_dispatch.h"
+ 
+ #include "ops/linear/fp8/fp8_format.h"
+ #include "ops/linear/gguf/gguf_linear.h"
+@@ -137,6 +138,15 @@ std::size_t linear_swiglu_route_workspace_bytes(QType qtype, std::int32_t gate_u
+     if (qtype == QType::FP8_E4M3FN_ROW_BF16 && gate_up_rows == 34816 && input_rows == 5120) {
+         return detail::fp8_linear_swiglu_workspace_capacity_bytes(policy, min_tokens, max_tokens);
+     }
++    if (qtype == QType::EXL3_MUL1) {
++        if (gate_up_rows != 34816 || input_rows != 5120) {
++            throw std::invalid_argument("linear_swiglu workspace: unsupported EXL3 profile");
++        }
++        // The decoded gate/up parent [34816,T] plus the rotated activation [5120,T] BF16 and, for
++        // T <= 8, the multi-column GEMV's [34816,T] partial accumulator.
++        return static_cast<std::size_t>(max_tokens) * (34816ULL * 2 + 5120ULL * 2) +
++               34816ULL * std::min<std::size_t>(static_cast<std::size_t>(max_tokens), 8) * 4;
++    }
+     throw std::invalid_argument("linear_swiglu workspace: unsupported weight format");
+ }
+ 
+@@ -198,6 +208,23 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
+         throw std::invalid_argument("linear_swiglu: x/out must be non-null and 16-byte aligned");
+     }
+ 
++    if (gate_up_weight.qtype == QType::EXL3_MUL1) {
++        constexpr std::int32_t kHalf = 17408;
++        constexpr std::int32_t kRows = 2 * kHalf;
++        if (!large_shape || gate_up_weight.layout != QuantLayout::TrellisT16) {
++            throw std::invalid_argument("exl3 linear_swiglu: unsupported weight shape");
++        }
++        auto scope = ws.scope();
++        const DeviceSpan whole_storage =
++            ws.alloc_bytes(static_cast<std::size_t>(kRows) * t * 2, 16);
++        Tensor whole(whole_storage.data, DType::BF16, {kRows, t});
++        detail::exl3_dispatch(x, gate_up_weight, whole, policy, ws, stream);
++        Tensor gate = whole.slice(0, 0, kHalf);
++        Tensor up   = whole.slice(0, kHalf, kHalf);
++        ops::silu_mul(gate, up, out, stream);
++        return;
++    }
++
+     // The panel layout is RowSplit's bytes permuted (sm_70 loads, read by its routes).
+     const bool common_row_split =
+         is_row_split(gate_up_weight.layout) && gate_up_weight.scale_dtype == DType::FP16 &&
+diff --git a/tests/artifact/test_exl3_layout.py b/tests/artifact/test_exl3_layout.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f21a36df602a52df4d62bf235e0590c5000bb07f
+--- /dev/null
++++ b/tests/artifact/test_exl3_layout.py
+@@ -0,0 +1,101 @@
++from __future__ import annotations
++
++import pytest
++
++from tools.artifact.formats import EXL3_MUL1, get_format
++from tools.artifact.layouts import exl3_geometry, encoded_size, get_layout
++from tools.artifact.schema import TensorSpec, plan_objects, validate_encoding
++
++
++def test_exl3_format_and_layout_are_registered() -> None:
++    assert get_format("exl3_mul1") is EXL3_MUL1
++    layout = get_layout("trellis_t16_v1")
++    assert layout.alignment == 256
++    assert layout.formats == frozenset(("exl3_mul1",))
++
++
++@pytest.mark.parametrize("bitrate_half_bits", range(2, 17))
++def test_exl3_tile_size_and_plane_geometry(bitrate_half_bits: int) -> None:
++    geometry = exl3_geometry("exl3_mul1", (128, 128), bitrate_half_bits)
++    assert geometry.tiles_n == geometry.tiles_k == 8
++    assert geometry.tile_bytes == 16 * bitrate_half_bits
++    assert geometry.trellis_bytes == 64 * geometry.tile_bytes
++    assert geometry.input_scale_offset == geometry.trellis_bytes
++    assert geometry.input_scale_bytes == 512
++    assert geometry.output_scale_offset == geometry.input_scale_offset + 512
++    assert geometry.output_scale_bytes == 512
++    assert (
++        encoded_size(
++            "trellis_t16_v1",
++            "exl3_mul1",
++            (128, 128),
++            bitrate_half_bits=bitrate_half_bits,
++        )
++        == geometry.payload_bytes
++    )
++
++
++def test_exl3_qwen_mlp_geometry_and_artifact_metadata() -> None:
++    geometry = exl3_geometry("exl3_mul1", (17408, 5120), 8)
++    assert (geometry.tiles_n, geometry.tiles_k) == (1088, 320)
++    assert geometry.trellis_bytes == 44_564_480
++    assert geometry.payload_bytes == 44_654_592
++
++    (obj,) = plan_objects(
++        [
++            TensorSpec(
++                "weight/exl3",
++                (17408, 5120),
++                "exl3_mul1",
++                "trellis_t16_v1",
++                bitrate_half_bits=8,
++            )
++        ]
++    )
++    validate_encoding(obj)
++    encoded = obj.to_json()
++    assert encoded["bitrate_half_bits"] == 8
++    assert encoded["bytes"] == geometry.payload_bytes
++
++
++@pytest.mark.parametrize("bitrate_half_bits", [None, 0, 1, 17, True, 8.0, "8"])
++def test_exl3_requires_an_integer_half_bit_rate(bitrate_half_bits: object) -> None:
++    with pytest.raises(ValueError, match="bitrate_half_bits"):
++        encoded_size(
++            "trellis_t16_v1",
++            "exl3_mul1",
++            (128, 128),
++            bitrate_half_bits=bitrate_half_bits,  # type: ignore[arg-type]
++        )
++
++
++def test_exl3_rejects_unsupported_layout_shape_and_metadata() -> None:
++    with pytest.raises(ValueError, match="does not accept format"):
++        encoded_size("row_split_k128_v1", "exl3_mul1", (128, 128), bitrate_half_bits=8)
++    with pytest.raises(ValueError, match="requires both matrix dimensions"):
++        encoded_size("trellis_t16_v1", "exl3_mul1", (128, 129), bitrate_half_bits=8)
++    with pytest.raises(ValueError, match="bitrate_half_bits is only valid"):
++        encoded_size("contiguous_le_v1", "bf16", (128, 128), bitrate_half_bits=8)
++    with pytest.raises(ValueError, match="whole number of 128-row blocks"):
++        encoded_size("trellis_t16_v1", "exl3_mul1", (128, 128), 2, 8)
++    with pytest.raises(ValueError, match="whole number of 128-row blocks"):
++        encoded_size("trellis_t16_v1", "exl3_mul1", (384, 128), 2, 8)
++    with pytest.raises(ValueError, match="stores one divisor"):
++        encoded_size("row_split_k128_v1", "q4_g64_fp16", (128, 128), 2)
++
++
++def test_exl3_scale_sets_repeat_only_the_input_scales() -> None:
++    """A stacked object holds one suh[K] per matrix; the trellis plane and svh[N] are the whole object's."""
++
++    single = exl3_geometry("exl3_mul1", (1024, 256), 8)
++    stacked = exl3_geometry("exl3_mul1", (1024, 256), 8, 4)
++    assert single.scale_sets == 1 and stacked.scale_sets == 4
++    assert stacked.trellis_bytes == single.trellis_bytes
++    assert stacked.input_scale_offset == single.input_scale_offset
++    assert stacked.input_scale_bytes == 4 * single.input_scale_bytes
++    assert stacked.output_scale_bytes == single.output_scale_bytes == 1024 * 4
++    assert stacked.output_scale_offset % 256 == 0
++    assert stacked.payload_bytes == stacked.output_scale_offset + 1024 * 4
++    assert encoded_size("trellis_t16_v1", "exl3_mul1", (1024, 256), 4, 8) == stacked.payload_bytes
++    # One set is the plain matrix, byte for byte.
++    assert encoded_size("trellis_t16_v1", "exl3_mul1", (1024, 256), 1, 8) == single.payload_bytes
+diff --git a/tests/artifact/test_exl3_trellis.cpp b/tests/artifact/test_exl3_trellis.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c0c5ff2a490df11d3d2bcc76689e1aaaed99d7a
+--- /dev/null
++++ b/tests/artifact/test_exl3_trellis.cpp
+@@ -0,0 +1,263 @@
++#include "artifact/exl3_trellis.h"
++#include "artifact/formats.h"
++#include "artifact/layouts.h"
++#include "artifact/schema.h"
++
++#include "core/weight_view.h"
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <iostream>
++#include <limits>
++#include <span>
++#include <stdexcept>
++#include <vector>
++
++namespace {
++
++int failures = 0;
++
++void expect(bool condition, const char* message) {
++    if (condition) { return; }
++    ++failures;
++    std::cerr << message << '\n';
++}
++
++template <typename Exception, typename Operation>
++void expect_throws(Operation operation, const char* message) {
++    try {
++        operation();
++    } catch (const Exception&) { return; }
++    expect(false, message);
++}
++
++std::vector<std::byte> make_tile(std::uint64_t rate_half_bits) {
++    std::vector<std::byte> bytes(static_cast<std::size_t>(16 * rate_half_bits));
++    std::uint32_t state = 0x9E3779B9U;
++    for (auto& byte : bytes) {
++        state ^= state << 13;
++        state ^= state >> 17;
++        state ^= state << 5;
++        byte = static_cast<std::byte>(state & 0xFFU);
++    }
++    return bytes;
++}
++
++std::uint16_t reference_state(std::span<const std::byte> tile, std::uint64_t rate_half_bits,
++                              std::size_t weight) {
++    const auto low = static_cast<std::size_t>(rate_half_bits / 2);
++    const auto total_bits = tile.size() * 8;
++    std::size_t end = 0;
++    for (std::size_t i = 0; i <= weight; ++i) {
++        end += low;
++        if ((rate_half_bits & 1U) && (i & 1U)) { ++end; }
++    }
++    const auto begin = (end + total_bits - 16) % total_bits;
++    std::uint16_t result = 0;
++    for (std::size_t i = 0; i < 16; ++i) {
++        const auto position = (begin + i) % total_bits;
++        const auto byte = std::to_integer<std::uint8_t>(tile[position / 8]);
++        result |= static_cast<std::uint16_t>(((byte >> (position % 8)) & 1U) << i);
++    }
++    return result;
++}
++
++void test_trellis_round_trips() {
++    for (std::uint64_t rate = 2; rate <= 16; ++rate) {
++        const auto tile = make_tile(rate);
++        std::array<std::uint16_t, ninfer::artifact::kExl3WeightsPerTile> states{};
++        ninfer::artifact::exl3_unpack_trellis_tile(tile, rate, states);
++        for (std::size_t i = 0; i < states.size(); ++i) {
++            expect(states[i] == reference_state(tile, rate, i),
++                   "decoded trellis state must match independent circular-bit oracle");
++        }
++        expect(ninfer::artifact::exl3_pack_trellis_tile(states, rate) == tile,
++               "packed circular states must reproduce every tile bit exactly");
++    }
++    expect_throws<std::invalid_argument>(
++        [] { (void)ninfer::artifact::exl3_pack_trellis_tile({}, 8); },
++        "packer must reject an incomplete tile");
++    expect_throws<std::invalid_argument>(
++        [] { (void)ninfer::artifact::exl3_trellis_state({}, 8, 0); },
++        "state decoder must reject a mismatched tile length");
++    expect_throws<std::invalid_argument>(
++        [] { (void)ninfer::artifact::exl3_trellis_state(std::vector<std::byte>(32), 1, 0); },
++        "state decoder must reject bitrates below one bit per weight");
++    expect_throws<std::out_of_range>(
++        [] { (void)ninfer::artifact::exl3_trellis_state(std::vector<std::byte>(128), 8, 256); },
++        "state decoder must reject tile indices outside the tile");
++}
++
++void test_mul1_codebook() {
++    expect(ninfer::artifact::exl3_mul1_value(0) == -510,
++           "mul1 codebook zero state must map to -510");
++    for (std::uint32_t state = 0; state <= 0xFFFFU; ++state) {
++        const auto product = state * 0x83DCD12DU;
++        const auto byte_sum = (product & 0xFFU) + ((product >> 8) & 0xFFU) +
++                              ((product >> 16) & 0xFFU) + ((product >> 24) & 0xFFU);
++        expect(ninfer::artifact::exl3_mul1_value(static_cast<std::uint16_t>(state)) ==
++                   static_cast<std::int32_t>(byte_sum) - 510,
++               "mul1 codebook must equal the exact unsigned-word definition");
++    }
++}
++
++void test_trellis_geometry() {
++    using ninfer::QType;
++    using ninfer::QuantLayout;
++    using ninfer::weight_geometry;
++    const std::array<std::uint64_t, 2> small_shape{128, 128};
++    const auto half_rate = weight_geometry(QType::EXL3_MUL1, QuantLayout::TrellisT16,
++                                           small_shape, 1, 3);
++    expect(half_rate.tile_bytes == 48 && half_rate.trellis_bytes == 3072,
++           "half-bit bitrate must size each 16x16 tile exactly");
++    expect(half_rate.input_scale_offset == 3072 && half_rate.input_scale_bytes == 512 &&
++               half_rate.output_scale_offset == 3584 && half_rate.output_scale_bytes == 512 &&
++               half_rate.bytes == 4096,
++           "EXL3 planes must use aligned trellis, input-scale and output-scale regions");
++
++    const std::array<std::uint64_t, 2> qwen_mlp{17408, 5120};
++    const auto real_shape = weight_geometry(QType::EXL3_MUL1, QuantLayout::TrellisT16,
++                                            qwen_mlp, 1, 8);
++    expect(real_shape.tiles_n == 1088 && real_shape.tiles_k == 320 &&
++               real_shape.trellis_bytes == 44564480 && real_shape.bytes == 44654592,
++           "Qwen3.8 MLP geometry must match its real matrix shape");
++    expect_throws<std::invalid_argument>(
++        [&] { (void)weight_geometry(QType::EXL3_MUL1, QuantLayout::TrellisT16,
++                                    small_shape, 1, 1); },
++        "EXL3 layout must reject rates below one bit per weight");
++    const std::array<std::uint64_t, 2> invalid_shape{128, 129};
++    expect_throws<std::invalid_argument>(
++        [&] { (void)weight_geometry(QType::EXL3_MUL1, QuantLayout::TrellisT16,
++                                    invalid_shape, 1, 8); },
++        "EXL3 layout must reject dimensions not Hadamard aligned");
++    expect_throws<std::invalid_argument>(
++        [&] { (void)weight_geometry(QType::Q4_G64_FP16, QuantLayout::TrellisT16,
++                                    small_shape, 1, 8); },
++        "EXL3 layout must reject unrelated numeric formats");
++    std::vector<std::byte> payload(half_rate.bytes);
++    ninfer::WeightParent parent{half_rate, payload.data()};
++    ninfer::WeightView view{{128, 128}, {{&parent, 0, half_rate.elements}}};
++    const ninfer::Weight native = ninfer::native_weight(view);
++    expect(native.qtype == QType::EXL3_MUL1 && native.qdata == payload.data() &&
++               native.input_scales == payload.data() + half_rate.input_scale_offset &&
++               native.scales == payload.data() + half_rate.output_scale_offset &&
++               native.bitrate_half_bits == 3 && native.n == 128 && native.k == 128,
++           "the native Weight bridge must expose the EXL3 trellis and both scale planes");
++    expect_throws<std::invalid_argument>(
++        [&] { (void)ninfer::weight_row_planes(view.parts.front()); },
++        "the generic row-plane view must not misinterpret EXL3 scales");
++    // Stacked matrices: the trellis plane and svh[N] are the whole object's, suh repeats per set.
++    const std::array<std::uint64_t, 2> stacked_shape{1024, 256};
++    const auto single = weight_geometry(QType::EXL3_MUL1, QuantLayout::TrellisT16,
++                                        stacked_shape, 1, 8);
++    const auto stacked = weight_geometry(QType::EXL3_MUL1, QuantLayout::TrellisT16,
++                                         stacked_shape, 4, 8);
++    expect(stacked.divisor_count == 4 && stacked.trellis_bytes == single.trellis_bytes &&
++               stacked.input_scale_offset == single.input_scale_offset &&
++               stacked.input_scale_bytes == 4 * single.input_scale_bytes &&
++               stacked.output_scale_bytes == single.output_scale_bytes &&
++               stacked.output_scale_offset % 256 == 0 &&
++               stacked.bytes == stacked.output_scale_offset + stacked.output_scale_bytes,
++           "stacked EXL3 matrices must repeat only the input scales");
++    expect_throws<std::invalid_argument>(
++        [&] { (void)weight_geometry(QType::EXL3_MUL1, QuantLayout::TrellisT16,
++                                    stacked_shape, 3, 8); },
++        "a scale set count that does not divide the rows must be rejected");
++    expect_throws<std::invalid_argument>(
++        [&] { (void)weight_geometry(QType::EXL3_MUL1, QuantLayout::TrellisT16,
++                                    stacked_shape, 16, 8); },
++        "a scale set smaller than a 128-row Hadamard block must be rejected");
++    expect_throws<std::invalid_argument>(
++        [&] { (void)weight_geometry(QType::Q4_G64_FP16, QuantLayout::RowSplit,
++                                    stacked_shape, 2); },
++        "only NVFP4 and EXL3 may carry several divisors or scale sets");
++    {
++        std::vector<std::byte> bank(stacked.bytes);
++        ninfer::WeightParent bank_parent{stacked, bank.data()};
++        ninfer::WeightView bank_view{{1024, 256}, {{&bank_parent, 0, stacked.elements}}};
++        expect_throws<std::invalid_argument>(
++            [&] { (void)ninfer::native_weight(bank_view); },
++            "a stacked EXL3 bank must not be handed to a dense Linear as one matrix");
++    }
++    const std::array<std::uint64_t, 2> overflow_shape{
++        std::numeric_limits<std::uint64_t>::max(), 128};
++    expect_throws<std::overflow_error>(
++        [&] { (void)weight_geometry(QType::EXL3_MUL1, QuantLayout::TrellisT16,
++                                    overflow_shape, 1, 8); },
++        "EXL3 geometry must reject unrepresentable dimensions");
++}
++
++void test_registered_format_and_layout() {
++    using ninfer::QType;
++    using ninfer::QuantLayout;
++    using ninfer::artifact::format_name;
++    using ninfer::artifact::layout_name;
++    using ninfer::artifact::parse_format;
++    using ninfer::artifact::parse_layout;
++    expect(parse_format("exl3_mul1") == QType::EXL3_MUL1 &&
++               format_name(QType::EXL3_MUL1) == "exl3_mul1",
++           "C++ format registry must round-trip exl3_mul1");
++    expect(parse_layout("trellis_t16_v1") == QuantLayout::TrellisT16 &&
++               layout_name(QuantLayout::TrellisT16) == "trellis_t16_v1",
++           "C++ layout registry must round-trip trellis_t16_v1");
++}
++
++void test_tensor_object_bitrate_contract() {
++    ninfer::artifact::TensorObject object{
++        "weight/exl3", {128, 128}, "exl3_mul1", "trellis_t16_v1", 0, 4096, 1, 3};
++    const auto geometry = ninfer::artifact::describe_tensor(object);
++    expect(geometry.bitrate_half_bits == 3 && geometry.bytes == 4096,
++           "artifact tensor metadata must select the bitrate-specific geometry");
++    object.bitrate_half_bits = 17;
++    expect_throws<ninfer::artifact::ArtifactError>(
++        [&] { (void)ninfer::artifact::describe_tensor(object); },
++        "artifact tensor metadata must reject out-of-range bitrates");
++    object.bitrate_half_bits = 3;
++    object.bytes = 4095;
++    expect_throws<ninfer::artifact::ArtifactError>(
++        [&] { (void)ninfer::artifact::describe_tensor(object); },
++        "artifact tensor metadata must reject inconsistent encoded sizes");
++}
++
++void test_directory_round_trips_bitrate_metadata() {
++    using ninfer::artifact::Json;
++    using ninfer::artifact::parse_directory;
++    Json root = Json::object();
++    root["components"] = {{"text", {{"config", Json::object()}}}};
++    root["objects"] = Json::array({Json{{"id", "weight/exl3"},
++                                        {"kind", "tensor"},
++                                        {"shape", {128, 128}},
++                                        {"format", "exl3_mul1"},
++                                        {"layout", "trellis_t16_v1"},
++                                        {"offset", 0},
++                                        {"bytes", 4096},
++                                        {"bitrate_half_bits", 3}}});
++    root["bindings"] = {{"text/weight", {{"object", "weight/exl3"}}}};
++    root["uses"] = Json::array();
++    root["files"] = Json::array({Json{{"path", nullptr}, {"payload_bytes", 4096}}});
++    auto directory = parse_directory(root, "test.ninfer");
++    const auto handle = directory.object_index.at("weight/exl3");
++    const auto geometry = ninfer::artifact::describe_tensor(directory.tensor(handle));
++    expect(geometry.bitrate_half_bits == 3 && geometry.bytes == 4096,
++           "C++ artifact parser must preserve per-tensor EXL3 bitrate metadata");
++
++    root["objects"][0].erase("bitrate_half_bits");
++    directory = parse_directory(root, "test.ninfer");
++    const auto missing_rate_handle = directory.object_index.at("weight/exl3");
++    expect_throws<ninfer::artifact::ArtifactError>(
++        [&] { (void)ninfer::artifact::describe_tensor(directory.tensor(missing_rate_handle)); },
++        "EXL3 tensor objects must not omit bitrate metadata");
++}
++
++} // namespace
++
++int main() {
++    test_trellis_round_trips();
++    test_mul1_codebook();
++    test_trellis_geometry();
++    test_registered_format_and_layout();
++    test_tensor_object_bitrate_contract();
++    test_directory_round_trips_bitrate_metadata();
++    return failures == 0 ? 0 : 1;
++}
+diff --git a/tests/artifact/tests.cmake b/tests/artifact/tests.cmake
+index 5f5c952041f84cdb4fb533598f9b42c14efb6a2a..01c3187c5a596bcffb5dac31bb867ef7689551a5 100644
+--- a/tests/artifact/tests.cmake
++++ b/tests/artifact/tests.cmake
+@@ -52,3 +52,7 @@ set_tests_properties(
+ set_tests_properties(
+   ninfer_artifact_materialization_test
+   PROPERTIES SKIP_RETURN_CODE 77)
++
++ninfer_add_test(ninfer_exl3_trellis_test
++  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_exl3_trellis.cpp"
++  LIBRARIES ninfer_artifact)
+diff --git a/tests/ops/linear/test_exl3_a16.cpp b/tests/ops/linear/test_exl3_a16.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..4611b3def2755170c1e5ae450c196ddaa16fa7fc
+--- /dev/null
++++ b/tests/ops/linear/test_exl3_a16.cpp
+@@ -0,0 +1,348 @@
++// EXL3 mul1 Linear qualification: the production Op against an FP64 oracle built from the same
++// stored planes. The oracle independently decodes the trellis, applies the explicit 128-point
++// Sylvester Hadamards, and accumulates every dot product in double precision.
++
++#include "artifact/exl3_trellis.h"
++#include "core/arena.h"
++#include "core/weight_view.h"
++#include "ninfer/ops/linear.h"
++
++#include <cuda_bf16.h>
++#include <cuda_runtime.h>
++
++#include <array>
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <iostream>
++#include <random>
++#include <stdexcept>
++#include <vector>
++
++namespace {
++
++namespace art = ninfer::artifact;
++
++int failures = 0;
++
++void expect(bool condition, const char* message) {
++    if (condition) { return; }
++    ++failures;
++    std::cerr << message << '\n';
++}
++
++void check(cudaError_t status, const char* operation) {
++    if (status != cudaSuccess) {
++        throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
++    }
++}
++
++int tile_k(int t) { return 2 * ((t >> 3) & 3) + (t & 1) + 8 * ((t >> 1) & 1); }
++int tile_n(int t) { return (t >> 5) + 8 * ((t >> 2) & 1); }
++
++std::vector<double> hadamard128() {
++    std::vector<double> h(128 * 128);
++    for (int a = 0; a < 128; ++a) {
++        for (int b = 0; b < 128; ++b) {
++            h[a * 128 + b] = (__builtin_popcount(a & b) & 1) ? -1.0 : 1.0;
++        }
++    }
++    const double scale = 1.0 / std::sqrt(128.0);
++    for (double& value : h) { value *= scale; }
++    return h;
++}
++
++int run_case(std::int32_t n, std::int32_t k, int half_bits, std::int32_t columns,
++             std::uint32_t seed) {
++    std::mt19937 generator(seed);
++    const auto uniform = [&] { return std::uniform_real_distribution<float>(-2.0F, 2.0F)(generator); };
++
++    const std::size_t tiles_n = static_cast<std::size_t>(n) / 16;
++    const std::size_t tiles_k = static_cast<std::size_t>(k) / 16;
++    const std::size_t tile_bytes = static_cast<std::size_t>(16 * half_bits);
++    const std::size_t trellis_bytes = tiles_n * tiles_k * tile_bytes;
++    std::vector<std::byte> trellis(trellis_bytes);
++    for (auto& byte : trellis) { byte = static_cast<std::byte>(generator() & 0xFF); }
++    std::vector<float> su(k), sv(n);
++    for (float& value : su) { value = 0.25F + std::abs(uniform()); }
++    for (float& value : sv) { value = 0.25F + std::abs(uniform()); }
++
++    // Packed payload: trellis, then su, then sv, at the layout's plane offsets.
++    const std::array<std::uint64_t, 2> shape{static_cast<std::uint64_t>(n),
++                                            static_cast<std::uint64_t>(k)};
++    const auto geometry = ninfer::weight_geometry(ninfer::QType::EXL3_MUL1,
++                                                  ninfer::QuantLayout::TrellisT16, shape, 1,
++                                                  static_cast<std::uint64_t>(half_bits));
++    std::vector<std::byte> payload(geometry.bytes);
++    std::memcpy(payload.data(), trellis.data(), trellis_bytes);
++    std::memcpy(payload.data() + geometry.input_scale_offset, su.data(), su.size() * sizeof(float));
++    std::memcpy(payload.data() + geometry.output_scale_offset, sv.data(),
++                sv.size() * sizeof(float));
++
++    // Input activation and device output.
++    std::vector<__nv_bfloat16> x(static_cast<std::size_t>(k) * columns);
++    for (auto& value : x) { value = __float2bfloat16(uniform()); }
++
++    std::byte* d_payload = nullptr;
++    __nv_bfloat16* d_x   = nullptr;
++    __nv_bfloat16* d_out = nullptr;
++    check(cudaMalloc(&d_payload, payload.size()), "cudaMalloc(payload)");
++    check(cudaMalloc(&d_x, x.size() * sizeof(__nv_bfloat16)), "cudaMalloc(x)");
++    check(cudaMalloc(&d_out, static_cast<std::size_t>(n) * columns * sizeof(__nv_bfloat16)),
++          "cudaMalloc(out)");
++    check(cudaMemcpy(d_payload, payload.data(), payload.size(), cudaMemcpyHostToDevice),
++          "copy payload");
++    check(cudaMemcpy(d_x, x.data(), x.size() * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice),
++          "copy x");
++
++    ninfer::WeightParent parent{geometry, d_payload};
++    ninfer::WeightView view{geometry.shape, {{&parent, 0, geometry.elements}}};
++    const ninfer::Weight weight = ninfer::native_weight(view);
++    ninfer::Tensor input(d_x, ninfer::DType::BF16, {k, columns});
++    ninfer::Tensor output(d_out, ninfer::DType::BF16, {n, columns});
++
++    const std::size_t scratch =
++        ninfer::ops::linear_workspace_capacity_bytes(ninfer::QType::EXL3_MUL1, n, k,
++                                                     ninfer::ops::LinearPolicy::A16Only, columns,
++                                                     columns);
++    ninfer::DeviceArena workspace(scratch == 0 ? 1 : scratch);
++    ninfer::ops::linear(input, weight, output, ninfer::ops::LinearPolicy::A16Only, workspace,
++                        nullptr);
++    check(cudaDeviceSynchronize(), "linear");
++
++    std::vector<__nv_bfloat16> device_out(static_cast<std::size_t>(n) * columns);
++    check(cudaMemcpy(device_out.data(), d_out, device_out.size() * sizeof(__nv_bfloat16),
++                     cudaMemcpyDeviceToHost),
++          "copy out");
++
++    // FP64 oracle from the stored planes.
++    std::vector<double> z(static_cast<std::size_t>(k) * n, 0.0);
++    for (std::size_t nt = 0; nt < tiles_n; ++nt) {
++        for (std::size_t kt = 0; kt < tiles_k; ++kt) {
++            const std::byte* tile = trellis.data() + (nt * tiles_k + kt) * tile_bytes;
++            std::array<std::uint16_t, art::kExl3WeightsPerTile> states{};
++            art::exl3_unpack_trellis_tile(std::span<const std::byte>(tile, tile_bytes), half_bits,
++                                          states);
++            for (int t = 0; t < 256; ++t) {
++                const std::size_t i = kt * 16 + static_cast<std::size_t>(tile_k(t));
++                const std::size_t j = nt * 16 + static_cast<std::size_t>(tile_n(t));
++                z[i * n + j] = static_cast<double>(art::exl3_mul1_value(states[t]));
++            }
++        }
++    }
++    const std::vector<double> h = hadamard128();
++    std::vector<double> wz(static_cast<std::size_t>(k) * n, 0.0); // H_k Z H_n
++    std::vector<double> temp(static_cast<std::size_t>(k) * n, 0.0);
++    for (std::size_t i = 0; i < static_cast<std::size_t>(k); ++i) {
++        for (std::size_t j = 0; j < static_cast<std::size_t>(n); ++j) {
++            double sum = 0.0;
++            for (std::size_t b = 0; b < 128; ++b) {
++                sum += z[(i / 128 * 128 + b) * n + j] * h[(i % 128) * 128 + b];
++            }
++            temp[i * n + j] = sum;
++        }
++    }
++    for (std::size_t i = 0; i < static_cast<std::size_t>(k); ++i) {
++        for (std::size_t j = 0; j < static_cast<std::size_t>(n); ++j) {
++            double sum = 0.0;
++            for (std::size_t b = 0; b < 128; ++b) {
++                sum += temp[i * n + (j / 128 * 128 + b)] * h[(j % 128) * 128 + b];
++            }
++            wz[i * n + j] = sum;
++        }
++    }
++
++    double max_abs = 0.0, max_error = 0.0;
++    for (std::int32_t j = 0; j < n; ++j) {
++        for (std::int32_t c = 0; c < columns; ++c) {
++            double reference = 0.0;
++            for (std::int32_t i = 0; i < k; ++i) {
++                const double w = su[i] * sv[j] * wz[i * n + j];
++                reference += w * static_cast<double>(__bfloat162float(x[i + c * k]));
++            }
++            const double actual = static_cast<double>(__bfloat162float(device_out[j + c * n]));
++            max_abs     = std::max(max_abs, std::abs(reference));
++            max_error   = std::max(max_error, std::abs(actual - reference));
++        }
++    }
++    const double relative = max_abs > 0.0 ? max_error / max_abs : max_error;
++    if (relative > 2.0e-2) {
++        std::cerr << "EXL3 linear N=" << n << " K=" << k << " T=" << columns
++                  << " half_bits=" << half_bits << " relative error " << relative << '\n';
++        ++failures;
++    }
++
++    check(cudaFree(d_out), "cudaFree(out)");
++    check(cudaFree(d_x), "cudaFree(x)");
++    check(cudaFree(d_payload), "cudaFree(payload)");
++    return 0;
++}
++
++// The model's real parent shapes are far wider than the small exhaustive cases. For a sampled set of
++// output rows this oracle costs O(k*128 + columns*k*128) per row instead of the full O(k*n*128), so
++// the same FP64 decode can qualify [248320, 5120] on one GPU.
++void run_sampled_case(std::int32_t n, std::int32_t k, int half_bits, std::int32_t columns,
++                      std::uint32_t seed) {
++    std::mt19937 generator(seed);
++    const auto uniform = [&] { return std::uniform_real_distribution<float>(-2.0F, 2.0F)(generator); };
++
++    const std::size_t tiles_n = static_cast<std::size_t>(n) / 16;
++    const std::size_t tiles_k = static_cast<std::size_t>(k) / 16;
++    const std::size_t tile_bytes = static_cast<std::size_t>(16 * half_bits);
++    std::vector<std::byte> trellis(tiles_n * tiles_k * tile_bytes);
++    for (auto& byte : trellis) { byte = static_cast<std::byte>(generator() & 0xFF); }
++    std::vector<float> su(k), sv(n);
++    for (float& value : su) { value = 0.25F + std::abs(uniform()); }
++    for (float& value : sv) { value = 0.25F + std::abs(uniform()); }
++
++    const std::array<std::uint64_t, 2> shape{static_cast<std::uint64_t>(n),
++                                            static_cast<std::uint64_t>(k)};
++    const auto geometry = ninfer::weight_geometry(ninfer::QType::EXL3_MUL1,
++                                                  ninfer::QuantLayout::TrellisT16, shape, 1,
++                                                  static_cast<std::uint64_t>(half_bits));
++    std::vector<std::byte> payload(geometry.bytes);
++    std::memcpy(payload.data(), trellis.data(), trellis.size());
++    std::memcpy(payload.data() + geometry.input_scale_offset, su.data(), su.size() * sizeof(float));
++    std::memcpy(payload.data() + geometry.output_scale_offset, sv.data(), sv.size() * sizeof(float));
++
++    std::vector<__nv_bfloat16> x(static_cast<std::size_t>(k) * columns);
++    for (auto& value : x) { value = __float2bfloat16(uniform()); }
++
++    std::byte* d_payload = nullptr;
++    __nv_bfloat16* d_x   = nullptr;
++    __nv_bfloat16* d_out = nullptr;
++    check(cudaMalloc(&d_payload, payload.size()), "cudaMalloc(payload)");
++    check(cudaMalloc(&d_x, x.size() * sizeof(__nv_bfloat16)), "cudaMalloc(x)");
++    check(cudaMalloc(&d_out, static_cast<std::size_t>(n) * columns * sizeof(__nv_bfloat16)),
++          "cudaMalloc(out)");
++    check(cudaMemcpy(d_payload, payload.data(), payload.size(), cudaMemcpyHostToDevice),
++          "copy payload");
++    check(cudaMemcpy(d_x, x.data(), x.size() * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice),
++          "copy x");
++
++    ninfer::WeightParent parent{geometry, d_payload};
++    ninfer::WeightView view{geometry.shape, {{&parent, 0, geometry.elements}}};
++    const ninfer::Weight weight = ninfer::native_weight(view);
++    ninfer::Tensor input(d_x, ninfer::DType::BF16, {k, columns});
++    ninfer::Tensor output(d_out, ninfer::DType::BF16, {n, columns});
++    const std::size_t scratch = ninfer::ops::linear_workspace_capacity_bytes(
++        ninfer::QType::EXL3_MUL1, n, k, ninfer::ops::LinearPolicy::A16Only, columns, columns);
++    ninfer::DeviceArena workspace(scratch == 0 ? 1 : scratch);
++    ninfer::ops::linear(input, weight, output, ninfer::ops::LinearPolicy::A16Only, workspace,
++                        nullptr);
++    check(cudaDeviceSynchronize(), "linear");
++
++    std::vector<__nv_bfloat16> device_out(static_cast<std::size_t>(n) * columns);
++    check(cudaMemcpy(device_out.data(), d_out, device_out.size() * sizeof(__nv_bfloat16),
++                     cudaMemcpyDeviceToHost),
++          "copy out");
++
++    const std::vector<double> h = hadamard128();
++    const std::vector<std::int32_t> rows{0, 1, 15, 16, 127, 128, 129, n / 2, n - 2, n - 1};
++    double max_abs = 0.0, max_error = 0.0;
++    for (const std::int32_t j : rows) {
++        const std::int64_t nb = j / 128;
++        std::vector<double> zblock(static_cast<std::size_t>(k) * 128, 0.0);
++        for (std::size_t ntl = 0; ntl < 8; ++ntl) {
++            for (std::size_t kt = 0; kt < tiles_k; ++kt) {
++                const std::byte* tile =
++                    trellis.data() + ((nb * 8 + ntl) * tiles_k + kt) * tile_bytes;
++                std::array<std::uint16_t, art::kExl3WeightsPerTile> states{};
++                art::exl3_unpack_trellis_tile(std::span<const std::byte>(tile, tile_bytes),
++                                              half_bits, states);
++                for (int t = 0; t < 256; ++t) {
++                    zblock[(kt * 16 + static_cast<std::size_t>(tile_k(t))) * 128 + ntl * 16 +
++                           static_cast<std::size_t>(tile_n(t))] =
++                        static_cast<double>(art::exl3_mul1_value(states[t]));
++                }
++            }
++        }
++        std::vector<double> y(k, 0.0);
++        for (std::int32_t i = 0; i < k; ++i) {
++            double sum = 0.0;
++            for (int jl = 0; jl < 128; ++jl) {
++                sum += zblock[static_cast<std::size_t>(i) * 128 + jl] * h[jl * 128 + (j % 128)];
++            }
++            y[static_cast<std::size_t>(i)] = sum;
++        }
++        for (std::int32_t c = 0; c < columns; ++c) {
++            std::vector<double> a(k, 0.0);
++            for (std::int32_t i = 0; i < k; ++i) {
++                double sum = 0.0;
++                for (int ib = 0; ib < 128; ++ib) {
++                    const std::int32_t src = i / 128 * 128 + ib;
++                    sum += h[(i % 128) * 128 + ib] * su[static_cast<std::size_t>(src)] *
++                           static_cast<double>(
++                               __bfloat162float(x[static_cast<std::size_t>(src) + c * k]));
++                }
++                a[static_cast<std::size_t>(i)] = sum;
++            }
++            double reference = 0.0;
++            for (std::int32_t i = 0; i < k; ++i) {
++                reference += a[static_cast<std::size_t>(i)] * y[static_cast<std::size_t>(i)];
++            }
++            reference *= sv[static_cast<std::size_t>(j)];
++            const double actual = static_cast<double>(
++                __bfloat162float(device_out[j + c * n]));
++            max_abs   = std::max(max_abs, std::abs(reference));
++            max_error = std::max(max_error, std::abs(actual - reference));
++        }
++    }
++    const double relative = max_abs > 0.0 ? max_error / max_abs : max_error;
++    if (relative > 3.0e-2) {
++        std::cerr << "EXL3 sampled linear N=" << n << " K=" << k << " T=" << columns
++                  << " relative error " << relative << '\n';
++        ++failures;
++    }
++    check(cudaFree(d_out), "cudaFree(out)");
++    check(cudaFree(d_x), "cudaFree(x)");
++    check(cudaFree(d_payload), "cudaFree(payload)");
++}
++
++void run_sampled_cases() {
++    run_sampled_case(256, 128, 8, 2, 201U);      // oracle self-check against the exhaustive case
++    run_sampled_case(384, 256, 8, 2, 202U);
++    run_sampled_case(14336, 5120, 10, 2, 211U);  // attention q/key/gate/value parent
++    run_sampled_case(14336, 5120, 10, 32, 241U); // same parent through the tensor-core path
++    run_sampled_case(16384, 5120, 8, 2, 223U);   // GDN q/key/value/z parent
++    run_sampled_case(34816, 5120, 8, 2, 227U);   // MLP gate/up parent
++    run_sampled_case(5120, 6144, 10, 2, 229U);   // attention output
++    run_sampled_case(5120, 17408, 8, 2, 233U);   // MLP down
++    run_sampled_case(248320, 5120, 12, 1, 239U); // vocabulary head
++    // Odd half rates (2.5 / 3.5 / 4.5 bpw) at the real projections: the 3.5 bpw artifact is body K=7
++    // with attention K=9, and these shapes were never exercised on the half-rate decode.
++    run_sampled_case(16384, 5120, 7, 2, 251U);   // GDN input parent at K=7
++    run_sampled_case(14336, 5120, 7, 2, 253U);   // attention q/key/gate/value at K=7
++    run_sampled_case(34816, 5120, 7, 2, 257U);   // MLP gate/up at K=7
++    run_sampled_case(5120, 17408, 7, 2, 259U);   // MLP down at K=7
++    run_sampled_case(5120, 6144, 9, 2, 263U);    // attention output at K=9
++    run_sampled_case(16384, 5120, 9, 2, 269U);   // GDN input parent at K=9
++    run_sampled_case(248320, 5120, 12, 1, 271U); // head self-check at an even rate, same seed family
++}
++
++} // namespace
++
++int main() {
++    int device_count = 0;
++    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
++        std::cout << "SKIP: no usable CUDA device\n";
++        return 77;
++    }
++    try {
++        for (const int rate : {3, 4, 5, 7, 8, 9, 10, 12}) {
++            run_case(128, 128, rate, 1, 101U);
++            run_case(128, 128, rate, 4, 102U);
++            run_case(128, 128, rate, 7, 103U);
++            run_case(256, 128, rate, 64, 107U);
++            run_case(256, 128, rate, 128, 108U);
++            run_case(384, 256, rate, 3, 109U);
++        }
++        run_sampled_cases();
++        std::cout << (failures == 0 ? "OK" : "FAIL") << " EXL3 mul1 A16 Linear\n";
++        return failures == 0 ? 0 : 1;
++    } catch (const std::exception& error) {
++        std::cerr << "EXL3 Linear: " << error.what() << '\n';
++        return 1;
++    }
++}
+diff --git a/tests/ops/linear/test_exl3_consumers.cpp b/tests/ops/linear/test_exl3_consumers.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a347604a3494becb438ecd1615663640eca0280
+--- /dev/null
++++ b/tests/ops/linear/test_exl3_consumers.cpp
+@@ -0,0 +1,403 @@
++// EXL3 fused-consumer qualification: `linear_add`, `linear_swiglu`, `attn_input_proj` and
++// `gdn_input_proj` decode one EXL3 parent and apply their epilogue. The reference is the validated
++// `ops::linear` on the same parent, so this isolates the consumers' row mapping and epilogue from
++// the decode itself (which `ninfer_linear_exl3_a16_test` qualifies against an FP64 oracle).
++
++#include "artifact/exl3_trellis.h"
++#include "core/arena.h"
++#include "core/weight_view.h"
++#include "ninfer/ops/attn_input_proj.h"
++#include "ninfer/ops/gdn_input_proj.h"
++#include "ninfer/ops/linear.h"
++#include "ninfer/ops/linear_add.h"
++#include "ninfer/ops/linear_swiglu.h"
++
++#include <cuda_bf16.h>
++#include <cuda_runtime.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <iostream>
++#include <optional>
++#include <random>
++#include <stdexcept>
++#include <vector>
++
++namespace {
++
++namespace art = ninfer::artifact;
++
++int failures = 0;
++
++void expect(bool condition, const char* message) {
++    if (condition) { return; }
++    ++failures;
++    std::cerr << message << '\n';
++}
++
++void check(cudaError_t status, const char* operation) {
++    if (status != cudaSuccess) {
++        throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
++    }
++}
++
++struct Exl3Parent {
++    std::vector<std::byte> host;
++    std::byte* device = nullptr;
++    ninfer::WeightGeometry geometry{};
++    std::optional<ninfer::WeightParent> parent;
++    std::optional<ninfer::WeightView> view;
++    ninfer::Weight weight{};
++
++    Exl3Parent(std::int32_t n, std::int32_t k, int half_bits, std::uint32_t seed) {
++        std::mt19937 generator(seed);
++        const std::size_t tiles_n = static_cast<std::size_t>(n) / 16;
++        const std::size_t tiles_k = static_cast<std::size_t>(k) / 16;
++        const std::size_t tile_bytes = static_cast<std::size_t>(16 * half_bits);
++        std::vector<std::byte> trellis(tiles_n * tiles_k * tile_bytes);
++        for (auto& byte : trellis) { byte = static_cast<std::byte>(generator() & 0xFF); }
++        std::vector<float> su(k), sv(n);
++        const auto uniform = [&] { return std::uniform_real_distribution<float>(0.1F, 1.5F)(generator); };
++        for (float& value : su) { value = uniform(); }
++        for (float& value : sv) { value = uniform(); }
++
++        const std::array<std::uint64_t, 2> shape{static_cast<std::uint64_t>(n),
++                                                 static_cast<std::uint64_t>(k)};
++        geometry = ninfer::weight_geometry(ninfer::QType::EXL3_MUL1, ninfer::QuantLayout::TrellisT16,
++                                           shape, 1, static_cast<std::uint64_t>(half_bits));
++        host.resize(geometry.bytes);
++        std::memcpy(host.data(), trellis.data(), trellis.size());
++        std::memcpy(host.data() + geometry.input_scale_offset, su.data(), su.size() * sizeof(float));
++        std::memcpy(host.data() + geometry.output_scale_offset, sv.data(), sv.size() * sizeof(float));
++        check(cudaMalloc(&device, host.size()), "cudaMalloc(parent)");
++        check(cudaMemcpy(device, host.data(), host.size(), cudaMemcpyHostToDevice), "copy parent");
++        parent.emplace(ninfer::WeightParent{geometry, device});
++        view.emplace(ninfer::WeightView{geometry.shape, {{&*parent, 0, geometry.elements}}});
++        weight = ninfer::native_weight(*view);
++    }
++
++    ~Exl3Parent() {
++        if (device != nullptr) { (void)cudaFree(device); }
++    }
++};
++
++std::vector<__nv_bfloat16> host_bf16(std::size_t count, std::uint32_t seed) {
++    std::mt19937 generator(seed);
++    const auto uniform = [&] { return std::uniform_real_distribution<float>(-1.0F, 1.0F)(generator); };
++    std::vector<__nv_bfloat16> out(count);
++    for (auto& value : out) { value = __float2bfloat16(uniform()); }
++    return out;
++}
++
++// Runs the validated `ops::linear` on the parent and returns its BF16 [n, t] output on the host.
++std::vector<__nv_bfloat16> linear_reference(const Exl3Parent& parent, const __nv_bfloat16* x,
++                                            std::int32_t k, std::int32_t n, std::int32_t t) {
++    const std::size_t scratch = ninfer::ops::linear_workspace_capacity_bytes(
++        ninfer::QType::EXL3_MUL1, n, k, ninfer::ops::LinearPolicy::A16Only, t, t);
++    ninfer::DeviceArena workspace(scratch == 0 ? 1 : scratch);
++    __nv_bfloat16* d_out = nullptr;
++    check(cudaMalloc(&d_out, static_cast<std::size_t>(n) * t * sizeof(__nv_bfloat16)),
++          "cudaMalloc(ref out)");
++    ninfer::Tensor input(const_cast<__nv_bfloat16*>(x), ninfer::DType::BF16, {k, t});
++    ninfer::Tensor output(d_out, ninfer::DType::BF16, {n, t});
++    ninfer::ops::linear(input, parent.weight, output, ninfer::ops::LinearPolicy::A16Only, workspace,
++                        nullptr);
++    check(cudaDeviceSynchronize(), "linear reference");
++    std::vector<__nv_bfloat16> host(static_cast<std::size_t>(n) * t);
++    check(cudaMemcpy(host.data(), d_out, host.size() * sizeof(__nv_bfloat16),
++                     cudaMemcpyDeviceToHost),
++          "copy ref out");
++    check(cudaFree(d_out), "cudaFree(ref out)");
++    return host;
++}
++
++// The reference and the consumer run the same split-K GEMV, whose FP32 K reduction is reassociated
++// per launch by its block-atomic accumulation, so identical inputs can differ by a few BF16 ULP. The
++// oracle bounds the worst element by a small multiple of one ULP of the largest magnitude present; a
++// row-mapping or epilogue defect displaces whole rows and lands orders of magnitude above that.
++double worst_error_in_ulps(const std::vector<__nv_bfloat16>& actual,
++                           const std::vector<__nv_bfloat16>& expected) {
++    double scale = 0.0, error = 0.0;
++    for (std::size_t i = 0; i < actual.size(); ++i) {
++        const double a = static_cast<double>(__bfloat162float(actual[i]));
++        const double e = static_cast<double>(__bfloat162float(expected[i]));
++        scale = std::max(scale, std::abs(e));
++        error = std::max(error, std::abs(a - e));
++    }
++    if (scale == 0.0) { return error == 0.0 ? 0.0 : 1.0e9; }
++    return error / std::ldexp(1.0, std::ilogb(scale) - 7);
++}
++
++// A row-mapping defect moves an element by O(max), i.e. O(2^7) ULP of the largest magnitude, while
++// the split-K reassociation stays within a couple, so four keeps a wide margin on both sides.
++constexpr double kConsumerUlpBudget = 4.0;
++
++double max_relative(const std::vector<__nv_bfloat16>& actual,
++                    const std::vector<__nv_bfloat16>& expected) {
++    double scale = 0.0, error = 0.0;
++    for (std::size_t i = 0; i < actual.size(); ++i) {
++        const double a = static_cast<double>(__bfloat162float(actual[i]));
++        const double e = static_cast<double>(__bfloat162float(expected[i]));
++        scale = std::max(scale, std::abs(e));
++        error = std::max(error, std::abs(a - e));
++    }
++    return scale > 0.0 ? error / scale : error;
++}
++
++void test_linear_add(std::int32_t n, std::int32_t k, int half_bits, std::int32_t t,
++                     std::uint32_t seed) {
++    Exl3Parent parent(n, k, half_bits, seed);
++    const auto x = host_bf16(static_cast<std::size_t>(k) * t, seed + 1U);
++    const auto residual = host_bf16(static_cast<std::size_t>(n) * t, seed + 2U);
++    const auto reference = linear_reference(parent, x.data(), k, n, t);
++
++    __nv_bfloat16 *d_x = nullptr, *d_res = nullptr;
++    check(cudaMalloc(&d_x, x.size() * sizeof(__nv_bfloat16)), "cudaMalloc(x)");
++    check(cudaMalloc(&d_res, residual.size() * sizeof(__nv_bfloat16)), "cudaMalloc(res)");
++    check(cudaMemcpy(d_x, x.data(), x.size() * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice),
++          "copy x");
++    check(cudaMemcpy(d_res, residual.data(), residual.size() * sizeof(__nv_bfloat16),
++                     cudaMemcpyHostToDevice),
++          "copy residual");
++    const std::size_t scratch = ninfer::ops::linear_add_workspace_capacity_bytes(
++        ninfer::QType::EXL3_MUL1, n, k, ninfer::ops::LinearPolicy::A16Only, t, t);
++    ninfer::DeviceArena workspace(scratch == 0 ? 1 : scratch);
++    ninfer::Tensor input(d_x, ninfer::DType::BF16, {k, t});
++    ninfer::Tensor out(d_res, ninfer::DType::BF16, {n, t});
++    ninfer::ops::linear_add(input, parent.weight, out, ninfer::ops::LinearPolicy::A16Only, workspace,
++                            nullptr);
++    check(cudaDeviceSynchronize(), "linear_add");
++    std::vector<__nv_bfloat16> host(residual.size());
++    check(cudaMemcpy(host.data(), d_res, host.size() * sizeof(__nv_bfloat16),
++                     cudaMemcpyDeviceToHost),
++          "copy linear_add");
++    std::vector<__nv_bfloat16> expected(residual.size());
++    for (std::size_t i = 0; i < expected.size(); ++i) {
++        expected[i] = __float2bfloat16(__bfloat162float(reference[i]) +
++                                       __bfloat162float(residual[i]));
++    }
++    const double relative = max_relative(host, expected);
++    if (relative > 2.0e-2) {
++        std::cerr << "EXL3 linear_add N=" << n << " K=" << k << " T=" << t
++                  << " relative error " << relative << '\n';
++        ++failures;
++    }
++    check(cudaFree(d_res), "cudaFree(res)");
++    check(cudaFree(d_x), "cudaFree(x)");
++}
++
++void test_linear_swiglu(std::int32_t n, std::int32_t k, int half_bits, std::int32_t t,
++                        std::uint32_t seed) {
++    Exl3Parent parent(n, k, half_bits, seed);
++    const auto x = host_bf16(static_cast<std::size_t>(k) * t, seed + 1U);
++    const auto reference = linear_reference(parent, x.data(), k, n, t);
++
++    __nv_bfloat16 *d_x = nullptr, *d_out = nullptr;
++    check(cudaMalloc(&d_x, x.size() * sizeof(__nv_bfloat16)), "cudaMalloc(x)");
++    check(cudaMalloc(&d_out, static_cast<std::size_t>(n / 2) * t * sizeof(__nv_bfloat16)),
++          "cudaMalloc(out)");
++    check(cudaMemcpy(d_x, x.data(), x.size() * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice),
++          "copy x");
++    const std::size_t scratch = ninfer::ops::linear_swiglu_workspace_capacity_bytes(
++        ninfer::QType::EXL3_MUL1, n, k, ninfer::ops::LinearPolicy::A16Only, t, t);
++    ninfer::DeviceArena workspace(scratch == 0 ? 1 : scratch);
++    ninfer::Tensor input(d_x, ninfer::DType::BF16, {k, t});
++    ninfer::Tensor out(d_out, ninfer::DType::BF16, {n / 2, t});
++    ninfer::ops::linear_swiglu(input, parent.weight, out, ninfer::ops::LinearPolicy::A16Only,
++                               workspace, nullptr);
++    check(cudaDeviceSynchronize(), "linear_swiglu");
++    std::vector<__nv_bfloat16> host(static_cast<std::size_t>(n / 2) * t);
++    check(cudaMemcpy(host.data(), d_out, host.size() * sizeof(__nv_bfloat16),
++                     cudaMemcpyDeviceToHost),
++          "copy linear_swiglu");
++    std::vector<__nv_bfloat16> expected(host.size());
++    for (std::int32_t c = 0; c < t; ++c) {
++        for (std::int32_t j = 0; j < n / 2; ++j) {
++            const double gate = __bfloat162float(reference[j + static_cast<std::size_t>(c) * n]);
++            const double up =
++                __bfloat162float(reference[(n / 2 + j) + static_cast<std::size_t>(c) * n]);
++            const double silu = gate / (1.0 + std::exp(-gate));
++            expected[j + static_cast<std::size_t>(c) * (n / 2)] =
++                __float2bfloat16(static_cast<float>(silu * up));
++        }
++    }
++    const double relative = max_relative(host, expected);
++    if (relative > 2.0e-2) {
++        double host_max = 0.0, expected_max = 0.0;
++        for (std::size_t i = 0; i < host.size(); ++i) {
++            host_max = std::max(host_max, std::abs(static_cast<double>(__bfloat162float(host[i]))));
++            expected_max =
++                std::max(expected_max, std::abs(static_cast<double>(__bfloat162float(expected[i]))));
++        }
++        std::cerr << "EXL3 linear_swiglu N=" << n << " K=" << k << " T=" << t
++                  << " relative error " << relative << " host_max " << host_max << " expected_max "
++                  << expected_max << '\n';
++        std::cerr << "  host[0..3] " << __bfloat162float(host[0]) << ' '
++                  << __bfloat162float(host[1]) << ' ' << __bfloat162float(host[2]) << ' '
++                  << __bfloat162float(host[3]) << "  expected[0..3] "
++                  << __bfloat162float(expected[0]) << ' ' << __bfloat162float(expected[1]) << ' '
++                  << __bfloat162float(expected[2]) << ' ' << __bfloat162float(expected[3]) << '\n';
++        const double r0 = __bfloat162float(reference[0]);
++        const double r1 = __bfloat162float(reference[static_cast<std::size_t>(n / 2)]);
++        std::cerr << "  reference gate[0]=" << r0 << " up[0]=" << r1
++                  << " silu(gate)*up=" << (r0 / (1.0 + std::exp(-r0))) * r1
++                  << " silu(up)*gate=" << (r1 / (1.0 + std::exp(-r1))) * r0 << '\n';
++        ++failures;
++    }
++    check(cudaFree(d_out), "cudaFree(out)");
++    check(cudaFree(d_x), "cudaFree(x)");
++}
++
++void test_attn_input_proj(std::int32_t t, int half_bits, std::uint32_t seed) {
++    constexpr std::int32_t k = 5120, q_rows = 6144, kv_rows = 1024, n = 14336;
++    Exl3Parent parent(n, k, half_bits, seed);
++    const auto x = host_bf16(static_cast<std::size_t>(k) * t, seed + 1U);
++    const auto reference = linear_reference(parent, x.data(), k, n, t);
++
++    __nv_bfloat16 *d_x = nullptr, *d_q = nullptr, *d_g = nullptr, *d_k = nullptr, *d_v = nullptr;
++    check(cudaMalloc(&d_x, x.size() * sizeof(__nv_bfloat16)), "cudaMalloc(x)");
++    for (auto** p : {&d_q, &d_g}) {
++        check(cudaMalloc(p, static_cast<std::size_t>(q_rows) * t * sizeof(__nv_bfloat16)),
++              "cudaMalloc(q/gate)");
++    }
++    for (auto** p : {&d_k, &d_v}) {
++        check(cudaMalloc(p, static_cast<std::size_t>(kv_rows) * t * sizeof(__nv_bfloat16)),
++              "cudaMalloc(k/v)");
++    }
++    check(cudaMemcpy(d_x, x.data(), x.size() * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice),
++          "copy x");
++    const std::size_t scratch = ninfer::ops::attn_input_proj_workspace_capacity_bytes(
++        ninfer::QType::EXL3_MUL1, n, k, ninfer::ops::LinearPolicy::A16Only, t, t);
++    ninfer::DeviceArena workspace(scratch == 0 ? 1 : scratch);
++    ninfer::Tensor input(d_x, ninfer::DType::BF16, {k, t});
++    ninfer::Tensor q(d_q, ninfer::DType::BF16, {q_rows, t});
++    ninfer::Tensor gate(d_g, ninfer::DType::BF16, {q_rows, t});
++    ninfer::Tensor key(d_k, ninfer::DType::BF16, {kv_rows, t});
++    ninfer::Tensor value(d_v, ninfer::DType::BF16, {kv_rows, t});
++    ninfer::ops::attn_input_proj(input, parent.weight, q, gate, key, value,
++                                 ninfer::ops::LinearPolicy::A16Only, workspace, nullptr);
++    check(cudaDeviceSynchronize(), "attn_input_proj");
++    const auto copy = [&](__nv_bfloat16* device, std::size_t count) {
++        std::vector<__nv_bfloat16> host(count);
++        check(cudaMemcpy(host.data(), device, count * sizeof(__nv_bfloat16),
++                         cudaMemcpyDeviceToHost),
++              "copy slice");
++        return host;
++    };
++    const auto q_host = copy(d_q, static_cast<std::size_t>(q_rows) * t);
++    const auto k_host = copy(d_k, static_cast<std::size_t>(kv_rows) * t);
++    const auto g_host = copy(d_g, static_cast<std::size_t>(q_rows) * t);
++    const auto v_host = copy(d_v, static_cast<std::size_t>(kv_rows) * t);
++    const auto slice = [&](std::int32_t row, std::int32_t rows) {
++        std::vector<__nv_bfloat16> out(static_cast<std::size_t>(rows) * t);
++        for (std::int32_t c = 0; c < t; ++c) {
++            for (std::int32_t r = 0; r < rows; ++r) {
++                out[r + static_cast<std::size_t>(c) * rows] =
++                    reference[(row + r) + static_cast<std::size_t>(c) * n];
++            }
++        }
++        return out;
++    };
++    const double q_err = worst_error_in_ulps(q_host, slice(0, q_rows));
++    const double k_err = worst_error_in_ulps(k_host, slice(q_rows, kv_rows));
++    const double g_err = worst_error_in_ulps(g_host, slice(q_rows + kv_rows, q_rows));
++    const double v_err = worst_error_in_ulps(v_host, slice(q_rows + kv_rows + q_rows, kv_rows));
++    if (std::max({q_err, k_err, g_err, v_err}) > kConsumerUlpBudget) {
++        std::cerr << "EXL3 attn_input_proj T=" << t << " errors (BF16 ULP of max) q=" << q_err
++                  << " k=" << k_err << " gate=" << g_err << " value=" << v_err << '\n';
++        ++failures;
++    }
++    check(cudaFree(d_v), "cudaFree(v)");
++    check(cudaFree(d_k), "cudaFree(k)");
++    check(cudaFree(d_g), "cudaFree(gate)");
++    check(cudaFree(d_q), "cudaFree(q)");
++    check(cudaFree(d_x), "cudaFree(x)");
++}
++
++void test_gdn_input_proj(std::int32_t t, int half_bits, std::uint32_t seed) {
++    constexpr std::int32_t k = 5120, qkv_rows = 10240, z_rows = 6144, n = 16384;
++    Exl3Parent parent(n, k, half_bits, seed);
++    const auto x = host_bf16(static_cast<std::size_t>(k) * t, seed + 1U);
++    const auto reference = linear_reference(parent, x.data(), k, n, t);
++
++    __nv_bfloat16 *d_x = nullptr, *d_qkv = nullptr, *d_z = nullptr;
++    check(cudaMalloc(&d_x, x.size() * sizeof(__nv_bfloat16)), "cudaMalloc(x)");
++    check(cudaMalloc(&d_qkv, static_cast<std::size_t>(qkv_rows) * t * sizeof(__nv_bfloat16)),
++          "cudaMalloc(qkv)");
++    check(cudaMalloc(&d_z, static_cast<std::size_t>(z_rows) * t * sizeof(__nv_bfloat16)),
++          "cudaMalloc(z)");
++    check(cudaMemcpy(d_x, x.data(), x.size() * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice),
++          "copy x");
++    const std::size_t scratch = ninfer::ops::gdn_input_proj_workspace_capacity_bytes(
++        ninfer::QType::EXL3_MUL1, n, k, ninfer::ops::LinearPolicy::A16Only, t, t);
++    ninfer::DeviceArena workspace(scratch == 0 ? 1 : scratch);
++    ninfer::Tensor input(d_x, ninfer::DType::BF16, {k, t});
++    ninfer::Tensor qkv(d_qkv, ninfer::DType::BF16, {qkv_rows, t});
++    ninfer::Tensor z(d_z, ninfer::DType::BF16, {z_rows, t});
++    ninfer::ops::gdn_input_proj(input, parent.weight, qkv, z, ninfer::ops::LinearPolicy::A16Only,
++                                workspace, nullptr);
++    check(cudaDeviceSynchronize(), "gdn_input_proj");
++    std::vector<__nv_bfloat16> qkv_host(static_cast<std::size_t>(qkv_rows) * t);
++    std::vector<__nv_bfloat16> z_host(static_cast<std::size_t>(z_rows) * t);
++    check(cudaMemcpy(qkv_host.data(), d_qkv, qkv_host.size() * sizeof(__nv_bfloat16),
++                     cudaMemcpyDeviceToHost),
++          "copy qkv");
++    check(cudaMemcpy(z_host.data(), d_z, z_host.size() * sizeof(__nv_bfloat16),
++                     cudaMemcpyDeviceToHost),
++          "copy z");
++    std::vector<__nv_bfloat16> qkv_ref(static_cast<std::size_t>(qkv_rows) * t);
++    std::vector<__nv_bfloat16> z_ref(static_cast<std::size_t>(z_rows) * t);
++    for (std::int32_t c = 0; c < t; ++c) {
++        for (std::int32_t r = 0; r < qkv_rows; ++r) {
++            qkv_ref[r + static_cast<std::size_t>(c) * qkv_rows] =
++                reference[r + static_cast<std::size_t>(c) * n];
++        }
++        for (std::int32_t r = 0; r < z_rows; ++r) {
++            z_ref[r + static_cast<std::size_t>(c) * z_rows] =
++                reference[(qkv_rows + r) + static_cast<std::size_t>(c) * n];
++        }
++    }
++    const double qkv_err = worst_error_in_ulps(qkv_host, qkv_ref);
++    const double z_err = worst_error_in_ulps(z_host, z_ref);
++    if (std::max(qkv_err, z_err) > kConsumerUlpBudget) {
++        std::cerr << "EXL3 gdn_input_proj T=" << t << " errors (BF16 ULP of max) qkv=" << qkv_err
++                  << " z=" << z_err << '\n';
++        ++failures;
++    }
++    check(cudaFree(d_z), "cudaFree(z)");
++    check(cudaFree(d_qkv), "cudaFree(qkv)");
++    check(cudaFree(d_x), "cudaFree(x)");
++}
++
++} // namespace
++
++int main() {
++    int device_count = 0;
++    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
++        std::cout << "SKIP: no usable CUDA device\n";
++        return 77;
++    }
++    try {
++        test_linear_add(5120, 17408, 8, 2, 301U);
++        test_linear_swiglu(34816, 5120, 8, 2, 303U);
++        test_attn_input_proj(2, 10, 305U);
++        test_gdn_input_proj(2, 8, 307U);
++        // The 3.5 bpw artifact is attention K=9 with GDN K=7 -- the odd half rates the consumers take
++        // in production, and the combination that had never been run.
++        test_linear_add(5120, 17408, 7, 2, 311U);
++        test_linear_swiglu(34816, 5120, 7, 2, 313U);
++        test_attn_input_proj(2, 9, 317U);
++        test_gdn_input_proj(2, 7, 319U);
++        // Above the GEMV cutoff the consumers take the tensor-core `exl3_mma`, at both tile sizes
++        // (T <= 64 selects the 16-row tile, larger T the 64-row one).
++        test_gdn_input_proj(32, 7, 331U);
++        test_gdn_input_proj(96, 8, 333U);
++        std::cout << (failures == 0 ? "OK" : "FAIL") << " EXL3 fused consumers\n";
++        return failures == 0 ? 0 : 1;
++    } catch (const std::exception& error) {
++        std::cerr << "EXL3 consumers: " << error.what() << '\n';
++        return 1;
++    }
++}
+diff --git a/tests/ops/linear/tests.cmake b/tests/ops/linear/tests.cmake
+index 0fd182f9f31f0c887c952afbd81280d865d20841..2b7049d832ec87b9a5ee18b0cf6b36dd8935f769 100644
+--- a/tests/ops/linear/tests.cmake
++++ b/tests/ops/linear/tests.cmake
+@@ -94,3 +94,11 @@ ninfer_add_op_test(ninfer_linear_gguf_mmq_limits_test
+ ninfer_add_op_test(ninfer_linear_t5_test STANDALONE
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_t5.cpp" LIBRARIES ninfer_ops)
+ ninfer_stage_runtime_dlls(ninfer_linear_t5_test)
++
++ninfer_add_op_test(ninfer_linear_exl3_a16_test
++  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_exl3_a16.cpp"
++  LIBRARIES ninfer_ops ninfer_artifact)
++
++ninfer_add_op_test(ninfer_linear_exl3_consumers_test
++  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_exl3_consumers.cpp"
++  LIBRARIES ninfer_ops ninfer_artifact)
+diff --git a/tools/artifact/codecs/exl3.py b/tools/artifact/codecs/exl3.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..06ca6feea3a05d29a8117872d3e6fa4a591d8f35
+--- /dev/null
++++ b/tools/artifact/codecs/exl3.py
+@@ -0,0 +1,129 @@
++"""EXL3 mul1 trellis tiles (trellis_t16_v1): exact state unpacking and FP64 decoding.
++
++A tensor of shape [N, K] (output channels by input channels) is stored as N/16 x K/16 tiles in
++output-major order, each tile a tail-biting bitstream of 16 * bitrate_half_bits bytes, plus FP32
++input scales su[K] and output scales sv[N]. With Z[k][n] = mul1(state) the exact integers of the
++tiles, the represented matrix is
++
++    W[n][k] = (diag(su) · H128_k · Z · H128_n · diag(sv))[k][n]
++
++where H128 is the normalized 128-point Sylvester Hadamard applied blockwise
++(docs/maintainer/storage-layouts.md section 9).
++"""
++
++from __future__ import annotations
++
++from functools import cache
++
++import torch
++
++MUL1 = 0x83DCD12D
++TILE = 16
++TILE_STATES = 256
++
++
++@cache
++def tile_order() -> tuple[torch.Tensor, torch.Tensor]:
++    """(k, n) within the tile of each of the 256 states (mma.m16n8k16 B-fragment order)."""
++    t = torch.arange(TILE_STATES)
++    k = 2 * ((t >> 3) & 3) + (t & 1) + 8 * ((t >> 1) & 1)
++    n = (t >> 5) + 8 * ((t >> 2) & 1)
++    return k, n
++
++
++def step_widths(bitrate_half_bits: int) -> torch.Tensor:
++    if isinstance(bitrate_half_bits, bool) or not 2 <= bitrate_half_bits <= 16:
++        raise ValueError("EXL3 bitrate_half_bits must be an integer in [2, 16]")
++    t = torch.arange(TILE_STATES)
++    return bitrate_half_bits // 2 + ((bitrate_half_bits & 1) & t)
++
++
++@cache
++def _window_bits(bitrate_half_bits: int) -> torch.Tensor:
++    """Stream bit index of window bit b (low bit oldest) for each state: [256, 16]."""
++    total = 128 * bitrate_half_bits
++    end = torch.cumsum(step_widths(bitrate_half_bits), 0)
++    begin = (end - 16) % total
++    return (begin.unsqueeze(1) + torch.arange(16)) % total
++
++
++def unpack_states(trellis: torch.Tensor, bitrate_half_bits: int) -> torch.Tensor:
++    """States [..., 256] (int64) of tiles [..., 16 * bitrate_half_bits] (uint8)."""
++    if trellis.dtype != torch.uint8 or trellis.shape[-1] != 16 * bitrate_half_bits:
++        raise ValueError("EXL3 tiles must be uint8 with 16 * bitrate_half_bits bytes each")
++    shifts = torch.arange(8, dtype=torch.uint8)
++    bits = ((trellis.unsqueeze(-1) >> shifts) & 1).flatten(-2).long()  # little-endian stream
++    window = bits[..., _window_bits(bitrate_half_bits)]
++    return (window << torch.arange(16)).sum(-1)
++
++
++def pack_states(states: torch.Tensor, bitrate_half_bits: int) -> torch.Tensor:
++    """Tiles [..., 16 * bitrate_half_bits] (uint8) of circular states [..., 256]."""
++    widths = step_widths(bitrate_half_bits)
++    previous = torch.roll(states, 1, dims=-1)
++    expected = (previous >> widths) | ((states >> (16 - widths)) << (16 - widths))
++    if not bool((states == expected).all()) or bool(((states < 0) | (states > 0xFFFF)).any()):
++        raise ValueError("EXL3 states do not form circular trellis paths")
++    # Each state contributes its top `width` bits to the stream, lowest of them first.
++    total = 128 * bitrate_half_bits
++    owner = torch.repeat_interleave(torch.arange(TILE_STATES), widths)
++    first = torch.cumsum(widths, 0) - widths
++    bit = torch.arange(total) - first[owner]
++    bits = (states[..., owner] >> (16 - widths[owner] + bit)) & 1
++    grouped = bits.view(*states.shape[:-1], total // 8, 8)
++    return (grouped << torch.arange(8)).sum(-1).to(torch.uint8)
++
++
++def mul1(states: torch.Tensor) -> torch.Tensor:
++    """Exact codebook integers in [-510, 510]."""
++    product = (states.long() * MUL1) & 0xFFFFFFFF
++    total = sum((product >> shift) & 0xFF for shift in (0, 8, 16, 24))
++    return total - 510
++
++
++@cache
++def hadamard128() -> torch.Tensor:
++    h = torch.ones((1, 1), dtype=torch.float64)
++    for _ in range(7):
++        h = torch.cat((torch.cat((h, h), 1), torch.cat((h, -h), 1)), 0)
++    return h / 128**0.5
++
++
++def decode(
++    trellis: torch.Tensor, su: torch.Tensor, sv: torch.Tensor, bitrate_half_bits: int
++) -> torch.Tensor:
++    """FP64 matrix [N, K] represented by tiles [N/16, K/16, tile_bytes] and scales su[K], sv[N].
++
++    A stacked object passes su[S, K]: its S matrices of N / S rows each use their own row of su,
++    and the rows of sv are the concatenation of theirs.
++    """
++    tiles_n, tiles_k = trellis.shape[:2]
++    n, k = tiles_n * TILE, tiles_k * TILE
++    if su.ndim == 2:
++        sets = su.shape[0]
++        if sets < 1 or n % sets or (n // sets) % 128 or su.shape[1] != k or sv.shape != (n,):
++            raise ValueError("EXL3 stacked decode needs su[S, K], sv[N] and whole 128-row sets")
++        rows = n // sets // TILE
++        return torch.cat(
++            [
++                decode(
++                    trellis[s * rows : (s + 1) * rows],
++                    su[s],
++                    sv[s * rows * TILE : (s + 1) * rows * TILE],
++                    bitrate_half_bits,
++                )
++                for s in range(sets)
++            ]
++        )
++    if su.shape != (k,) or sv.shape != (n,) or n % 128 or k % 128:
++        raise ValueError("EXL3 decode needs su[K], sv[N] and 128-aligned dimensions")
++    z_tiles = mul1(unpack_states(trellis, bitrate_half_bits)).double()  # [tn, tk, 256]
++    tk_idx, tn_idx = tile_order()
++    z = torch.zeros((tiles_k, TILE, tiles_n, TILE), dtype=torch.float64)
++    z[:, tk_idx, :, tn_idx] = z_tiles.permute(2, 1, 0)
++    z = z.reshape(k, n)
++    h = hadamard128()
++    z = (h @ z.view(k // 128, 128, n)).view(k, n)  # H128 along k
++    z = (z.view(k, n // 128, 128) @ h).view(k, n)  # H128 along n
++    w_kn = su.double().unsqueeze(1) * z * sv.double().unsqueeze(0)
++    return w_kn.T.contiguous()
+diff --git a/tools/artifact/formats.py b/tools/artifact/formats.py
+index f4bbc15896bae1c62a3e7db478ac29b2646b258e..e97b9522a8811ac4c03e0383857a2d25d30444a8 100644
+--- a/tools/artifact/formats.py
++++ b/tools/artifact/formats.py
+@@ -62,8 +62,15 @@ class GgufFormat:
+     block_bytes: int
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class Exl3Format:
++    """Mul1 trellis codes whose per-tensor bitrate is stored with the tensor object."""
++
++    name: str
++
++
+ NumericFormat: TypeAlias = (
+-    DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat | GgufFormat
++    DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat | GgufFormat | Exl3Format
+ )
+ 
+ 
+@@ -85,6 +92,7 @@ T5_G128_FP16 = QuantFormat("t5_g128_fp16", 2, 128, -1, 1)
+ NVFP4 = Nvfp4Format("nvfp4", 16)
+ FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16")
+ FP8_E4M3FN_ROW_FP16 = Fp8RowFormat("fp8_e4m3fn_row_fp16", "fp16")
++EXL3_MUL1 = Exl3Format("exl3_mul1")
+ 
+ # ggml block types (ggml-common.h), kept byte for byte.
+ GGUF_Q2_K = GgufFormat("gguf_q2_k", 10, 256, 84)
+@@ -144,6 +152,7 @@ GGUF_FORMATS = MappingProxyType(
+         )
+     }
+ )
++EXL3_FORMATS = MappingProxyType({EXL3_MUL1.name: EXL3_MUL1})
+ GGUF_FORMATS_BY_TYPE = MappingProxyType(
+     {item.ggml_type: item for item in GGUF_FORMATS.values()}
+ )
+@@ -154,6 +163,7 @@ NUMERIC_FORMATS = MappingProxyType(
+         **NVFP4_FORMATS,
+         **FP8_ROW_FORMATS,
+         **GGUF_FORMATS,
++        **EXL3_FORMATS,
+     }
+ )
+ 
+@@ -238,11 +248,13 @@ __all__ = [
+     "NVFP4",
+     "FP8_E4M3FN_ROW_BF16",
+     "FP8_E4M3FN_ROW_FP16",
++    "EXL3_MUL1",
+     "DIRECT_FORMATS",
+     "QUANT_FORMATS",
+     "NVFP4_FORMATS",
+     "FP8_ROW_FORMATS",
+     "GGUF_FORMATS",
++    "EXL3_FORMATS",
+     "GGUF_FORMATS_BY_TYPE",
+     "NUMERIC_FORMATS",
+     "DirectFormat",
+@@ -250,6 +262,7 @@ __all__ = [
+     "Nvfp4Format",
+     "Fp8RowFormat",
+     "GgufFormat",
++    "Exl3Format",
+     "NumericFormat",
+     "get_format",
+     "decode_e2m1_word",
+diff --git a/tools/artifact/layouts.py b/tools/artifact/layouts.py
+index d19216113e5ca4f3fc6ddd198de82fc1517441a8..cbd4eee087cd09c9f33fb6d075873a982dd72161 100644
+--- a/tools/artifact/layouts.py
++++ b/tools/artifact/layouts.py
+@@ -17,6 +17,7 @@ from typing import Sequence
+ from .formats import (
+     GGUF_FORMATS,
+     DirectFormat,
++    Exl3Format,
+     Fp8RowFormat,
+     GgufFormat,
+     Nvfp4Format,
+@@ -97,6 +98,23 @@ class RowInterleavedGeometry:
+     payload_bytes: int
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class Exl3Geometry:
++    n: int
++    k: int
++    bitrate_half_bits: int
++    tiles_n: int
++    tiles_k: int
++    tile_bytes: int
++    trellis_bytes: int
++    input_scale_offset: int
++    input_scale_bytes: int
++    output_scale_offset: int
++    output_scale_bytes: int
++    payload_bytes: int
++    scale_sets: int = 1
++
++
+ CONTIGUOUS_LE_V1 = Layout("contiguous_le_v1", 256, frozenset(("bf16", "fp32", "int32")))
+ ROW_SPLIT_K128_V1 = Layout(
+     "row_split_k128_v1",
+@@ -117,6 +135,7 @@ ROW_INTERLEAVED_V1 = Layout(
+     "row_interleaved_v1", 256, frozenset(("fp8_e4m3fn_row_fp16",))
+ )
+ GGUF_BLOCKS_V1 = Layout("gguf_blocks_v1", 256, frozenset(GGUF_FORMATS))
++TRELLIS_T16_V1 = Layout("trellis_t16_v1", 256, frozenset(("exl3_mul1",)))
+ 
+ LAYOUTS = MappingProxyType(
+     {
+@@ -128,6 +147,7 @@ LAYOUTS = MappingProxyType(
+             ROW_SCALE_V1,
+             ROW_INTERLEAVED_V1,
+             GGUF_BLOCKS_V1,
++            TRELLIS_T16_V1,
+         )
+     }
+ )
+@@ -322,18 +342,79 @@ def gguf_blocks_geometry(
+     )
+ 
+ 
++def exl3_geometry(
++    format: str | Exl3Format,
++    shape: Sequence[int],
++    bitrate_half_bits: int | None,
++    scale_sets: int = 1,
++) -> Exl3Geometry:
++    """Geometry of `scale_sets` stacked [N / scale_sets, K] matrices, each with its own suh[K].
++
++    The trellis plane and svh[N] are those of the whole [N, K] object; only suh repeats, once per
++    stacked matrix, so one set covers N / scale_sets consecutive rows. One set is the plain matrix.
++    """
++    spec = _format(format)
++    if not isinstance(spec, Exl3Format):
++        raise ValueError("trellis_t16_v1 requires exl3_mul1")
++    if (
++        isinstance(bitrate_half_bits, bool)
++        or not isinstance(bitrate_half_bits, int)
++        or not 2 <= bitrate_half_bits <= 16
++    ):
++        raise ValueError("EXL3 bitrate_half_bits must be an integer in [2, 16]")
++    n, k = _shape(shape, rank=2)
++    if n % 128 or k % 128:
++        raise ValueError("trellis_t16_v1 requires both matrix dimensions divisible by 128")
++    if isinstance(scale_sets, bool) or not isinstance(scale_sets, int) or scale_sets < 1:
++        raise ValueError("EXL3 scale set count must be a positive integer")
++    # Each stacked matrix is transformed on its own: a 128-row Hadamard block may not span two.
++    if n % scale_sets or (n // scale_sets) % 128:
++        raise ValueError(
++            "each EXL3 scale set must cover a whole number of 128-row blocks of the object"
++        )
++
++    tiles_n = n // 16
++    tiles_k = k // 16
++    tile_bytes = 16 * bitrate_half_bits
++    trellis_bytes = tiles_n * tiles_k * tile_bytes
++    input_scale_offset = align_up(trellis_bytes, PLANE_ALIGNMENT)
++    input_scale_bytes = k * 4 * scale_sets
++    output_scale_offset = align_up(
++        input_scale_offset + input_scale_bytes, PLANE_ALIGNMENT
++    )
++    output_scale_bytes = n * 4
++    return Exl3Geometry(
++        n=n,
++        k=k,
++        bitrate_half_bits=bitrate_half_bits,
++        tiles_n=tiles_n,
++        tiles_k=tiles_k,
++        tile_bytes=tile_bytes,
++        trellis_bytes=trellis_bytes,
++        input_scale_offset=input_scale_offset,
++        input_scale_bytes=input_scale_bytes,
++        output_scale_offset=output_scale_offset,
++        output_scale_bytes=output_scale_bytes,
++        payload_bytes=output_scale_offset + output_scale_bytes,
++        scale_sets=scale_sets,
++    )
++
++
+ def encoded_size(
+     layout: str | Layout,
+     format: str | NumericFormat,
+     shape: Sequence[int],
+     divisors: int = 1,
++    bitrate_half_bits: int | None = None,
+ ) -> int:
+     layout_spec = _layout(layout)
+     numeric_spec = _format(format)
+-    if divisors != 1 and layout_spec is not BLOCK_SCALE_K16_M128X4_V1:
++    if divisors != 1 and layout_spec not in (BLOCK_SCALE_K16_M128X4_V1, TRELLIS_T16_V1):
+         raise ValueError(
+             f"layout {layout_spec.name!r} stores one divisor, not {divisors}"
+         )
++    if bitrate_half_bits is not None and not isinstance(numeric_spec, Exl3Format):
++        raise ValueError("bitrate_half_bits is only valid for exl3_mul1")
+     if numeric_spec.name not in layout_spec.formats:
+         raise ValueError(
+             f"layout {layout_spec.name!r} does not accept format {numeric_spec.name!r}"
+@@ -363,4 +444,8 @@ def encoded_size(
+         if not isinstance(numeric_spec, GgufFormat):
+             raise ValueError("gguf_blocks_v1 requires a ggml block format")
+         return gguf_blocks_geometry(numeric_spec, shape).payload_bytes
++    if layout_spec is TRELLIS_T16_V1:
++        if not isinstance(numeric_spec, Exl3Format):
++            raise ValueError("trellis_t16_v1 requires exl3_mul1")
++        return exl3_geometry(numeric_spec, shape, bitrate_half_bits, divisors).payload_bytes
+     raise ValueError(f"unsupported tensor layout: {layout_spec.name!r}")
+diff --git a/tools/artifact/schema.py b/tools/artifact/schema.py
+index a83580d3c14ac18a0e02b3913f596562c17befc6..1159cf17c8fc45700ad5738d4a251cdea326493e 100644
+--- a/tools/artifact/schema.py
++++ b/tools/artifact/schema.py
+@@ -69,6 +69,8 @@ class TensorSpec:
+     # Source matrices stacked into this parent, each with its own NVFP4 divisor. One means the
+     # parent has a single divisor, which is every parent that is not such a stack.
+     divisors: int = 1
++    # EXL3 rate in half-bit units; None for every other format.
++    bitrate_half_bits: int | None = None
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -87,6 +89,7 @@ class TensorObject:
+     offset: int
+     bytes: int
+     divisors: int = 1
++    bitrate_half_bits: int | None = None
+     kind: ClassVar[str] = "tensor"
+ 
+     def to_json(self) -> dict:
+@@ -95,6 +98,8 @@ class TensorObject:
+         # objects would be a megabyte of directory that means nothing.
+         if self.divisors == 1:
+             del out["divisors"]
++        if self.bitrate_half_bits is None:
++            del out["bitrate_half_bits"]
+         return out
+ 
+ 
+@@ -155,7 +160,9 @@ def validate_encoding(obj: ArtifactObject) -> None:
+             )
+         return
+     try:
+-        size = encoded_size(obj.layout, obj.format, obj.shape, obj.divisors)
++        size = encoded_size(
++            obj.layout, obj.format, obj.shape, obj.divisors, obj.bitrate_half_bits
++        )
+         alignment = get_layout(obj.layout).alignment
+     except (TypeError, ValueError) as error:
+         raise ArtifactError(f"{obj.id}: {error}") from error
+@@ -180,11 +187,20 @@ def plan_objects(specs: Sequence[ObjectSpec]) -> tuple[ArtifactObject, ...]:
+             dims = shape(spec.shape, name)
+             try:
+                 start = align_up(offset, get_layout(spec.layout).alignment)
+-                size = encoded_size(spec.layout, spec.format, dims, spec.divisors)
++                size = encoded_size(
++                    spec.layout, spec.format, dims, spec.divisors, spec.bitrate_half_bits
++                )
+             except (TypeError, ValueError) as error:
+                 raise ArtifactError(f"{name}: {error}") from error
+             obj = TensorObject(
+-                name, dims, spec.format, spec.layout, start, size, spec.divisors
++                name,
++                dims,
++                spec.format,
++                spec.layout,
++                start,
++                size,
++                spec.divisors,
++                spec.bitrate_half_bits,
+             )
+         elif isinstance(spec, ResourceSpec):
+             obj = ResourceObject(name, spec.encoding, offset, spec.bytes)
+@@ -207,7 +223,12 @@ def _parse_object(value: object) -> ArtifactObject:
+     common = {"id", "kind", "offset", "bytes"}
+     kind = value.get("kind")
+     if kind == "tensor":
+-        members(value, common | {"shape", "format", "layout"}, {"divisors"}, "tensor")
++        members(
++            value,
++            common | {"shape", "format", "layout"},
++            {"divisors", "bitrate_half_bits"},
++            "tensor",
++        )
+     elif kind == "resource":
+         members(value, common | {"encoding"}, set(), "resource")
+     else:
+@@ -226,6 +247,11 @@ def _parse_object(value: object) -> ArtifactObject:
+         offset,
+         size,
+         integer(value.get("divisors", 1), f"{name} divisors", positive=True),
++        (
++            integer(value["bitrate_half_bits"], f"{name} bitrate_half_bits", positive=True)
++            if "bitrate_half_bits" in value
++            else None
++        ),
+     )
+ 
+ 

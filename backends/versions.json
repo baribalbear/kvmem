@@ -62,7 +62,7 @@
     "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "bb98e6d4d106096627df42219d73807c3caba48e",
+    "patched_tree": "0d48acea8a9aeb267d6ed976f1ad049be51a9b4e",
     "patches": [
       {
         "id": "kvmem",
@@ -300,6 +300,16 @@
         ],
         "after_tree": "bb98e6d4d106096627df42219d73807c3caba48e",
         "source": "NInfer spread cross-key exact prefix discovery in RAM; independent owners sharing immutable RAM/SSD KV and state, transactional cold restore and fault/cancellation regression"
+      },
+      {
+        "id": "exl3",
+        "path": "backends/patches/ninfer-exl3.patch",
+        "sha256": "4c51b88cbbd998fabf97bdfea219d9e5ca6b8f41c19a9bbec6a2c39a01150fde",
+        "requires": [
+          "cross-owner-fork"
+        ],
+        "after_tree": "0d48acea8a9aeb267d6ed976f1ad049be51a9b4e",
+        "source": "giveen/ninfer-ext@b6886f67: EXL3 mul1 / trellis_t16_v1 dense runtime (format, geometry, A16 kernels, linear and fused input-projection, SwiGLU and residual consumers), artifact reader and tests; quantizer and Flash-Next expert offload not ported"
       }
     ]
   },

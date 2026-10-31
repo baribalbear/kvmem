@@ -5,9 +5,9 @@
   "purpose": "CPU-only static inspection, not worker compatibility certification",
   "sha256": {
     "reader.py": "5fbff7696b229be638287caa8a8943b3fcba7becc02bba0553e9a967d95cc2f2",
-    "schema.py": "70e0ce75660c63f2d9fa27ae37321865e91ead22283ae9b809680a689b567edc",
-    "layouts.py": "b385b4d1148f1ccb25f7a61310ddf65dc6c49e9f7dd335edd6157470398a70f1",
-    "formats.py": "cf5dbba6aca8b2fe66bcc848450648b60272877cff6e81eca432eccadaccdb00",
+    "schema.py": "63fae3075eca539fdbc1d04b1c9d12f1145a7b742326dc0e0e0a6ba7fdaed2ed",
+    "layouts.py": "64bebcc5c74bfede4c6d99ac396249987ff6f61ef3f72ad5a44c55c4cc9d6652",
+    "formats.py": "6a35e9db61c0129e51fa2ab74efed1e8f05c7c2d7f4ad177ae6ffbe759063c76",
     "framing.py": "db8792006a1c5457b03b80fb83922dde287073d9c597025546fcc3cd55326e77",
     "file_io.py": "13836ef9ba539b6fdd0b1cf0f9109a4e47faa26d9c08fd4f1a470705f293acf5"
   },
@@ -23,6 +23,10 @@
     {
       "id": "t5-performance",
       "sha256": "45f0f1276e54032d4267c1f917e64a752caedd40a0afd726c78b3cf5ef0969a8"
+    },
+    {
+      "id": "exl3",
+      "sha256": "4c51b88cbbd998fabf97bdfea219d9e5ca6b8f41c19a9bbec6a2c39a01150fde"
     }
   ]
 }
