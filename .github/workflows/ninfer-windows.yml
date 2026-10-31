@@ -12,8 +12,8 @@ on:
         description: CUDA Toolkit version
         default: '13.4.3'
       archs:
-        description: CMAKE_CUDA_ARCHITECTURES (70, 75, 80, 86, 89, 120a)
-        default: '86;89;120a'
+        description: CMAKE_CUDA_ARCHITECTURES (default 120a, RTX 50 series; also 70, 75, 80, 86, 89)
+        default: '120a'
   push:
     paths:
       - backends/versions.json
@@ -30,7 +30,7 @@ concurrency:
 
 env:
   CUDA_VERSION: ${{ inputs.cuda || '13.4.3' }}
-  CUDA_ARCHS: ${{ inputs.archs || '86;89;120a' }}
+  CUDA_ARCHS: ${{ inputs.archs || '120a' }}
   # CUDA 13 installer packages, as in NInfer's native release (CUDA 12 has no crt/nvvm entries).
   CUDA_PACKAGES: '["nvcc", "crt", "nvvm", "cudart", "cublas", "cublas_dev", "nvtx", "thrust", "cuda_profiler_api", "cuobjdump", "nvprune"]'
   SHARDS: 8

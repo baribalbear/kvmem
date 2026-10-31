@@ -66,7 +66,7 @@ ctest -R exl3 --output-on-failure
 
 `.github/workflows/ninfer-windows.yml` compiles and packages the patched NInfer for Windows x64 the
 way NInfer's own native release does. It runs on pushes that change the NInfer patches, or manually
-with a CUDA version and architecture list (default CUDA 13.4.3, `86;89;120a`). One job builds the
+with a CUDA version and architecture list (default CUDA 13.4.3, `120a` for RTX 50-series cards). One job builds the
 vcpkg FFmpeg and curl packages and caches them; eight jobs fill a ccache with object shards; the last
 job links `ninfer-serve` and the other release products and runs NInfer's `package-release.ps1`.
 The `ninfer-windows-cuda<version>` artifact is the release archive. The runners have no GPU, so the
