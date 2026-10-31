@@ -33,7 +33,7 @@ env:
   CUDA_ARCHS: ${{ inputs.archs || '120a' }}
   # CUDA 13 installer packages, as in NInfer's native release (CUDA 12 has no crt/nvvm entries).
   CUDA_PACKAGES: '["nvcc", "crt", "nvvm", "cudart", "cublas", "cublas_dev", "nvtx", "thrust", "cuda_profiler_api", "cuobjdump", "nvprune"]'
-  SHARDS: 8
+  SHARDS: 4
   CCACHE_DIR: ${{ github.workspace }}/.cache/ninfer-objects
   CCACHE_MAXSIZE: 8Gi
   CCACHE_COMPILERCHECK: content
@@ -80,7 +80,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3]
     defaults:
       run:
         shell: pwsh
