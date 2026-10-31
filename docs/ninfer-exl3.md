@@ -62,6 +62,16 @@ python scripts/prepare-backends.py --check
 ctest -R exl3 --output-on-failure
 ```
 
+## Windows build in CI
+
+`.github/workflows/ninfer-windows.yml` compiles and packages the patched NInfer for Windows x64 the
+way NInfer's own native release does. It runs on pushes that change the NInfer patches, or manually
+with a CUDA version and architecture list (default CUDA 13.4.3, `86;89;120a`). One job builds the
+vcpkg FFmpeg and curl packages and caches them; eight jobs fill a ccache with object shards; the last
+job links `ninfer-serve` and the other release products and runs NInfer's `package-release.ps1`.
+The `ninfer-windows-cuda<version>` artifact is the release archive. The runners have no GPU, so the
+run proves compilation and packaging only; `BUILD_TESTING` is off, as in the upstream release.
+
 ## Regenerating the patch
 
 Apply the series in `backends/ninfer`, edit, then diff against the tree the previous patch
