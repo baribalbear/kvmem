@@ -1,0 +1,63 @@
+--- a/core/mem/kv.h
++++ b/core/mem/kv.h
+@@ -367,6 +367,15 @@
+      * same blocks of its own pool, and an id the leader hands out below the mark has to be one the
+      * follower's slab has left too. */
+     int     follow(const KVManager& leader);
++    /* Adapter-only metadata mirror at a drained scheduler boundary. Native TP
++     * schedules sequence ownership on rank 0 and shares its indices with all
++     * ranks. A per-rank KV adapter may mirror that ownership to address its own
++     * pool, while keeping all device pointers, bytes and allocators rank-local.
++     * Requires equal index geometry and an already synchronized loan. No device
++     * copies/clears are issued or duplicated; the engine owns those operations.
++     * Strong failure guarantee. Ordinary native TP never calls this method. */
++    int mirror_adapter_metadata(const KVManager& leader);
++
+ 
+     /* HOW MANY OF A GROUP'S BLOCKS THE CACHE MAY HAND OUT: the carve less what is lent. */
+     int64_t live_blocks(int32_t group) const;
+--- a/core/mem/kv.cpp
++++ b/core/mem/kv.cpp
+@@ -864,6 +864,42 @@
+     return RAD_OK;
+ }
+ 
++int KVManager::mirror_adapter_metadata(const KVManager& leader) {
++    if (&leader == this) return RAD_OK;
++    if (!configured_ || !leader.configured_ || plans_.size() != leader.plans_.size() ||
++        max_seqs_ != leader.max_seqs_ || max_ctx_ != leader.max_ctx_ ||
++        loan_ != leader.loan_ || live_ != leader.live_ ||
++        bucket_blocks_ != leader.bucket_blocks_ || chunk_blocks_ != leader.chunk_blocks_)
++        return RAD_E_INVAL;
++    for (size_t i = 0; i < plans_.size(); ++i) {
++        const auto& a = plans_[i]; const auto& b = leader.plans_[i];
++        if (a.index != b.index || a.kind != b.kind || a.zero != b.zero ||
++            a.n_layers != b.n_layers || a.block_size != b.block_size || a.n_blocks != b.n_blocks ||
++            a.n_states != b.n_states || a.state_copies != b.state_copies ||
++            a.window_blocks != b.window_blocks || a.bytes_per_block != b.bytes_per_block ||
++            a.bytes_per_state != b.bytes_per_state) return RAD_E_INVAL;
++    }
++    try {
++        auto blocks = leader.free_blocks_;
++        auto refs = leader.refcount_;
++        auto cached = leader.cached_;
++        auto cache_only = leader.cache_only_;
++        auto states = leader.free_states_;
++        auto sequences = leader.seqs_;
++        auto peak = leader.short_peak_;
++        auto usable = leader.free_usable_;
++        auto held = leader.held_hist_;
++        // Every potentially throwing copy finished before publication. The
++        // destination's native pools and recurrent/KV bytes remain untouched.
++        free_blocks_.swap(blocks); refcount_.swap(refs); cached_.swap(cached);
++        cache_only_.swap(cache_only); free_states_.swap(states); seqs_.swap(sequences);
++        short_peak_.swap(peak); free_usable_.swap(usable); held_hist_.swap(held);
++        seq_frees_ = leader.seq_frees_;
++        pending_.clear(); clears_.clear();
++        return RAD_OK;
++    } catch (const std::bad_alloc&) { return RAD_E_NOMEM; }
++}
++
+ int KVManager::follow(const KVManager& leader) {
+     if (leader.loan_ == loan_) return RAD_OK;
+     for (size_t i = 0; i < plans_.size() && i < leader.plans_.size(); ++i) {

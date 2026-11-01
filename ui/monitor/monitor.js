@@ -438,7 +438,7 @@
       ? list.reduce((n, x) => n + x[field], 0)
       : null;
   function cacheData() {
-    if (state.backend === "polystrata") return state.kvmem || {};
+    if (state.backend === "polystrata" || state.backend === "radiance") return state.kvmem || {};
     if (state.backend === "ninfer")
       return stats?.kvmem || props.kvmem?.usage || {};
     const storage = slots.map((s) => s.kvmem?.storage).filter(Boolean),
@@ -712,6 +712,12 @@
       row('engine','NgramMinMatch',['N-gram 最短匹配','N-gram minimum match'],caps.ngram_min_match,config.NgramMinMatch,{optional:true,format:tokens});
       row('engine','FastPrefill',['快速预填充','Fast prefill'],undefined,boolean(config.FastPrefill),{optional:true});
       row('engine','DeviceProfile',['设备性能配置','Device profile'],undefined,config.DeviceProfile,{optional:true});
+      row('engine','TensorParallel',['张量并行','Tensor parallelism'],service.execution?.mode?service.execution.mode==='tensor':undefined,config.TensorParallel,{optional:true});
+      if(service.execution?.mode?service.execution.mode==='tensor':config.TensorParallel){
+        row('engine','TensorAttention',['注意力切分','Attention split'],service.execution?.tensor_attention,'heads');
+        row('engine','TensorSplit',['TP 权重','TP weights'],service.execution?.tensor_split?.length?service.execution.tensor_split:undefined,config.TensorSplit?.length?config.TensorSplit:undefined,{optional:true,format:value=>Array.isArray(value)?value.join(' / '):String(value)});
+        row('engine','TensorShares',['实际 KV heads 分配','Actual KV head allocation'],service.execution?.tensor_shares?.length?service.execution.tensor_shares:undefined,undefined,{optional:true,format:value=>Array.isArray(value)?value.map(s=>`${s.rank+1}: [${s.kv_heads[0]}, ${s.kv_heads[1]})`).join(' / '):String(value)});
+      }
     }
     row('engine','StageLayers',['多卡层数分配','Layers per device'],service.execution?.stage_layers?.length?service.execution.stage_layers:undefined,
       config.StageLayers?.length?config.StageLayers:undefined,{optional:true,format:value=>Array.isArray(value)?value.join(' / '):String(value)});
@@ -875,7 +881,7 @@
     text("prefill-tokens", t("新算 {0} · 复用 {1} tokens", fmt(prefill.tokens), fmt(r?.cached_tokens)));
     text("prefill-times", prefillTimes(prefill, r));
     const queued = state.queued_count ?? (state.backend === "ninfer" ? stats?.queue?.depth
-      : state.backend === "llamacpp" && !state.dropped_records ? state.active.filter(x => x.status === "queued").length : null);
+      : ["llamacpp", "radiance"].includes(state.backend) && !state.dropped_records ? state.active.filter(x => x.status === "queued").length : null);
     const pending=number(queued)?fmt(queued):"—";
     text("queue", t("活动 {0} · 排队 {1}",fmt(state.active.length),pending));
     renderActualSpec(r);
@@ -1024,7 +1030,10 @@
       const [snapshot, configuration, lanes, systemHardware] = await Promise.all([
         get("../api/monitor/snapshot", controller.signal),
         get("../props", controller.signal),
-        get("../slots", controller.signal),
+        get("../slots", controller.signal).catch(error => {
+          if (error.status===404) return null;
+          throw error;
+        }),
         get("../api/launcher/hardware", controller.signal).catch(error =>
           error.status === 404 ? null : {sampled_at_ms:null}),
       ]);
@@ -1032,7 +1041,7 @@
         snapshot.schema_version !== 1 ||
         !Array.isArray(snapshot.active) ||
         !Array.isArray(snapshot.recent) ||
-        !Array.isArray(lanes)
+        !(Array.isArray(lanes) || (snapshot.backend==="radiance" && lanes===null))
       )
         throw new Error(t("不兼容的监控数据"));
       const runtime =
@@ -1067,7 +1076,7 @@
         ? systemHardware : systemHardware === null ? null : {sampled_at_ms:null};
       state = snapshot;
       props = configuration;
-      slots = lanes;
+      slots = lanes || [];
       stats = runtime;
       failures = 0;
       lastGood = Date.now();

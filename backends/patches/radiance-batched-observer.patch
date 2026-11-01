@@ -1,0 +1,215 @@
+--- a/core/runtime/step_observer.h
++++ b/core/runtime/step_observer.h
+@@ -19,6 +19,12 @@
+     virtual ~StepObserver() = default;
+     // Statistics alone must not add a prefix-retention checkpoint.
+     virtual bool retain_history_boundary() const noexcept { return false; }
++    // An integration with per-request Query replay may isolate prefill steps
++    // while keeping ordinary decode batched. The scheduler alternates fairly.
++    virtual bool serial_prefill() const noexcept { return false; }
++    // Expected capacity refusals are per request. The engine drains this list
++    // outside the scheduler lock before commit, preserving other batch entries.
++    virtual uint64_t take_capacity_refusal() noexcept { return 0; }
+ 
+     // Optional bounded-residency contract, after declare and before allocation.
+     // Zero preserves ordinary full-context sizing. A positive value promises
+--- a/core/sched/scheduler.h
++++ b/core/sched/scheduler.h
+@@ -206,6 +206,10 @@
+      * completion (spec §14). A cancelled request holding its blocks until the step that would
+      * have finished it is a pool that shrinks under exactly the load that cancels. */
+     int      cancel(uint64_t id);
++    // Startup-only observer policy; ordinary native scheduling is unchanged.
++    void set_serial_prefill(bool value) { serial_prefill_=value; }
++    int fail_capacity(uint64_t id);
++    int reject_unsampled(uint64_t id);
+     Request* find(uint64_t id);
+ 
+     /* Requests that reached a terminal state since the last call, oldest first, SWAPPED OUT under
+@@ -692,6 +696,7 @@
+      * covered, both decayed with the same time constant, so their ratio is tokens over time. */
+     double  tps_win_prefill_ = 0.0, tps_win_decode_ = 0.0, tps_win_time_ = 0.0;
+     bool    step_open_ = false;
++    bool    serial_prefill_ = false, next_prefill_ = true;
+ 
+     /* arrival; mu_ held */
+     int  add_locked(std::unique_ptr<Request> r);
+--- a/core/engine.cpp
++++ b/core/engine.cpp
+@@ -780,6 +780,16 @@
+         if (observer_ && observer_->split_sampling(plan)) {
+             int64_t replay_from = -1;
+             st = sched_.locked([&] { return observer_->after_forward(plan, &replay_from); });
++            if (st == RAD_E_FULL && plan.e.size()==1 && plan.e[0].is_prefill) {
++                for(auto& rank:ranks_) {
++                    const int drained=rad_stream_sync(rank->ctx.stream());
++                    if(drained<0)return fail_loop(drained);
++                }
++                st=sched_.reject_unsampled(plan.e[0].seq);
++                if(st<0)return fail_loop(st);
++                sched_.step_finished();drain_completed();sched_.publish(false);
++                continue;
++            }
+             if (st < 0) return fail_loop(st);
+             if (replay_from >= 0) {
+                 if (plan.e.size() != 1) return fail_loop(RAD_E_STATE);
+@@ -930,6 +940,9 @@
+             }
+             st = sched_.locked([&] { return observer_->collect(plan, res); });
+             if (st < 0) return fail_loop(st);
++            for(auto id=observer_->take_capacity_refusal();id;id=observer_->take_capacity_refusal()) {
++                st=sched_.fail_capacity(id);if(st<0)return fail_loop(st);
++            }
+         }
+         st = observer_ ? sched_.commit(res, [this](const StepEntry& e, const Request& r) {
+             return observer_->finish(e, r);
+@@ -1814,6 +1827,7 @@
+     for (auto& rk : ranks_)
+         rio.push_back({ rk->device, rk->ctx.stream(), &rk->program });
+     RAD_TRY(sched_.init(ranks_[0]->program, cfg_, kv_iface_.get(), pc_iface_.get(), rio, &geo_));
++    sched_.set_serial_prefill(observer_ && observer_->serial_prefill());
+     /* THE SMALLEST STEP THE PREFILL STAGER OVERLAPS. A prefill chunk the scheduler holds back for
+      * other work in the step (--busy-prefill-chunk) is kept at or above it: under it every routed
+      * layer reads its pooled experts synchronously, which costs a long prefill far more than the
+--- a/core/sched/scheduler.cpp
++++ b/core/sched/scheduler.cpp
+@@ -426,6 +426,31 @@
+      * to the sink, and the HTTP thread is waiting on exactly it. */
+     if (st == ReqState::Failed && status < 0) server::sink_fail(s.req->sink, status, why);
+     else server::sink_finish(s.req->sink, finish_of(st, s.req->finish_reason));
++}
++
++int Scheduler::fail_capacity(uint64_t id) {
++    std::lock_guard<std::mutex> lk(mu_);
++    auto it=by_id_.find(id);if(it==by_id_.end())return RAD_E_NOTFOUND;
++    auto& s=*reqs_[(size_t)it->second];
++    if(s.req->state!=ReqState::Running)return RAD_OK;
++    close_request(s,ReqState::Failed,"capacity",in_step(s)||block_holds(id),true,RAD_E_FULL,
++                  "KVMem shared cache capacity is exhausted for this request");
++    ++m_.failed;completed_.push_back(id);return RAD_OK;
++}
++int Scheduler::reject_unsampled(uint64_t id) {
++    std::lock_guard<std::mutex> lk(mu_);
++    if(!step_open_ || next_open_ || plan_.e.size()!=1 || plan_.e[0].seq!=id || !plan_.e[0].is_prefill)
++        return RAD_E_STATE;
++    auto& s=*reqs_[(size_t)plan_.e[0].slot];
++    // The caller has drained the model. No sampler, draft, or output token was
++    // issued for this probe, and no other sequence shares this prefill step.
++    s.entry=-1;s.sched_tokens=0;step_open_=false;step_prefill_tok_=step_decode_tok_=0;
++    if(s.req->state==ReqState::Running) {
++        close_request(s,ReqState::Failed,"capacity",false,true,RAD_E_FULL,
++                      "KVMem shared cache capacity is exhausted for this request");
++        ++m_.failed;completed_.push_back(id);
++    }
++    sweep_deferred();return RAD_OK;
+ }
+ 
+ int Scheduler::cancel(uint64_t id) {
+@@ -1125,7 +1150,7 @@
+      * walked -- each decode row's 1 + the deepest window it can take, each prefill row a share --
+      * and one share when a request is waiting and a sequence slot is free for it. Counted down as
+      * the loop walks, so a row's reserve is what is BEHIND it. No allocation: two counters. */
+-    const bool share_step = cfg_.busy_prefill_chunk != 0;
++    const bool share_step = cfg_.busy_prefill_chunk != 0 && !serial_prefill_;
+     const int64_t share_tok = std::max<int64_t>(std::max<int64_t>(geo_.quantum, 1),
+                                                 cfg_.max_tok / 8 / std::max<int64_t>(geo_.quantum, 1)
+                                                     * std::max<int64_t>(geo_.quantum, 1));
+@@ -1146,6 +1171,19 @@
+     int32_t capped_at = -1;
+     int64_t capped_full = 0;
+ 
++    // Query replay is per sequence. An observing integration can request one
++    // isolated prefill step, alternating with batched decode when both wait.
++    // This avoids rewinding another request and bounds decode starvation.
++    bool have_decode=false, have_prefill=!waiting_.empty() && !free_cards_.empty() &&
++                                         (int64_t)running_.size()<cfg_.max_seqs;
++    if (serial_prefill_) for (int32_t slot:running_) {
++        const auto& s=*reqs_[(size_t)slot];const auto& r=*s.req;
++        const bool pf=r.n_computed<(int64_t)r.prompt.size() || r.n_computed+1<s.seq_len();
++        have_prefill=have_prefill || pf;have_decode=have_decode || !pf;
++    }
++    const bool prefill_turn=serial_prefill_ && have_prefill && (!have_decode || next_prefill_);
++    if (serial_prefill_ && have_prefill && have_decode) next_prefill_=!next_prefill_;
++
+     /* ---------------------------------------------------------- running requests first */
+     /* Continuous batching: a request already holding blocks is served before a new one is let in,
+      * because the alternative is admitting work that then preempts work already half done. */
+@@ -1159,6 +1197,7 @@
+         const int64_t target = s.seq_len();
+         const bool prefill = (r.n_computed < (int64_t)r.prompt.size()) ||
+                              (r.n_computed + 1 < target);
++        if (serial_prefill_ && prefill!=prefill_turn) { ++i; continue; }
+         if (share_step) {
+             if (prefill) behind_pf = std::max<int64_t>(0, behind_pf - 1);
+             else         behind_dec = std::max<int64_t>(0, behind_dec - dec_row_tok);
+@@ -1311,13 +1350,14 @@
+         if (!prefill && s.n_draft > plan_.n_spec) plan_.n_spec = s.n_draft;
+         budget -= want;
+         ++i;
++        if (serial_prefill_ && prefill) break;
+     }
+ 
+     /* ---------------------------------------------------------- admission */
+     /* Skipped entirely in a step that preempted: the pool just refused a request that already had
+      * blocks, so it will refuse a new one, and the front of the queue is now the request we just
+      * took them from. Probing would cost a lookup per step and admit nothing. */
+-    if (!preempted_here) {
++    if (!preempted_here && (!serial_prefill_ || (prefill_turn && plan_.e.empty()))) {
+         /* `at` walks the queue and `took_` is what it admitted: a request waiting on a read off
+          * disk stays where it is and the one behind it is asked, so the queue is compacted after
+          * the walk rather than cut at its front. */
+@@ -1403,6 +1443,7 @@
+             budget -= s.sched_tokens;
+             took_.push_back(at);
+             ++at;
++            if (serial_prefill_) break;
+         }
+         if (!took_.empty()) {
+             for (size_t i : took_) queue_insert(running_, waiting_[i]);
+--- a/tests/sched_test.cpp
++++ b/tests/sched_test.cpp
+@@ -3403,4 +3403,44 @@
+     }
+ }
+ 
++TEST(observer_prefill_is_isolated_and_decode_remains_batched) {
++    Fixture f;f.build();f.cfg.max_seqs=4;CHECK_OK(f.start());f.sch.set_serial_prefill(true);
++    for(int i=0;i<4;++i)CHECK(f.submit(8,12)!=0);
++    int max_decode=0,steps=0,done=0;
++    while(steps++<100) {
++        if(!f.sch.step())break;
++        const auto& plan=f.sch.plan();bool prefill=false;
++        for(const auto& e:plan.e)prefill=prefill || e.is_prefill;
++        if(prefill)CHECK_EQ(plan.e.size(),size_t(1));
++        else max_decode=std::max(max_decode,int(plan.e.size()));
++        int32_t accepted[8]={},tokens[8]={5,5,5,5,5,5,5,5};uint8_t eos[8]={};
++        Scheduler::StepResult result{};result.n_seq=int(plan.e.size());
++        result.n_accepted=accepted;result.token=tokens;result.eos=eos;
++        CHECK_OK(f.sch.commit(result));
++        std::vector<uint64_t> completed;f.sch.take_completed(&completed);done+=int(completed.size());
++    }
++    CHECK_EQ(done,4);CHECK_EQ(max_decode,4);CHECK(steps<100);
++}
++
++TEST(observer_capacity_refusal_preserves_other_batch_entries) {
++    Fixture f;f.build();CHECK_OK(f.start());
++    const auto a=f.submit(8,4),b=f.submit(8,4),c=f.submit(8,4);
++    CHECK(f.sch.step()!=nullptr);CHECK_EQ(f.sch.plan().e.size(),size_t(3));
++    CHECK_OK(f.sch.fail_capacity(b));
++    int32_t accepted[3]={},tokens[3]={5,5,5};uint8_t eos[3]={};
++    Scheduler::StepResult result{};result.n_seq=3;
++    result.n_accepted=accepted;result.token=tokens;result.eos=eos;
++    CHECK_OK(f.sch.commit(result));
++    CHECK(f.kv.has_sequence(a));CHECK(!f.kv.has_sequence(b));CHECK(f.kv.has_sequence(c));
++    int done=0;
++    for(int i=0;i<10;++i) {
++        std::vector<uint64_t> ids;f.sch.take_completed(&ids);done+=int(ids.size());
++        if(!f.sch.step())break;
++        result.n_seq=int(f.sch.plan().e.size());CHECK_OK(f.sch.commit(result));
++    }
++    CHECK_EQ(done,3);
++    const auto next=f.submit(8,4);CHECK(f.sch.step()!=nullptr);
++    CHECK_OK(f.sch.reject_unsampled(next));CHECK(!f.kv.has_sequence(next));
++}
++
+ RAD_TEST_MAIN()

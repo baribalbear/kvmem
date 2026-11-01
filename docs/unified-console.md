@@ -50,6 +50,35 @@ discarding unrelated flags. Switching engines preserves their individual setting
 The monitor displays configured MTP draft limits and policy, with request-level
 draft counts only when the backend reports them.
 
+NInfer's **Recall policy → Resident & session retention** section also provides
+**Checkpoint extra recompute limit · tokens**. The default 0 disables nearby
+checkpoint optimization; a positive value permits extra recomputation from a
+legal earlier checkpoint. Active Query replay states remain protected. This is
+not a latency limit: future retries can recapture a full state image or read SSD.
+Saved JSON uses `CheckpointExtraRecomputeTokens`; Windows scripts accept
+`-CheckpointExtraRecomputeTokens`, and Linux exports preserve the corresponding
+worker environment. Enabling it requires worker capability
+`checkpoint_recompute_revision >= 1` and `KVMEM_CHECKPOINT_MIN_GAP=0`.
+See [checkpoint policy](checkpoint-policy.md#ninfer-checkpoint-recompute-limit)
+for capture, cleanup and budget semantics. Other engines do not expose this setting.
+
+NInfer's **Hardware & acceleration** tab offers **Tensor parallelism · heads**
+after selecting at least two GPUs. It is off by default; multiple GPUs otherwise
+use layer splitting. Optional **TP weights** follow the displayed GPU UUID order,
+for example `3,1`. Leave them empty for native automatic allocation. These are
+relative weights, not exact head counts or memory limits. Moving a GPU moves its
+weight, while changing the selected GPUs clears the weights. TP disables layer
+counts, and budget auto-adjustment currently remains single-GPU only. Per-backend
+drafts retain the TP choice and weights across reloads and backend switches.
+
+The launcher always emits `--tensor-attention heads`; positions mode is not
+exposed. Starting or exporting a TP configuration requires a matching worker
+reporting integer `heads_tensor_parallel_revision >= 1`. Static capability
+descriptions and a dry-run plan describe launcher support; they do not qualify an
+older installed worker. Update the complete NInfer package if the capability
+check fails. Runtime details display the service's actual mode, weights and KV
+head ranges; missing actual allocation is not inferred from requested weights.
+
 An output limit of **0 / unlimited** in the launcher removes the service's fixed
 output cap for all three backends. Requests that omit a limit inherit that setting;
 Chat Completions `max_tokens: -1` explicitly removes a fixed service default.

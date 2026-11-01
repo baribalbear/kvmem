@@ -1,0 +1,190 @@
+--- a/core/runtime/ctx.h
++++ b/core/runtime/ctx.h
+@@ -184,6 +184,7 @@
+     using KvObserver = int (*)(void*, int, rad_kvgroup, int64_t,
+                               const RadTensor&, const RadTensor&, const RadBatch&, RadStream);
+     KvObserver kv_observer = nullptr;
++    KvObserver attention_observer = nullptr;
+     void* kv_observer_data = nullptr; // caller outlives Ctx and drains before destruction
+     Program*        program     = nullptr;
+     int             rank        = 0;
+@@ -222,7 +223,7 @@
+     int issue(rad_op h, const RadOperand* opd, int n_opd, int64_t n);
+     bool kv_observing() const { return kv_observer_ && in_step_ && batch_ && batch_->draft_pass == 0; }
+     int kv_observe(int layer, rad_kvgroup group, int64_t head_dim, rad_op anchor,
+-                   RadOperand q, RadOperand k);
++                   RadOperand q, RadOperand k, bool attention = false);
+     /* A weight stager for the passes it arms for (runtime/stager.h); null for none. */
+     void set_stager(OpStager* s) { stager_ = s; }
+ 
+@@ -564,6 +565,7 @@
+     bool                  tape_on_ = false;    /* the backend can, and nothing needs every issue */
+     bool                  record_passes_ = true;   /* CtxDesc::record_passes */
+     CtxDesc::KvObserver kv_observer_ = nullptr;
++    CtxDesc::KvObserver attention_observer_ = nullptr;
+     void* kv_observer_data_ = nullptr;
+     PassTape*             rec_ = nullptr;      /* the tape being recorded, while one is */
+     int                   rec_mark_ = 0;       /* the backend record its current play step starts at */
+--- a/core/runtime/ctx.cpp
++++ b/core/runtime/ctx.cpp
+@@ -39,6 +39,7 @@
+     device_    = d.device;
+     record_passes_ = d.record_passes;
+     kv_observer_ = d.kv_observer;
++    attention_observer_ = d.attention_observer;
+     kv_observer_data_ = d.kv_observer_data;
+     residency_ = d.residency;
+     kv_        = d.kv;
+--- a/core/runtime/issue.cpp
++++ b/core/runtime/issue.cpp
+@@ -1331,8 +1331,8 @@
+ }
+ 
+ int Ctx::kv_observe(int layer, rad_kvgroup group, int64_t head_dim,
+-                    rad_op anchor, RadOperand q, RadOperand k) {
+-    if (!kv_observing()) return RAD_OK;
++                    rad_op anchor, RadOperand q, RadOperand k, bool attention) {
++    if (!kv_observing() || (attention && !attention_observer_)) return RAD_OK;
+     if (!in_step_ || !batch_ || head_dim <= 0 || group == 0 || group >= kv_.size() ||
+         layer < 0 || size_t(layer) >= kv_[group].layer_slot.size() || kv_[group].layer_slot[layer] < 0 ||
+         anchor == 0 || anchor >= plans_.size())
+@@ -1363,8 +1363,21 @@
+             return step_fail("KV observation byte offset is not representable");
+         t.data = static_cast<char*>(t.data) + delta;
+     }
++    if (attention) {
++        const auto& pool = kv_[group];
++        const auto slot = pool.layer_slot[layer];
++        if (!pool.base || pool.rank != 4 || slot < 0 ||
++            (pool.bytes && (slot + 1) * pool.layer_stride > pool.bytes))
++            return step_fail("invalid native attention cache binding");
++        views[1] = {};
++        views[1].data = static_cast<char*>(pool.base) + slot * pool.layer_stride;
++        views[1].dtype = pool.dtype; views[1].rank = pool.rank;
++        for (unsigned i = 0; i < pool.rank; ++i) views[1].shape[i] = pool.shape[i];
++        rad_tensor_pack(&views[1]);
++    }
+     try {
+-        const int rc = kv_observer_(kv_observer_data_, layer, group, head_dim,
++        const auto callback = attention ? attention_observer_ : kv_observer_;
++        const int rc = callback(kv_observer_data_, layer, group, head_dim,
+                                     views[0], views[1], *batch_, cur_stream());
+         if (rc < 0) return step_fail("KV statistics observer rejected the pass");
+     } catch (...) { return step_fail("KV statistics observer threw; step invalidated"); }
+@@ -1422,6 +1435,11 @@
+     return c ? static_cast<rad::Ctx*>(c)->kv_observe(layer, group, head_dim, anchor, q, k) : RAD_E_INVAL;
+ }
+ 
++int rad_kv_attention_observe(RadCtx* c, int layer, rad_kvgroup group, int64_t head_dim,
++                             rad_op anchor, RadOperand q) {
++    return c ? static_cast<rad::Ctx*>(c)->kv_observe(layer, group, head_dim, anchor, q, q, true) : RAD_E_INVAL;
++}
++
+ int32_t* rad_route_counts(RadCtx* c, int layer, int64_t n_expert) {
+     return c ? static_cast<rad::Ctx*>(c)->route_counts(layer, n_expert) : nullptr;
+ }
+--- a/abi/rad_runtime.h
++++ b/abi/rad_runtime.h
+@@ -378,6 +378,10 @@
+  * lifetime; the consumer must enqueue its reads on the supplied compute stream.
+  * No installed observer means no copies and no change to the ordinary path. */
+ int rad_kv_observing(RadCtx* c);
++/* Post-RoPE Q and the native paged cache, after kv_store on the producer stream.
++ * Optional observation only: no selection or host attention matrix in the engine. */
++int rad_kv_attention_observe(RadCtx* c, int layer, rad_kvgroup group, int64_t head_dim,
++                             rad_op anchor, RadOperand q);
+ int rad_kv_observe(RadCtx* c, int layer, rad_kvgroup group, int64_t head_dim,
+                    rad_op anchor_op, RadOperand q, RadOperand k);
+ 
+--- a/arch/common/rad_block_attn_gated.h
++++ b/arch/common/rad_block_attn_gated.h
+@@ -359,6 +359,8 @@
+     /* The actual query length, not the batch's token count: it is what selects the attention band,
+      * and a verify step and a prefill chunk can carry the same token count at very different
+      * q_len. */
++    if (rad_kv_observing(c))
++        rad_kv_attention_observe(c, layer, kv, g.head_dim, op_attn, brows(w.q, T));
+     RAD_ISSUE_N(c, op_attn, batch->max_q_len,
+                 brows(w.q, T), kv_cache(kv, layer),
+                 praw2(table, RAD_I32, batch->n_seq, kvb ? kvb->block_table_pitch : 0),
+--- a/arch/common/rad_block_attn_fp8.h
++++ b/arch/common/rad_block_attn_fp8.h
+@@ -218,6 +218,8 @@
+ 
+     RAD_ISSUE(c, op_qlift, bcol(w.qkv, 0, q_dim, T), brows(w.q, T));
+ 
++    if (rad_kv_observing(c))
++        rad_kv_attention_observe(c, layer, kv, g.head_dim, op_attn, brows(w.q, T));
+     RAD_ISSUE_N(c, op_attn, batch->max_q_len,
+                 brows(w.q, T), kv_cache(kv, layer),
+                 praw2(table, RAD_I32, batch->n_seq, kvb ? kvb->block_table_pitch : 0),
+--- a/arch/common/rad_block_attn_gated_fp8.h
++++ b/arch/common/rad_block_attn_gated_fp8.h
+@@ -524,6 +524,9 @@
+     if (!fused_kv)
+         RAD_ISSUE(c, op_kv_store,
+                   brows(w.k, T), brows(w.v, T), praw(slot, RAD_I32, T), kv_cache(kv, layer));
++
++    if (observe)
++        rad_kv_attention_observe(c, layer, kv, g.head_dim, op_attn, brows(w.q, T));
+ 
+     /* ONE ROW A QUERY IS WHAT MAKES THE SPARSE PATH WORK AT PREFILL, and it needs no new kernel
+      * for the same reason the decode path needed none: `attn_paged` indexes its block table and
+--- a/core/rad_core.h
++++ b/core/rad_core.h
+@@ -582,6 +582,7 @@
+     // Optional frontend-proven end of rendered history, before generation-only
+     // template tokens. An integration may checkpoint this exact prefill boundary.
+     int32_t history_end = -1;
++    std::vector<std::pair<int32_t,int32_t>> message_spans; // frontend-proven token boundaries
+     std::vector<int32_t> output;
+     SamplingParams       sp;
+     int32_t              max_tokens = 0;
+--- a/core/server/oai.h
++++ b/core/server/oai.h
+@@ -74,6 +74,7 @@
+     std::vector<int32_t> tokens;
+     int32_t query_begin = -1, query_end = -1;
+     int32_t history_end = -1;
++    std::vector<std::pair<int32_t,int32_t>> message_spans;
+     std::string          text;    /* the rendered prompt; needed for `echo` and for the logs */
+     /* The media parts, processed and placed; null for a text prompt (Request::media). */
+     std::shared_ptr<mm::PromptMedia> media;
+--- a/core/server/server.cpp
++++ b/core/server/server.cpp
+@@ -427,6 +427,7 @@
+             rq.prompt = r.prompts[p].tokens;
+             rq.query_begin = r.prompts[p].query_begin;
+             rq.history_end = r.prompts[p].history_end;
++            rq.message_spans = r.prompts[p].message_spans;
+             rq.query_end = r.prompts[p].query_end;
+             rq.sp = r.sp;
+             /* n identical seeds would give n identical completions, which is not what `n` means.
+--- a/core/server/oai.cpp
++++ b/core/server/oai.cpp
+@@ -2099,7 +2099,24 @@
+                 d.chat->apply(messages, tools, history_opt, &history_render, &history_why) >= 0)
+                 p.history_end = prove_history_end(rendered, history_render.prompt, p.tokens,
+                     [&](const std::string& text) { return d.tok->encode(text, false, true); });
+-            for (size_t i = messages.size(); i-- > 0;) {
++            // Render structured message prefixes and verify their exact token
++            // prefixes. Text resembling a delimiter is never a boundary oracle.
++            json prefix_messages = json::array();
++            int32_t boundary = 0;
++            for (const auto& message : messages) {
++                prefix_messages.push_back(message);
++                ChatRender partial; std::string why;
++                if (d.chat->apply(prefix_messages,tools,history_opt,&partial,&why) < 0) {
++                    p.message_spans.clear(); break;
++                }
++                const auto end = prove_history_end(rendered,partial.prompt,p.tokens,
++                    [&](const std::string& text) { return d.tok->encode(text,false,true); });
++                if (end <= boundary) { p.message_spans.clear(); break; }
++                p.message_spans.emplace_back(boundary,end); boundary=end;
++            }
++            // Only a new final user message grants cold-history Query. Tool
++            // continuation does not inherit the previous user's query span.
++            for (size_t i = !messages.empty() && str_or(messages.back(), "role") == "user" ? messages.size() : 0; i-- > 0;) {
+                 if (str_or(messages[i], "role") != "user") continue;
+                 const auto c = messages[i].find("content");
+                 if (c == messages[i].end() || !c->is_string()) break;

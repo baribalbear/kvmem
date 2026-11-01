@@ -59,93 +59,93 @@
   "ninfer": {
     "path": "backends/ninfer",
     "upstream": "https://github.com/iamwavecut/ninfer-all.git",
-    "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
+    "base_commit": "d0da39796697b79fd08fc570e1781d75943dddb1",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "0d48acea8a9aeb267d6ed976f1ad049be51a9b4e",
+    "patched_tree": "59c10976978f575287316398054cdd30e235ac03",
     "patches": [
       {
         "id": "kvmem",
         "path": "backends/patches/ninfer-kvmem.patch",
-        "sha256": "ea9c97cd974b10fa9bb3e4e3cdb2324665d766af644b9604461d1ab509d03603",
+        "sha256": "983214dedb19d8d607b71c8b8e0e6e54a2c9fef23d4c66792ea2bbc2c21e5de8",
         "requires": [],
-        "after_tree": "95d61c887cd1c5c8d5d8946f77d9ca3dce9bbc2d"
+        "after_tree": "14dee953f5a190572a69e447aa76599c7ecb4faf"
       },
       {
         "id": "ptq1",
         "path": "backends/patches/ninfer-ptq1.patch",
-        "sha256": "7db19a6270789d562f932344c5eaa7939ed978fb525362973917d1f5965abe11",
+        "sha256": "1f0cf487937ff2b181ae4a2614d7acf539c0920b55e4952f8bf97e2ddc13d12b",
         "requires": [
           "kvmem"
         ],
-        "after_tree": "66242f2e906ab07e35381fe48719e62a16ee1742",
+        "after_tree": "455320c935fa553e7b7ae853ef15bd98dd5fe340",
         "source": "1314521gjy/ninfer-fusion-kvmem@b6e6c20deb93fe5ed84e5715642dad21c0455ef0; local qualified port a81ebf9031c167a29f418093e8a7253a4811cd01"
       },
       {
         "id": "ptq1-performance",
         "path": "backends/patches/ninfer-ptq1-performance.patch",
-        "sha256": "f682ac51ae8f889c6ac438869cdeb5170f14b733062c205690a03dcdbe227355",
+        "sha256": "7dd2bc971fbe67b7d005c38b579c1257e396f1cd939ce5199384feecf0fea6a5",
         "requires": [
           "ptq1"
         ],
-        "after_tree": "4a3ca3f1d25441e109dae3610199cfd4b4d267e3",
+        "after_tree": "6e162f3bf7809d35c6cd62ee84ac01b73d694624",
         "source": "Local PTQ1 routing and calibration over the compact native port, without changing SM120 policy"
       },
       {
         "id": "t5-performance",
         "path": "backends/patches/ninfer-t5-performance.patch",
-        "sha256": "d5bb7e3507b41eb56e499ceafddc5d2a908472f6b95eb3fe65a44e818d847d36",
+        "sha256": "8836ef107506bf3aa27b8d1424c51639d0f4aad24ab1990e0525dd2ea4f2c201",
         "requires": [
           "ptq1-performance",
           "kvmem"
         ],
-        "after_tree": "c7230b7c5730800ec24b6306639d4b3196d33310",
+        "after_tree": "dc2cc8a39daa7d877da65e4636a0dd6c90461e84",
         "source": "JGamboa/ninfer-4090-windows@e905787f067de89ef6ef28c52d65a2ce91d425ca; RowSplit and existing BF16 producer adaptation"
       },
       {
         "id": "query-memory",
         "path": "backends/patches/ninfer-query-memory.patch",
-        "sha256": "3221cf8a6ca4c39680b7ad96e9f5ad934c24aca53bb00bc6a78487a919298010",
+        "sha256": "7c9e3f13361080b86f9ef7091b5a21b0d4b054470f46e665a8f43b2dbd265a51",
         "requires": [
           "t5-performance"
         ],
-        "after_tree": "1a357c3dd31d711345cb8ee3ad3f9b231d199ff9",
+        "after_tree": "da6c346cb6d9fd069855f1fa5d79ae15949de221",
         "source": "Bounded BF16 Query capture, accepted Mean-Q sums, native Query lifecycle regressions and actual cancellation accounting"
       },
       {
         "id": "nvfp4-a16",
         "path": "backends/patches/ninfer-nvfp4-a16.patch",
-        "sha256": "c50ec35c0d88a0599c99b643a3fde718ef4ee949223b560766e8cd2c76f9ad08",
+        "sha256": "87f82834da414e791dd24bf308ef5024aaae15f9ff5bc819e64ff3bd59a6d410",
         "requires": [
           "query-memory"
         ],
-        "after_tree": "b9399f111933a4a051587e9c63e177f6c5eb0275",
+        "after_tree": "04d9a8acd967aba548c8f38521e01532aa9571c4",
         "source": "13thblade/ninfer-all-nvfp4@c02c7692bd10a9b4a7effef67b60f58673985aa6; author TP merge resolutions over upstream 63428ac2"
       },
       {
         "id": "nvfp4-int8",
         "path": "backends/patches/ninfer-nvfp4-int8.patch",
-        "sha256": "ba07459284ae1f478f03452a4cd6a2190f6fc501dbf6d646762914acac615ae0",
+        "sha256": "e5cd87a93058b6a43c0a38ec78c3a1a25a5b016875a57f52b2eb6d7696e1e280",
         "requires": [
           "nvfp4-a16"
         ],
-        "after_tree": "3ce9d1ee2a61bdf355f9035416c733fb2b9a12f9",
+        "after_tree": "7ba19cfc58cb717c490777fe25cceed796013f34",
         "source": "13thblade/ninfer-all-nvfp4@c02c7692bd10a9b4a7effef67b60f58673985aa6; author TP merge resolutions over upstream 63428ac2"
       },
       {
         "id": "nvfp4-kvmem",
         "path": "backends/patches/ninfer-nvfp4-kvmem.patch",
-        "sha256": "785fab73247b964e3d143ad564d20b67f7bc16b60c04bd715402118411ea8d27",
+        "sha256": "a1b334dfe42dbec8f5f5d8af29c746f5c8a743edfa1974c58bd65909c3f9c95b",
         "requires": [
           "nvfp4-int8"
         ],
-        "after_tree": "c6e60b8a64be682d55c8207b820e7596b9d705b2",
+        "after_tree": "48d7b1a58d67249e98bd2b1d2b07e30727307c21",
         "source": "Local scoped/default routing, native snapshot mode binding and Blackwell KV codec preservation"
       },
       {
         "path": "backends/patches/ninfer-checkpoint-policy.patch",
-        "sha256": "2540625374e3d9f7954f2ee1dbc691b294152bf22141c701a8554570d98de045",
-        "after_tree": "5759fa796bbaf1d162ce19062c03e5a6c54c8099",
+        "sha256": "7af209f9ff5752c13c31d7447334f947479b77f26184b9ba780c8372a9136025",
+        "after_tree": "bcb4b22d118bea374bd77049fa7181f7c35bf706",
         "id": "checkpoint-policy",
         "requires": [
           "nvfp4-kvmem"
@@ -154,161 +154,191 @@
       {
         "id": "monitor-events",
         "path": "backends/patches/ninfer-monitor-events.patch",
-        "sha256": "4113d37477b6713a8b7e89a21cb59e8b78f30f40dc930bef8343992ca27f0ada",
+        "sha256": "22606676a728c148c736a76e06e8dcaa724b7b2f351eb2e87f5df6ac90d012e8",
         "requires": [
           "checkpoint-policy"
         ],
-        "after_tree": "a0baa83bdec06f238425793a89cee918857c5662",
+        "after_tree": "32409b6fd685730d2fb80f5780ab6a31653857eb",
         "source": "Native response IDs, execution/request TTFT, request interval rates, native means, finish reasons and actual MTP/copy counters"
       },
       {
         "id": "nvfp4-blackwell-scale",
         "path": "backends/patches/ninfer-nvfp4-blackwell-scale.patch",
-        "sha256": "f1705dad6c04399589c08c5392c5c7725a4448a2eb02482a2a1a490418cb0f71",
+        "sha256": "25e9b6335b513e22adbcfa1c157a67678107806c9381468de6ad380ae2df097f",
         "requires": [
           "monitor-events"
         ],
-        "after_tree": "99f2455c66c75d52338ad4fea4e8b7d552a84642",
+        "after_tree": "4687a93488cd15a692b26b8c6c35926722b3f25e",
         "source": "Local Blackwell UE4M3 weight-scale normalization and exhaustive independent FP64 codec oracle"
       },
       {
         "id": "dflash2-gguf-blocks",
         "path": "backends/patches/ninfer-dflash2-gguf-blocks.patch",
-        "sha256": "a094e026692e486a0e5b1ca6bdf3b7e21e1ca0d7e34f78f30321e81cb18d4754",
+        "sha256": "7d0c0c2d9f2ae5570097e0813dc88cdb8599a36572bff3f3f37c4ff79d291806",
         "requires": [
           "nvfp4-blackwell-scale"
         ],
-        "after_tree": "8ab69bd581a919a1869f234fb59cbcbb288dc7ed",
+        "after_tree": "fc0a85c4d42534058189a6daa478aeb7e0ff2c56",
         "source": "Adapted from melis2023/ninfer-kvmem-actkv@664cb6daa8cba30dfe39b0d10113a72b20587853; current artifact, dispatch and independent validation integration"
       },
       {
         "id": "dflash2-nvfp4",
         "path": "backends/patches/ninfer-dflash2-nvfp4.patch",
-        "sha256": "39cf5cc32de2fdaa036a09946446429b5f5211bfbf4e4534089bb458c5bf4825",
+        "sha256": "21bdb7842fcee91e455ec95256f42495d8e23903d5703733387ea231918f7e16",
         "requires": [
           "dflash2-gguf-blocks"
         ],
-        "after_tree": "7ce39f25a49562d54244e171f51cbb31999dae74",
+        "after_tree": "abe3d95faa2966cd8b24aba3241d1c0541a4c296",
         "source": "Adapted from melis2023/ninfer-kvmem-actkv@664cb6daa8cba30dfe39b0d10113a72b20587853; current artifact, dispatch and independent validation integration"
       },
       {
         "id": "cuda-graph-probe",
         "path": "backends/patches/ninfer-cuda-graph-probe.patch",
-        "sha256": "95ab2f6bb033403d0db42218bbdf7fc92a4aee22c1a9fb20101eea60d6251e2e",
+        "sha256": "e5853109e3ea5fc31b70404866e6ec4bdfbee788f8d229443571bbe23899dc3d",
         "requires": [
           "dflash2-nvfp4"
         ],
-        "after_tree": "887a4e218b6c911853345aef2001e7249745deb6",
+        "after_tree": "9f3c6acfd48354874049bf10921cd3090b0fe9bf",
         "source": "Adapted from melis2023/ninfer-kvmem-actkv@664cb6daa8cba30dfe39b0d10113a72b20587853, b4d8096 and 591537b; uniform dense MTP/DFlash2/ordinary calibration, allocation-only fallback"
       },
       {
         "id": "token-alignment",
         "path": "backends/patches/ninfer-token-alignment.patch",
-        "sha256": "b355f46ba831fa164dc5be062b73ef9899e26923c765f1abbb58457daaf93b8b",
+        "sha256": "7895255deee44c4692bcabf6ba98141c1063ed1c2734b101d057f8fb6097be7b",
         "requires": [
           "cuda-graph-probe"
         ],
-        "after_tree": "56084fa82e3dccd082226a3ee264bed28c147225",
+        "after_tree": "1830f99fe692c3c2b140d62375b18a5f55ac4395",
         "source": "Normalize startup token budgets before capacity checks; report effective values"
       },
       {
         "id": "output-budget",
         "path": "backends/patches/ninfer-output-budget.patch",
-        "sha256": "c95d39597324c4175bff2d499679da9cd357b5cef5a3cc2e21da4b4543d12c3a",
+        "sha256": "9274af23226b7115e357f0ef30be7646f75951d9111ec73754dd258ae463f9d6",
         "requires": [
           "token-alignment"
         ],
-        "after_tree": "31eae2050c4d316207dde0a3762dc55ff05bab3d",
+        "after_tree": "79708525412a129125c2f87b1e2f916013064f55",
         "source": "Bound KVMem automatic output by logical context and attainable RAM/SSD history; preserve explicit cap admission"
       },
       {
         "id": "dflash2-layer-pipeline",
         "path": "backends/patches/ninfer-dflash2-layer-pipeline.patch",
-        "sha256": "c189afb1e85d5f740a6a89aec371e8cea43a8e77ba9a04235f96ebe82baef2b8",
+        "sha256": "a11e8ca7bd80ab2d46e700dc9e0743bc9b2a4963e9572258b770c7ca45cf502b",
         "requires": [
           "output-budget"
         ],
-        "after_tree": "a955693ea2bda1cd0232ada1d5f42f4b42b049a0",
+        "after_tree": "c2e0f04bf284629203a02bd0b9e6b400ecff1911",
         "source": "KVMem DFlash2 layer-pipeline admission, native capabilities and configuration regressions; pinned upstream feature transport and StateImage execution retained"
       },
       {
         "id": "cpu-vision-props",
         "path": "backends/patches/ninfer-cpu-vision-props.patch",
-        "sha256": "a50cf2a5b9d7b9deaf8448a4d7d8447145f64deda637b47d087df394e0031f21",
+        "sha256": "ba34503d4d986d39f2e25e10590539fdea6bd6096ed9bd96afbaf38a7f332a94",
         "requires": [
           "dflash2-layer-pipeline"
         ],
-        "after_tree": "a05247b38cac87589467b6208d82834d8dca63a6",
+        "after_tree": "e5bcb7842a501345484ebad29734a6453071e607",
         "source": "Observe live CPU Vision cache metadata without acquiring the inference execution lock"
       },
       {
         "id": "memory-planning",
         "path": "backends/patches/ninfer-memory-planning.patch",
-        "sha256": "60a17d2c406333207103e34a4fa168b9e0cf3f98882b5bd716e3d1521df15322",
+        "sha256": "e62589dda227dec24db82259e3cbf07b5faa3e4ba4c9c1d9c14e0e0438e8d02e",
         "requires": [
           "cpu-vision-props"
         ],
-        "after_tree": "f485770ff15c81f1a82139bec85992d938d29382",
+        "after_tree": "1de8e6eac1335437ea6ae7acbaeaf9e377001529",
         "source": "Native single-GPU memory recovery and proactive budget planning with fixed reserve/KV and page-aligned bounds"
       },
       {
         "id": "multigpu-resident-vision",
         "path": "backends/patches/ninfer-multigpu-resident-vision.patch",
-        "sha256": "c361365ab9c65086f4413aabd405971686236080c5bf85032733e2602ab4a515",
+        "sha256": "9d3e82836204cbe9ee3e88f5ba9a1d14c0d6f920ab65eb6646ebadcd2846700f",
         "requires": [
           "memory-planning"
         ],
-        "after_tree": "d976d3f8b2069f1c6255b803a70466360a107288",
+        "after_tree": "8821cd95e79369e235a4c757271793abe8a112c1",
         "source": "Remove duplicate resident Vision binding in automatic pipeline sizing; regress single head-stage byte charge and CPU/text-only selection"
       },
       {
         "id": "t5-sm75-prefill",
         "path": "backends/patches/ninfer-t5-sm75-prefill.patch",
-        "sha256": "599d51daf54502c8faa0b523574aca0553c415bd77001bd7c3e62c4499723783",
+        "sha256": "723882aafa5a0bf4758ae471704b954f76c53d0c50ed3b077953c329ba9a3cc7",
         "requires": [
           "t5-performance",
           "multigpu-resident-vision"
         ],
-        "after_tree": "71f47f722a9f23f2f0db661eb903864dfc759583",
+        "after_tree": "ffe9217df54961d208fdb1735e4d19840b64ee00",
         "source": "T5 prefill shared-memory admission for SM75, with FP64 boundary and graph regression coverage"
       },
       {
         "id": "monitor-image-input",
         "path": "backends/patches/ninfer-monitor-image-input.patch",
-        "sha256": "7215953bbb7c5a6c18d35463da28a1df19dccb016d68844a5ad740eb564be3f0",
+        "sha256": "eb7efcef397bd5ec016cc6a8b2439cfa3fd5bf076ec8500ab794fe9da3066b3d",
         "requires": [
           "t5-sm75-prefill"
         ],
-        "after_tree": "8d79a97c26ed725ab897faebcd6f73c08d6692f5"
+        "after_tree": "ac12e3cff2ff2becf82b1050c43850346a16a923"
       },
       {
         "id": "chat-cache-owner",
         "path": "backends/patches/ninfer-chat-cache-owner.patch",
-        "sha256": "a6bfcdcc9a062590f0cc3747b0a3700ff24fe4e25dffe5684dd8dd282a6a9839",
+        "sha256": "24e9fe274b5ffcf2c3c0c63ee39f54b76d84ba2a8ca89b5fce2dee980d75ef86",
         "requires": [
           "monitor-image-input"
         ],
-        "after_tree": "1ef9dd19cea68a5eb0564f7a67081123a4899790",
+        "after_tree": "9df355714156ee7a2fc7a714f75387390451a531",
         "source": "Bind Chat prompt_cache_key / OpenCode promptCacheKey to live cache ownership; explicit conversation override, native prefix/state checks preserved; schema and real OpenCode rollback regressions"
       },
       {
         "id": "cross-owner-fork",
         "path": "backends/patches/ninfer-cross-owner-fork.patch",
-        "sha256": "6aaa2626b1f2d52412a1bbb06e0b9ba2c63fbe8cb1e56107aee062cf34d152a1",
+        "sha256": "a562b2c631ed126f94765b249fedd72eb7d5bc88449d0f4f2e8b88041926a205",
         "requires": [
           "chat-cache-owner"
         ],
-        "after_tree": "bb98e6d4d106096627df42219d73807c3caba48e",
+        "after_tree": "ecd34a0274cfd0f575631433c39a664d976ac79b",
         "source": "NInfer spread cross-key exact prefix discovery in RAM; independent owners sharing immutable RAM/SSD KV and state, transactional cold restore and fault/cancellation regression"
+      },
+      {
+        "id": "heads-tp",
+        "path": "backends/patches/ninfer-heads-tp.patch",
+        "sha256": "6d03771f220b535ec17f719d643ee1b495f9a2df052e239f46a87d1645c48e70",
+        "after_tree": "44c08b83d840057e67f13f6369910d75a682181b",
+        "requires": [
+          "cross-owner-fork"
+        ],
+        "source": "KVMem dense heads tensor parallel integration over NInfer 2026-10-29.2; global Query/statistics, rank-aware state/payload identity, local quantization shares, runtime placement observability and focused regressions"
+      },
+      {
+        "id": "checkpoint-cleanup",
+        "path": "backends/patches/ninfer-checkpoint-cleanup.patch",
+        "sha256": "a78a1bb059a93efe82ae61114641bc7c15b976c203e52bb5c9cc92fe5f7a0c3c",
+        "after_tree": "adce06373636c6d09f0bd6ba2979c899274ddf95",
+        "requires": [
+          "heads-tp"
+        ],
+        "source": "KVMem native checkpoint capture admission and post-request cleanup; separate Query replay and prompt-tail lifetimes with bounded extra recomputation"
+      },
+      {
+        "id": "input-reuse",
+        "path": "backends/patches/ninfer-input-reuse.patch",
+        "sha256": "238d1648b21234c86f1554b8b37174ccdf1bbb777236b333d74f85657f7f2328",
+        "after_tree": "1e7a5d621c341f2c257b81b9a5632dd19b17b07f",
+        "requires": [
+          "checkpoint-cleanup"
+        ],
+        "source": "KVMem exact structured input reuse alongside conservative template rewrite fallback"
       },
       {
         "id": "exl3",
         "path": "backends/patches/ninfer-exl3.patch",
-        "sha256": "4c51b88cbbd998fabf97bdfea219d9e5ca6b8f41c19a9bbec6a2c39a01150fde",
+        "sha256": "6b911062c8e71fc7619b759eebd9b2273304e45c115e0fb2a6c1043bb8318435",
         "requires": [
-          "cross-owner-fork"
+          "input-reuse"
         ],
-        "after_tree": "0d48acea8a9aeb267d6ed976f1ad049be51a9b4e",
+        "after_tree": "59c10976978f575287316398054cdd30e235ac03",
         "source": "giveen/ninfer-ext@b6886f67: EXL3 mul1 / trellis_t16_v1 dense runtime (format, geometry, A16 kernels, linear and fused input-projection, SwiGLU and residual consumers), artifact reader and tests; quantizer and Flash-Next expert offload not ported"
       }
     ]

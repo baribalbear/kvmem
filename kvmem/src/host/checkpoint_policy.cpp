@@ -6,10 +6,6 @@
 namespace kvmem {
 CheckpointPolicy CheckpointPolicy::environment() {
     CheckpointPolicy p;
-    const auto mode = std::getenv("KVMEM_CHECKPOINT_POLICY");
-    if (!mode || std::strcmp(mode, "legacy") == 0) return p;
-    if (std::strcmp(mode, "spread") != 0) throw std::invalid_argument("KVMEM_CHECKPOINT_POLICY must be legacy or spread");
-    p.enabled = true;
     auto read = [](const char * name, uint64_t value, uint64_t maximum, bool allow_zero = false) {
         const auto raw = std::getenv(name);
         if (!raw) return value;
@@ -19,6 +15,11 @@ CheckpointPolicy CheckpointPolicy::environment() {
         if (errno || *end || (!result && !allow_zero) || result > maximum) throw std::invalid_argument(std::string(name) + " out of range");
         return uint64_t(result);
     };
+    p.extra_recompute_tokens = read("KVMEM_CHECKPOINT_EXTRA_RECOMPUTE_TOKENS", 0, INT32_MAX, true);
+    const auto mode = std::getenv("KVMEM_CHECKPOINT_POLICY");
+    if (!mode || std::strcmp(mode, "legacy") == 0) return p;
+    if (std::strcmp(mode, "spread") != 0) throw std::invalid_argument("KVMEM_CHECKPOINT_POLICY must be legacy or spread");
+    p.enabled = true;
     p.interval = read("KVMEM_CHECKPOINT_INTERVAL", p.interval, UINT32_MAX);
     p.min_gap = read("KVMEM_CHECKPOINT_MIN_GAP", p.min_gap, UINT32_MAX, true);
     p.count = size_t(read("KVMEM_CHECKPOINT_COUNT", p.count, 256));
@@ -62,17 +63,19 @@ std::vector<size_t> retain_checkpoint_coverage(const std::vector<CoverageInfo> &
     };
     while (!keep.empty() && !fits()) {
         const uint64_t newest = info[keep.back()].frontier;
-        // Only the latest anchor and endpoint are protected, not every historical one.
-        size_t anchor = info.size(), root = info.size();
+        // Keep the latest legal input-side point separately from the newest
+        // generated endpoint: the latter can exceed a repeated prompt's limit.
+        size_t anchor = info.size(), root = info.size(), input = info.size();
         for (auto i : keep) {
             if (info[i].purpose == CoveragePurpose::Anchor || (info[i].protections & 2)) anchor = i;
             if ((info[i].purpose == CoveragePurpose::Root || (info[i].protections & 1)) && root == info.size()) root = i;
+            if (info[i].purpose == CoveragePurpose::Input || (info[i].protections & 4)) input = i;
         }
         size_t victim = keep.size();
         double lowest = std::numeric_limits<double>::infinity();
         for (size_t j = 0; j + 1 < keep.size(); ++j) {
             const auto i = keep[j];
-            if (i == anchor || i == root) continue;
+            if (i == anchor || i == root || i == input) continue;
             const uint64_t left = j ? info[keep[j-1]].frontier : 0;
             const uint64_t right = info[keep[j+1]].frontier;
             const double cost = double(right - left) / double(std::max<uint64_t>(1, std::max(interval, newest - left)));
@@ -82,10 +85,14 @@ std::vector<size_t> retain_checkpoint_coverage(const std::vector<CoverageInfo> &
         }
         if (victim == keep.size()) {
             // Hard execution leases live outside this directory. Under a tiny
-            // optional budget retain newest first, then anchor, then root.
+            // optional budget retain newest first, then input, anchor and root.
             victim = 0;
-            if (keep.size() > 1 && keep[0] == anchor && root != info.size())
-                victim = size_t(std::find(keep.begin(), keep.end(), root) - keep.begin());
+            const auto priority = [&](size_t position) {
+                const auto index = keep[position];
+                return position + 1 == keep.size() ? 4 : index == input ? 3 : index == anchor ? 2 : index == root ? 1 : 0;
+            };
+            for (size_t j = 1; j < keep.size(); ++j)
+                if (priority(j) < priority(victim)) victim = j;
         }
         keep.erase(keep.begin() + victim);
     }

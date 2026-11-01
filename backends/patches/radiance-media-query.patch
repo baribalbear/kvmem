@@ -1,0 +1,151 @@
+--- a/core/server/query_span.h
++++ b/core/server/query_span.h
+@@ -7,6 +7,28 @@
+ #include <vector>
+ 
+ namespace rad::server {
++// Encode a rendered prefix using the already prepared image expansions.
++// This must mirror tokenize_with_media's segment boundaries; raw text-token
++// counts are wrong after the first image. No decoder/encoder work is repeated.
++template<class Encode, class Expansion>
++std::vector<int32_t> encode_media_prefix(const std::string& text,
++    const std::string& marker, size_t count, Encode encode, Expansion expansion) {
++    if (marker.empty()) return {};
++    std::vector<int32_t> out;
++    size_t pos=0, image=0;
++    for (;;) {
++        const auto at=text.find(marker,pos);
++        const auto segment=text.substr(pos,at==std::string::npos?std::string::npos:at-pos);
++        if (!segment.empty()) {
++            const auto ids=encode(segment);out.insert(out.end(),ids.begin(),ids.end());
++        }
++        if (at==std::string::npos) return out;
++        if (image>=count) return {};
++        const auto& ids=expansion(image++);
++        out.insert(out.end(),ids.begin(),ids.end());pos=at+marker.size();
++    }
++}
++
+ // The history-only rendering must be an exact text AND token prefix. Unknown
+ // templates and boundary merges opt out; no guessed token counts/model names.
+ template<class Encode>
+--- a/core/server/oai.cpp
++++ b/core/server/oai.cpp
+@@ -2090,53 +2090,72 @@
+          * including its BOS. Adding another is a silent off-by-one in every position. */
+         p.tokens = d.tok->encode(rendered, false, /*parse_special=*/true);
+         p.text = rendered;
+-        if (lim.capture_query_span && messages.is_array()) {
+-            auto history_opt = opt;
+-            history_opt.add_generation_prompt = false; history_opt.quiet = true;
+-            ChatRender history_render;
+-            std::string history_why;
+-            if (lim.capture_history_boundary && opt.add_generation_prompt &&
+-                d.chat->apply(messages, tools, history_opt, &history_render, &history_why) >= 0)
+-                p.history_end = prove_history_end(rendered, history_render.prompt, p.tokens,
+-                    [&](const std::string& text) { return d.tok->encode(text, false, true); });
+-            // Render structured message prefixes and verify their exact token
+-            // prefixes. Text resembling a delimiter is never a boundary oracle.
+-            json prefix_messages = json::array();
+-            int32_t boundary = 0;
+-            for (const auto& message : messages) {
+-                prefix_messages.push_back(message);
+-                ChatRender partial; std::string why;
+-                if (d.chat->apply(prefix_messages,tools,history_opt,&partial,&why) < 0) {
+-                    p.message_spans.clear(); break;
+-                }
+-                const auto end = prove_history_end(rendered,partial.prompt,p.tokens,
+-                    [&](const std::string& text) { return d.tok->encode(text,false,true); });
+-                if (end <= boundary) { p.message_spans.clear(); break; }
+-                p.message_spans.emplace_back(boundary,end); boundary=end;
+-            }
+-            // Only a new final user message grants cold-history Query. Tool
+-            // continuation does not inherit the previous user's query span.
+-            for (size_t i = !messages.empty() && str_or(messages.back(), "role") == "user" ? messages.size() : 0; i-- > 0;) {
+-                if (str_or(messages[i], "role") != "user") continue;
+-                const auto c = messages[i].find("content");
+-                if (c == messages[i].end() || !c->is_string()) break;
+-                const auto content = c->get<std::string>();
+-                const auto marker = random_id("query-span-");
+-                auto probe_messages = messages;
+-                probe_messages[i]["content"] = marker;
+-                auto probe_opt = opt; probe_opt.quiet = true;
+-                ChatRender probe;
+-                std::string probe_why;
+-                if (d.chat->apply(probe_messages, tools, probe_opt, &probe, &probe_why) >= 0) {
+-                    const auto span = prove_query_span(rendered, probe.prompt, marker, content, p.tokens,
+-                        [&](const std::string& text) { return d.tok->encode(text, false, true); });
+-                    p.query_begin = span.first; p.query_end = span.second;
+-                }
+-                break;
+-            }
+-        }
+     } else {
+         RAD_TRY(tokenize_with_media(rendered, d, media, MediaOpts{}, &p, err));
++    }
++    const auto encode_prefix = [&](const std::string& text) {
++        const auto encode = [&](const std::string& part) { return d.tok->encode(part, false, true); };
++        if (!p.media) return encode(text);
++        return encode_media_prefix(text, MEDIA_MARKER, p.media->items.size(), encode,
++            [&](size_t i) -> const std::vector<int32_t>& { return p.media->items[i].item->expand; });
++    };
++    if (lim.capture_query_span && messages.is_array()) {
++        auto history_opt = opt;
++        history_opt.add_generation_prompt = false; history_opt.quiet = true;
++        ChatRender history_render;
++        std::string history_why;
++        if (lim.capture_history_boundary && opt.add_generation_prompt &&
++            d.chat->apply(messages, tools, history_opt, &history_render, &history_why) >= 0)
++            p.history_end = prove_history_end(rendered, history_render.prompt, p.tokens,
++                encode_prefix);
++        // Render structured message prefixes and verify their exact token
++        // prefixes. Text resembling a delimiter is never a boundary oracle.
++        json prefix_messages = json::array();
++        int32_t boundary = 0;
++        for (const auto& message : messages) {
++            prefix_messages.push_back(message);
++            ChatRender partial; std::string why;
++            if (d.chat->apply(prefix_messages,tools,history_opt,&partial,&why) < 0) {
++                p.message_spans.clear(); break;
++            }
++            const auto end = prove_history_end(rendered,partial.prompt,p.tokens,
++                encode_prefix);
++            if (end <= boundary) { p.message_spans.clear(); break; }
++            p.message_spans.emplace_back(boundary,end); boundary=end;
++        }
++        // Only a new final user message grants cold-history Query. Tool
++        // continuation does not inherit the previous user's query span.
++        for (size_t i = !messages.empty() && str_or(messages.back(), "role") == "user" ? messages.size() : 0; i-- > 0;) {
++            if (str_or(messages[i], "role") != "user") continue;
++            const auto c = messages[i].find("content");
++            if (c == messages[i].end()) break;
++            std::string content; size_t text_part = size_t(-1);
++            if (c->is_string()) content = c->get<std::string>();
++            else if (c->is_array()) {
++                // The last text part is the explicit question of a multimodal
++                // user turn. Images stay mandatory; they are not Query rows.
++                for (size_t j=c->size(); j-- > 0;) {
++                    const auto& part=(*c)[j];
++                    if (str_or(part,"type")=="text" && part.contains("text") && part["text"].is_string()) {
++                        content=part["text"].get<std::string>();text_part=j;break;
++                    }
++                }
++            }
++            if (content.empty()) break;
++            const auto marker = random_id("query-span-");
++            auto probe_messages = messages;
++            if (text_part==size_t(-1)) probe_messages[i]["content"] = marker;
++            else probe_messages[i]["content"][text_part]["text"] = marker;
++            auto probe_opt = opt; probe_opt.quiet = true;
++            ChatRender probe;
++            std::string probe_why;
++            if (d.chat->apply(probe_messages, tools, probe_opt, &probe, &probe_why) >= 0) {
++                const auto span = prove_query_span(rendered, probe.prompt, marker, content, p.tokens,
++                    encode_prefix);
++                p.query_begin = span.first; p.query_end = span.second;
++            }
++            break;
++        }
+     }
+     if (p.tokens.empty()) {
+         *err = err_bad("messages", "the rendered prompt tokenised to nothing");

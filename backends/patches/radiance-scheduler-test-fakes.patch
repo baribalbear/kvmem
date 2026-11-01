@@ -1,0 +1,26 @@
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -60,6 +60,23 @@
+   get_filename_component(n ${t} NAME_WE)
+   if(n IN_LIST RAD_TESTS_NO_CORE)
+     add_executable(${n} ${t} ${CMAKE_SOURCE_DIR}/core/util/rad_util.cpp)
++  elseif(n STREQUAL "sched_test")
++    # This test deliberately uses host allocations and null streams. Linking
++    # rad_core also links HIP; ROCm can resolve a C++ standard-library symbol
++    # from rad_graph.cpp.o, pulling Registry and the strong device dispatch in
++    # through loader.cpp.o. That replaces the weak fakes with real GPU calls.
++    # Compile the scheduler's actual CPU units directly, as arch_test does for
++    # its own boundary. Missing fake dependencies now fail at link time.
++    add_executable(${n} ${t}
++      ${CMAKE_SOURCE_DIR}/core/util/rad_util.cpp
++      ${CMAKE_SOURCE_DIR}/core/sched/batch.cpp
++      ${CMAKE_SOURCE_DIR}/core/sched/derive.cpp
++      ${CMAKE_SOURCE_DIR}/core/sched/draft.cpp
++      ${CMAKE_SOURCE_DIR}/core/sched/geometry.cpp
++      ${CMAKE_SOURCE_DIR}/core/sched/scheduler.cpp
++      ${CMAKE_SOURCE_DIR}/core/server/sink.cpp
++      ${CMAKE_SOURCE_DIR}/core/mm/item.cpp)
++    target_link_libraries(${n} PRIVATE Threads::Threads)
+   elseif(n IN_LIST RAD_TESTS_WITH_TOKREF)
+     add_executable(${n} ${t})
+     target_link_libraries(${n} PRIVATE rad_tokref rad_core)

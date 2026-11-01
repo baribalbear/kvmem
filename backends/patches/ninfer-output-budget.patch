@@ -1,8 +1,8 @@
 diff --git a/docs/serving.md b/docs/serving.md
-index 1e09ba3e12e8e7fdc4d7809213fe9d38a934c508..bb4c54861a650492d98635c339a1b35ba1ec3a39 100644
+index 51ee3f4ca711554ccf9582810aab3ab291c5a82d..667543192a17d397d3b0eddb83f983a859bc68d3 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
-@@ -2702,10 +2702,21 @@ reaching `max_tokens`.
+@@ -2748,10 +2748,21 @@ reaching `max_tokens`.
  
  ### Default output limit
  

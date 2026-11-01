@@ -1,8 +1,8 @@
 diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
-index cc1a2d713c54ebd0f912b4db327cdf52e26ebe1b..c65ee98fddb57c387b27b7e487594c4b7dc4c21c 100644
+index cf8ac86a65f3ccc761c4d53b165c9a8dac914097..fc914bf0bb319d37a896c70cb4ba664d04fec803 100644
 --- a/src/models/qwen3_5/frontend/frontend.cpp
 +++ b/src/models/qwen3_5/frontend/frontend.cpp
-@@ -1446,6 +1446,8 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
+@@ -1546,6 +1546,8 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
              apply_direct_graft(*graft, result, message_boundaries, cache_boundaries);
          }
      }
@@ -115,10 +115,10 @@ index ead8ddeef3b755214ceba767957eac597c65ac74..76c2afd426fee7ce8d1c3d09feb7cfb4
      [[nodiscard]] bool matches(const PreparedPromptData& prompt, std::size_t count) const;
      [[nodiscard]] bool equals(const ResidentPrefixIdentity& other) const;
 diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
-index c488999d46d22e2ab727779834bb917e2bc3950a..1ea86bd0133a7ed9f43469f4e9a7a4883cbb7b76 100644
+index 86b9747c0adc61ccb93d4f3c947071a69f18ae27..d57bab1b094a780f9ec6347280b4ba241017f7c9 100644
 --- a/src/models/qwen3_5/program/program_impl.cpp
 +++ b/src/models/qwen3_5/program/program_impl.cpp
-@@ -500,6 +500,14 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
+@@ -513,6 +513,14 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
              *backend_kv_pages, backend->execution_tables(), address_capacity,
              backend->execution_tables().logical_page_capacity());
      }
@@ -133,7 +133,7 @@ index c488999d46d22e2ab727779834bb917e2bc3950a..1ea86bd0133a7ed9f43469f4e9a7a488
      if (kvmem_options.disk_bytes) {
          const auto page_bytes = text_host_kv_page_stride + backend_host_kv_page_stride;
          const auto pages = std::uint64_t(kvmem_window_tokens / 64) * max_concurrency;
-@@ -1070,7 +1078,7 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
+@@ -1083,7 +1091,7 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
          memory.statistics_staging_bytes =
              (memory_statistics_host ? memory_statistics_host->size() : 0) +
              (memory_candidate_host ? memory_candidate_host->size() : 0);
@@ -142,7 +142,7 @@ index c488999d46d22e2ab727779834bb917e2bc3950a..1ea86bd0133a7ed9f43469f4e9a7a488
          memory.resident_pages = text_kv_pages->physical_pool().allocated_pages();
          memory.mtp_resident_pages = backend_kv_pages
              ? backend_kv_pages->physical_pool().allocated_pages() : 0;
-@@ -1087,6 +1095,7 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
+@@ -1100,6 +1108,7 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
          memory.disk_payload_budget_bytes = kvmem_options.disk_bytes;
          memory.retained_payload_budget_bytes = memory_retained_budget;
          for (const auto& request : requests) memory.active_payload_reservation_bytes += request.memory_payload_reservation;
@@ -150,7 +150,7 @@ index c488999d46d22e2ab727779834bb917e2bc3950a..1ea86bd0133a7ed9f43469f4e9a7a488
          const auto collect = [&](const KvmemWindowState& window) {
              // Moves into the history directory leave scalar fields behind until lane
              // retirement. Ownership of statistics identifies the live history.
-@@ -1096,12 +1105,11 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
+@@ -1109,12 +1118,11 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
              memory.history_swaps += window.swaps;
              memory.history_spilled_bytes += window.spilled_bytes;
              memory.history_restored_bytes += window.restored_bytes;
@@ -165,7 +165,7 @@ index c488999d46d22e2ab727779834bb917e2bc3950a..1ea86bd0133a7ed9f43469f4e9a7a488
                      memory.checkpoint_tokens = std::max(memory.checkpoint_tokens,
                          static_cast<std::uint32_t>(checkpoint->prefix.size()));
                  }
-@@ -1113,6 +1121,8 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
+@@ -1126,6 +1134,8 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
              ++memory.retained_sessions;
              collect(*history);
          }
@@ -980,10 +980,10 @@ index 1b102a9c9520862b35ab49cfc3223ffc71f3bb8d..13bee384a880bcb67708c50f457a07b9
                  memory_idle_transfer = std::move(pending);
                  memory_idle_requested = true;
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 803012e3b0c830e15ecd13c6571dea5f251048c4..52498b39f4925d6d8fd5c7c9cd05ad2605180659 100644
+index b4b6868e051bedbcc05f5d93c163ae301d0294e4..c5785fe924ef0a2dea8165251102998dc1183769 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -43,11 +43,13 @@ set_tests_properties(ninfer_hybrid_prefix_admission_test PROPERTIES
+@@ -44,11 +44,13 @@ set_tests_properties(ninfer_hybrid_prefix_admission_test PROPERTIES
  
  # Focused Query/Pressure frontend and replay-budget option contracts.
  ninfer_add_test(ninfer_kvmem_checkpoint_pool_test

@@ -47,12 +47,12 @@ def scoring_settings(argv):
 
 def token_settings(backend, values, block=32):
     """Resolve token invariants; all consumers use the resulting effective values."""
-    block = 64 if backend == 'ninfer' else block
-    if block not in (32, 64):
+    block = 128 if backend == 'radiance' else 64 if backend == 'ninfer' else block
+    if block not in ((128,) if backend=='radiance' else (32,64)):
         raise ValueError('BlockTokens must be 32 or 64')
     requested = {k: values[k] for k in ('Budget', 'Reserve', 'SinkTokens', 'RecentTokens', 'Prefill', 'Context')}
     effective = dict(requested)
-    minima = {'Budget': block if backend == 'llamacpp' else 128, 'Reserve': block,
+    minima = {'Budget': 2*block if backend=='radiance' else block if backend == 'llamacpp' else 128, 'Reserve': block,
               'SinkTokens': 0 if backend == 'polystrata' else block,
               'RecentTokens': 0 if backend == 'llamacpp' else block}
     for key, minimum in minima.items():
@@ -62,12 +62,14 @@ def token_settings(backend, values, block=32):
         if value < minimum:
             raise ValueError(f'{key} must retain at least {minimum} tokens after alignment')
         effective[key] = value
-    if backend in ('ninfer', 'polystrata'):
+    if backend in ('ninfer', 'polystrata', 'radiance'):
         prefill = requested['Prefill'] or (1024 if backend == 'ninfer' else 0)
         alignment = 128 if backend == 'ninfer' else 1
         effective['Prefill'] = min(prefill, effective['Reserve']) // alignment * alignment
         if effective['Prefill'] < alignment:
             raise ValueError(f'Prefill and Reserve must allow at least {alignment} prefill tokens')
+    if backend=='radiance' and effective['Reserve'] <= effective['Prefill']+block:
+        raise ValueError('Radiance Reserve must exceed Prefill plus one 128-token block')
     if effective['SinkTokens'] + effective['RecentTokens'] > effective['Budget']:
         raise ValueError('SinkTokens + RecentTokens must fit Budget after alignment')
     if effective['Budget'] + effective['Reserve'] > effective['Context']:
@@ -107,6 +109,8 @@ def _existing_file(value, label):
 
 def _speculative(p, supplied):
     backend = p['Backend']
+    if backend == 'ninfer':
+        p.setdefault('CheckpointExtraRecomputeTokens', 0)
     mode = p.get('SpeculativeMode') or ('mtp' if p['MtpDrafts'] else 'none')
     spec = SPECULATIVE_PROFILES[backend].get(mode)
     if spec is None:
@@ -153,7 +157,7 @@ def build_plan(data, root=ROOT, *, platform=None, reveal_secrets=False):
     params = data.get('parameters') if isinstance(data, dict) else None
     if isinstance(params, dict):
         for key in ('Worker', 'Model', 'DraftModel', 'ChatTemplateFile', 'Mmproj', 'DiskPath',
-                    'Tokenizer', 'PolystrataSource', 'Python', 'VisionWorker'):
+                    'Tokenizer', 'PolystrataSource', 'Python', 'VisionWorker', 'RadianceHome', 'RocmPath'):
             value = params.get(key)
             if isinstance(value, str) and value:
                 if platform == 'linux' and PureWindowsPath(value).drive:
@@ -165,6 +169,9 @@ def build_plan(data, root=ROOT, *, platform=None, reveal_secrets=False):
     supplied = normalize(data, tuple(caps))['parameters']
     p = dict(LAUNCH_DEFAULTS, **supplied)
     backend = p['Backend']
+    if backend == 'radiance':
+        from .radiance import build_radiance_plan
+        return build_radiance_plan(supplied, root, platform, reveal_secrets, caps[backend])
     if backend == 'polystrata':
         raise ValueError('Portable PolyStrata plan generation is not available yet; use the Windows launcher')
     for key, (low, high) in RANGES.items():
@@ -224,6 +231,10 @@ def build_plan(data, root=ROOT, *, platform=None, reveal_secrets=False):
         pair('--devices' if len(gpu_ids) > 1 else '--device', ','.join(str(i) for i in range(len(gpu_ids))))
         if layers:
             pair('--stage-layers', ','.join(map(str, layers)))
+        if p.get('TensorParallel'):
+            argv.extend(('--tensor-parallel', '--tensor-attention', 'heads'))
+            if p.get('TensorSplit'):
+                pair('--tensor-split', ','.join(format(x, '.17g') for x in p['TensorSplit']))
         if p['MtpDrafts']:
             for flag, key in [('--spec', 'SpeculativeMode'), ('--draft-tokens', 'MtpDrafts'),
                               ('--ngram-draft-tokens', 'NgramDrafts'), ('--ngram-min-match', 'NgramMinMatch')]:
@@ -317,6 +328,11 @@ def build_plan(data, root=ROOT, *, platform=None, reveal_secrets=False):
         pair('--kvmem-disk-mib', p['DiskMiB'])
     argv += scoring_args(supplied) + p.get('WorkerArgs', [])
     environment = {'CUDA_VISIBLE_DEVICES': p['Gpu'], 'CUDA_DEVICE_ORDER': 'PCI_BUS_ID'}
+    if backend == 'ninfer':
+        # Explicit zero keeps an inherited environment from enabling an unsaved policy.
+        environment['KVMEM_CHECKPOINT_EXTRA_RECOMPUTE_TOKENS'] = str(p['CheckpointExtraRecomputeTokens'])
+        if p['CheckpointExtraRecomputeTokens'] and os.environ.get('KVMEM_CHECKPOINT_MIN_GAP', '0').strip() not in ('', '0'):
+            raise ValueError('CheckpointExtraRecomputeTokens requires KVMEM_CHECKPOINT_MIN_GAP=0')
     if platform == 'linux':
         libraries = [Path(p['Worker']).parent, root / 'lib']
         environment['LD_LIBRARY_PATH'] = ':'.join(dict.fromkeys(str(x) for x in libraries if x.is_dir()))

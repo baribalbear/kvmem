@@ -1,0 +1,225 @@
+#pragma once
+#include "statistics_capture.hpp"
+#include "runtime/step_observer.h"
+#include "kvmem/raw_kv_store.hpp"
+#include "kvmem/kvmem_store.hpp"
+#include "rank_native_memory.hpp"
+#include "state_checkpoint.hpp"
+#include "rank_prefix.hpp"
+#include "query_identity.hpp"
+#include "image_contract.hpp"
+#include "attention_capture.hpp"
+#include "recall_policy.hpp"
+#include "kvmem/page_softmax_cuda.hpp"
+#include <atomic>
+#include <algorithm>
+#include <deque>
+#include <chrono>
+
+namespace kvmem::radiance {
+class BatchedStatisticsObserver;
+struct SelectionOptions : RecallOptions {
+    bool rolling_generation = true;
+    uint32_t budget_tokens = 0; // zero: observation-only probe
+    uint32_t block_tokens = 128;
+    uint64_t host_bytes = 256ull * 1024 * 1024;
+    uint64_t disk_bytes = 0;
+    std::string disk_path;
+    uint64_t history_bytes() const {
+        if(disk_bytes>UINT64_MAX-host_bytes)throw std::invalid_argument("history storage capacity overflow");
+        return host_bytes+disk_bytes;
+    }
+    uint32_t cache_sessions = 8;
+    uint32_t replay_tokens = 1024; // generation/verify reserve; prefill is blockwise
+    int64_t sink_tokens = -1;   // shared KVMem automatic allocation
+    int64_t recent_tokens = -1; // explicit nonnegative values override auto
+};
+// Engine-lifecycle bridge. Owns bounded pre-RoPE capture and per-session mean-K
+// statistics. With a nonzero selection budget, composes the common KVMem policy
+// and native memory transactions to publish original-position sparse KV views.
+// Exact serial continuations retain native pages and matching recurrent state.
+// Drafter proposals remain engine-owned; only verified trunk rows enter
+// the shared statistics. BatchedStatisticsObserver multiplexes these controllers;
+// the engine-owned prefix cache is disabled in favor of the shared KVMem cache.
+class StatisticsObserver final : public rad::StepObserver {
+public:
+    explicit StatisticsObserver(SelectionOptions options = {}) : options_(options) {}
+    bool retain_history_boundary() const noexcept override { return options_.budget_tokens > 0; }
+    int pool_token_limit(const rad::Config&, const rad::Program&, int64_t*) noexcept override;
+    int configure(const rad::Config&, rad::CtxDesc&) noexcept override;
+    int bind_rank(rad::RankResources) noexcept override;
+    int resume(const rad::StepPlan&, int64_t*, std::string*) noexcept override;
+    int begin(const rad::StepPlan&) noexcept override;
+    bool split_sampling(const rad::StepPlan& plan) const noexcept override {
+        return plan.e.size() == 1 && plan.e[0].is_prefill;
+    }
+    std::string validate_request(const rad::Request&) const override;
+    int after_forward(const rad::StepPlan&, int64_t*) noexcept override;
+    int collect(const rad::StepPlan&, const rad::Scheduler::StepResult&) noexcept override;
+    int finish(const rad::StepEntry&, const rad::Request&) noexcept override;
+    void retire(uint64_t) noexcept override;
+    void shutdown() noexcept override;
+private:
+    friend class BatchedStatisticsObserver;
+    struct Rank {
+        int device=-1;
+        uint32_t query_heads=0;
+        rad::RankResources resources;
+        GdnMaterialize materialize_gdn=nullptr;
+        std::vector<rad::KVGroupInfo> groups;
+        std::vector<int> layers;
+        std::unique_ptr<StatisticsCapture> capture;
+        std::unique_ptr<AttentionCapture> attention;
+    };
+    std::vector<std::unique_ptr<Rank>> ranks_;
+    uint32_t world_size_=0;
+    void drain_ranks(const char* reason);
+    void rollback_ranks(uint64_t sequence,uint64_t frontier,const char* reason);
+    void verify_rank_view(uint64_t sequence) const;
+    std::unique_ptr<PageSoftmaxCuda> query_gpu_;
+    std::unique_ptr<RecallPolicy> recall_;
+    std::unique_ptr<RecallSnapshot> checkpoint_recall_, prefix_recall_;
+    std::shared_ptr<GraphStatisticsBudget> graph_budget_ = std::make_shared<GraphStatisticsBudget>(256u << 20);
+    std::vector<std::vector<float>> query_tokens_;
+    std::vector<int32_t> step_tokens_;
+    std::vector<uint32_t> sample_rows_;
+    std::vector<uint64_t> exposed_;
+    MemorySnapshot accepted_view_; // frozen before the scheduler reserves the next batch
+    std::unique_ptr<RawKvStore> store_;
+    RawKvStoreConfig store_config_;
+    SessionIdentity session_{};
+    uint64_t active_request_ = 0;
+    struct CachedIdentity {
+        std::vector<int32_t> tokens;
+        ImageIdentities images;
+        std::string scope;
+        std::vector<int32_t> query_tokens;
+        int32_t query_begin = -1, query_end = -1;
+        bool matches(const rad::Request& r) const {
+            return scope == r.session_label &&
+                r.prompt.size() > tokens.size() &&
+                std::equal(tokens.begin(), tokens.end(), r.prompt.begin()) &&
+                image_prefix_matches(images,r.media.get(),r.prompt.size(),tokens.size());
+        }
+    };
+    ImageIdentities images_; // immutable layout of the active native request
+    std::shared_ptr<const CachedIdentity> cached_identity_; // atomic immutable HTTP snapshot
+    std::unique_ptr<RankPrefix> prefix_;
+    std::vector<float> prefix_mean_;
+    struct RetainedSession {
+        SessionIdentity session;
+        uint64_t content_version = 0, bytes = 0;
+        std::shared_ptr<const CachedIdentity> identity;
+        std::unique_ptr<RankPrefix> prefix;
+        std::vector<float> mean;
+        std::unique_ptr<RawKvStore> store;
+        std::unique_ptr<KvMemStore> policy;
+        std::shared_ptr<RankNativeMemory> memory;
+        std::unique_ptr<RecallPolicy> recall;
+        std::unique_ptr<RecallSnapshot> recall_snapshot;
+    };
+    struct ParkWork {
+        std::unique_ptr<RankPrefix> prefix;
+        std::shared_ptr<HostKvStorage> storage;
+        void run(){storage_operation([&]{prefix->park(storage,{});});}
+    };
+    struct PendingPark {
+        uint64_t id=0;
+        RetainedSession saved;
+        std::shared_ptr<ParkWork> work;
+        StorageTicket ticket;
+        ~PendingPark(){if(ticket){ticket.cancel();try{ticket.wait();}catch(...){}}}
+    };
+    struct CacheState {
+        std::shared_ptr<HostKvStorage> payload;
+        std::shared_ptr<StorageIoQueue> io;
+        uint64_t hits=0,evictions=0,forks=0;
+        std::deque<RetainedSession> sessions; // LRU, owns no live native sequence
+        std::vector<std::unique_ptr<PendingPark>> parking;
+        struct Finishing {uint64_t id;std::shared_ptr<const CachedIdentity> identity;};
+        std::vector<Finishing> finishing; // bounded by active native sequence count
+        uint64_t next_park=1,park_errors=0;
+        size_t count() const noexcept {return sessions.size()+parking.size();}
+        bool pending(uint64_t id) const noexcept {
+            return std::any_of(parking.begin(),parking.end(),[&](const auto& x){return x->id==id;}) ||
+                std::any_of(finishing.begin(),finishing.end(),[&](const auto& x){return x.id==id;});
+        }
+        uint64_t bytes = 0, active_archive_bytes = 0;
+    };
+    std::shared_ptr<CacheState> cache_ = std::make_shared<CacheState>();
+    uint64_t archive_charge_ = 0;
+    uint64_t next_incarnation_ = 1, steps_ = 0;
+    uint32_t frontier_ = 0, max_position_ = 0;
+    std::vector<double> query_total_;
+    std::vector<uint64_t> query_rows_;
+    std::vector<uint32_t> query_counts_;
+    int32_t query_begin_ = -1, query_end_ = -1;
+    bool query_frozen_ = false;
+    // Native serial heads write their own layer in the trunk's FULL KV group
+    // AFTER the target pass. Do not spill/lease those pages until it finishes.
+    bool serial_drafter_ = false;
+    bool prefill_collected_ = false, deferred_selection_ = false;
+    bool replaying_ = false, replay_done_ = false;
+    uint32_t replay_start_ = 0;
+    uint64_t content_version_ = 0;
+    std::unique_ptr<RankCheckpoint> checkpoint_;
+    std::vector<float> checkpoint_mean_;
+    SelectionOptions options_;
+    KvMemKeepAllocation keep_;
+    BackendIdentity identity_;
+    int device_ = -1;
+    uint32_t max_rows_ = 0, head_dim_ = 0, query_heads_ = 0, kv_heads_ = 0;
+    uint64_t device_tokens_ = UINT64_MAX, reselections_ = 0, spilled_ = 0, restored_ = 0;
+    std::unique_ptr<KvMemStore> policy_;
+    std::shared_ptr<RankNativeMemory> memory_;
+    std::unique_ptr<MemorySession> memory_session_;
+    struct PendingSelection {
+        SelectionReason reason;
+        size_t spill,restore;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    std::optional<PendingSelection> pending_selection_;
+    bool asynchronous_=false; // enabled only by a wrapper implementing scheduler holds
+    struct PrefixReadWork {
+        std::unique_ptr<RankPrefix> source;
+        RankPrefix::Payload payload;
+        void run(){storage_operation([&]{payload=source->load_cpu();});}
+    };
+    struct PrefixRead {
+        std::shared_ptr<PrefixReadWork> work;
+        StorageTicket ticket;
+        std::chrono::steady_clock::time_point deadline;
+        ~PrefixRead(){if(ticket){ticket.cancel();try{ticket.wait();}catch(...){}}}
+    };
+    std::unique_ptr<PrefixRead> pending_prefix_;
+    bool draining_prefix_failure_=false;
+    std::unique_ptr<RankPrefix::Payload> prefix_payload_;
+    struct TerminalSnapshot {
+        std::shared_ptr<const CachedIdentity> identity;
+        uint64_t request=0;
+        uint32_t accepted_rows=0;
+        size_t output_tokens=0;
+    };
+    std::unique_ptr<TerminalSnapshot> pending_finish_;
+    uint64_t finishing_id_=0;
+    void capture_terminal(const TerminalSnapshot&);
+    uint64_t pending_cache_=0;
+    bool pending_io() const noexcept {return pending_cache_ || bool(pending_prefix_) || bool(pending_selection_) || bool(pending_finish_);}
+    bool poll_prefix();
+    bool poll_selection(bool wait=false);
+    int poll_pending_selection() noexcept;
+    uint64_t selected_frontier_ = 0, selected_visible_ = 0, decode_reselections_ = 0;
+    void reselect(SelectionReason);
+    void publish_selection(const std::vector<uint32_t>&, std::vector<uint32_t>, SelectionReason);
+    void start_request(const rad::Request&);
+    PageQueryView query_view(std::vector<const float*>&) const;
+    void begin_attention(const rad::StepEntry&);
+    void sync_memory();
+    void clear_session();
+    void park_session();
+    void evict_session();
+    void activate_session(const rad::Request&);
+    void update_archive_charge();
+    std::string fresh_reserve_error(const rad::Request&) const;
+};
+} // namespace kvmem::radiance

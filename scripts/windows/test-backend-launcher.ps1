@@ -67,6 +67,17 @@ try {
         }
     }
     $thinkingOn = & $launcher @common -Backend llamacpp -Model (Join-Path $testDir 'model.gguf') -ThinkingMode on -Concurrency 8 | ConvertFrom-Json
+    foreach ($threshold in 0,16,2147483647) {
+        $checkpoint = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') -CheckpointExtraRecomputeTokens $threshold | ConvertFrom-Json
+        if ($checkpoint.environment.KVMEM_CHECKPOINT_EXTRA_RECOMPUTE_TOKENS -ne "$threshold") { throw 'Checkpoint recompute environment lost' }
+    }
+    $checkpointDefault = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') | ConvertFrom-Json
+    if ($checkpointDefault.environment.KVMEM_CHECKPOINT_EXTRA_RECOMPUTE_TOKENS -ne '0') { throw 'Checkpoint recompute default changed' }
+    foreach ($case in @(@{Backend='ninfer';CheckpointExtraRecomputeTokens=-1}, @{Backend='llamacpp';CheckpointExtraRecomputeTokens=0})) {
+        $rejected = $false
+        try { $null = & $launcher @common -Model (Join-Path $testDir 'model with spaces.ninfer') @case } catch { $rejected = $true }
+        if (!$rejected) { throw 'Invalid checkpoint recompute setting accepted' }
+    }
     if ($thinkingOn.argv -notcontains '--enable-thinking') { throw 'llama thinking-on mapping failed' }
     $splitKv = & $launcher @common -Backend llamacpp -Model (Join-Path $testDir 'model.gguf') -KvTypeK q8_0 -KvTypeV q4_0 | ConvertFrom-Json
     if ($splitKv.argv -contains '--kv-dtype' -or
@@ -126,6 +137,35 @@ try {
         $dual.argv[[array]::IndexOf($dual.argv, '--stage-layers') + 1] -ne '30,34' -or
         $dual.capabilities.supported_combinations.multi_gpu.mode -ne 'layer') {
         throw 'Multi-GPU launcher lost UUID order, stage split or capability'
+    }
+    $tensor = & $launcher @dualArgs -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -TensorParallel -TensorSplit 3,1 | ConvertFrom-Json
+    if ($tensor.environment.CUDA_VISIBLE_DEVICES -ne 'GPU-second,GPU-first' -or
+        $tensor.argv -notcontains '--tensor-parallel' -or $tensor.argv -contains '--stage-layers' -or
+        $tensor.argv[[array]::IndexOf($tensor.argv, '--tensor-attention') + 1] -ne 'heads' -or
+        $tensor.argv[[array]::IndexOf($tensor.argv, '--tensor-split') + 1] -ne '3,1') {
+        throw 'Heads TP launcher lost UUID order or weights'
+    }
+    $automaticTensor = & $launcher @dualArgs -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -TensorParallel | ConvertFrom-Json
+    if ($automaticTensor.argv -contains '--tensor-split') { throw 'Automatic TP weights must be omitted' }
+    foreach ($badTensor in @(
+        @{TensorParallel=$true;StageLayers=@(30,34)}, @{TensorSplit=@(3,1)},
+        @{TensorParallel=$true;TensorSplit=@(3)}, @{TensorParallel=$true;TensorSplit=@(0,1)},
+        @{TensorParallel=$true;TensorSplit=@([double]::NaN,1)},
+        @{TensorParallel=$true;TensorSplit=@([double]::PositiveInfinity,1)},
+        @{TensorParallel=$true;TensorSplit=@(1e308,1e308)}
+    )) {
+        $rejected = $false
+        try { $null = & $launcher @dualArgs -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') @badTensor }
+        catch { $rejected = $_.Exception.Message -match 'TensorParallel|TensorSplit' }
+        if (!$rejected) { throw 'Invalid TP configuration accepted' }
+    }
+    foreach ($nativeTensor in @(@('--tensor-attention','positions'), @('--tensor-split=3,1'), @('--tensor-parallel'))) {
+        $rejected = $false
+        try { $null = & $launcher @dualArgs -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') -WorkerArgs $nativeTensor }
+        catch { $rejected = $_.Exception.Message -match 'Use -Gpu, -StageLayers, -TensorParallel and -TensorSplit' }
+        if (!$rejected) { throw 'Native arguments bypassed the heads-only TP controls' }
     }
     foreach ($badGpu in @('GPU-test,GPU-test', 'GPU-test,', ',GPU-test', '-1,GPU-test', '0,1,2,3,4,5,6,7,8')) {
         $argsBad = $common.Clone(); $argsBad.Gpu = $badGpu

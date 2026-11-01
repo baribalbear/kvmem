@@ -1,0 +1,23 @@
+--- a/core/CMakeLists.txt
++++ b/core/CMakeLists.txt
+@@ -43,8 +43,18 @@
+ endif()
+ 
+ if(RAD_FFMPEG_FOUND)
+-  target_compile_definitions(rad_core PRIVATE RAD_HAVE_FFMPEG=1)
+-  target_link_libraries(rad_core PUBLIC PkgConfig::RAD_FFMPEG)
++  # The decoder is the only translation unit using FFmpeg headers/macros.
++  # Keep that compile interface local; consumers only need the resolved link
++  # libraries/options. Toggling media must not rebuild device kernels or all
++  # core objects because of an unrelated include path or preprocessor symbol.
++  set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/mm/media.cpp APPEND
++               PROPERTY COMPILE_DEFINITIONS RAD_HAVE_FFMPEG=1)
++  set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/mm/media.cpp APPEND
++               PROPERTY INCLUDE_DIRECTORIES ${RAD_FFMPEG_INCLUDE_DIRS})
++  set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/mm/media.cpp APPEND
++               PROPERTY COMPILE_OPTIONS ${RAD_FFMPEG_CFLAGS_OTHER})
++  target_link_libraries(rad_core PUBLIC ${RAD_FFMPEG_LINK_LIBRARIES})
++  target_link_options(rad_core PUBLIC ${RAD_FFMPEG_LDFLAGS_OTHER})
+ endif()
+ 
+ if(RAD_HIP_FOUND)

@@ -1,8 +1,8 @@
 diff --git a/docs/serving.md b/docs/serving.md
-index 5a727a7f2a0a6a1a3a8f16b9220ac3e81da528c1..11476a40ccf065de76f5e25a1052df3795d22eab 100644
+index 5c229175b79758378d2150463070ed0b02a02413..107264000ed11c73e0dbdedd6654901c6cc5e053 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
-@@ -970,6 +970,14 @@ for independent conversations. Shared keys share one cache lineage: editing an e
+@@ -1004,6 +1004,14 @@ for independent conversations. Shared keys share one cache lineage: editing an e
  can discard its later checkpoints, so independently retained branches require distinct owners.
  Every restore still validates the token/media prefix and native KV/state; a matching key alone
  does not make incompatible inputs reusable. Missing, null or empty cache keys remain anonymous.
@@ -63,10 +63,10 @@ index b27cb12ad4d0bb68e72154bcb58c16c78767669a..0de09ab79ef478d707ca838537ab5268
                  ? PrefixReusePath::PrivateEndpoint : (match->kind == KvmemCheckpointKind::InputFallback ||
                                                         match->kind == KvmemCheckpointKind::Reconstruction)
 diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
-index 1ea86bd0133a7ed9f43469f4e9a7a4883cbb7b76..233dac8fa82331f515a10d62a2f7cb75c40e8b22 100644
+index d57bab1b094a780f9ec6347280b4ba241017f7c9..43e2f67e8e3f378cd41ee60b30cd7cccd64414e3 100644
 --- a/src/models/qwen3_5/program/program_impl.cpp
 +++ b/src/models/qwen3_5/program/program_impl.cpp
-@@ -1121,6 +1121,9 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
+@@ -1134,6 +1134,9 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
              ++memory.retained_sessions;
              collect(*history);
          }

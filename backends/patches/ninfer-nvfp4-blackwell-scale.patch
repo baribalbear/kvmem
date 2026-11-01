@@ -21,10 +21,10 @@ index 050dfc3431bb02fa70da91347308fea06d1853ed..44d8aaa40331d76593ff66c4434d2512
      unsigned multiplier;
      asm("cvt.rn.bf16x2.e4m3x2 %0, %1;" : "=r"(multiplier) : "h"(scale_pair));
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 157c26f1e0a3f45a1e6ad4a8b28e76856553b42f..2499048d9f7ae636d00cef53e0ff127ab9b7b548 100644
+index e7936e5024eda7a768cd95aa5831e5d03a2dcb4f..9fb2084125aa3d4d1dea77a6564b34854f3b5bd1 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -212,10 +212,12 @@ set_tests_properties(ninfer_nvfp4_mode_binding PROPERTIES SKIP_RETURN_CODE 77)
+@@ -213,10 +213,12 @@ set_tests_properties(ninfer_nvfp4_mode_binding PROPERTIES SKIP_RETURN_CODE 77)
  ninfer_stage_runtime_dlls(ninfer_nvfp4_mode_binding)
  
  # Reuse the five relevant oracle objects without building unrelated test families.

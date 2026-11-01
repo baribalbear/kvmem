@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import socket
+import sys
 import threading
 import unittest
 import urllib.error
@@ -179,6 +180,34 @@ class ConsoleTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Worker does not support'):
                     console.Controller.worker_capabilities(self.controller, worker, 'ninfer')
 
+    def test_checkpoint_recompute_plan_rejects_old_worker_before_start(self):
+        config = json.loads(json.dumps(self.config))
+        model = Path(self.tmp.name) / 'checkpoint.ninfer'; model.touch()
+        worker = Path(self.tmp.name) / f'checkpoint{EXE}'; worker.touch(); worker.chmod(0o755)
+        config['parameters'].update(Model=str(model), Worker=str(worker),
+            Gpu='GPU-00000000-0000-0000-0000-000000000001', CheckpointExtraRecomputeTokens=16)
+        with self.assertRaisesRegex(ValueError, 'checkpoint recompute'):
+            self.controller.plan(config)
+        self.controller.worker_capabilities.return_value['checkpoint_recompute_revision'] = 1
+        plan = self.controller.plan(config)
+        self.assertEqual(plan['environment']['KVMEM_CHECKPOINT_EXTRA_RECOMPUTE_TOKENS'], '16')
+
+    def test_heads_tensor_parallel_plan_rejects_old_worker_before_start(self):
+        model = Path(self.tmp.name) / 'tensor.ninfer'; model.touch()
+        worker = Path(self.tmp.name) / f'tensor{EXE}'; worker.touch()
+        worker.chmod(0o755)
+        self.config['parameters'].update(Model=str(model), Worker=str(worker),
+            Gpu='GPU-00000000-0000-0000-0000-000000000001,GPU-00000000-0000-0000-0000-000000000002',
+            TensorParallel=True, TensorSplit=[3, 1])
+        with self.assertRaisesRegex(ValueError, 'heads tensor parallelism'):
+            self.controller.plan(self.config)
+        self.assertIsNone(self.controller.process)
+        self.controller.worker_capabilities.return_value['heads_tensor_parallel_revision'] = 1
+        plan = self.controller.plan(self.config)
+        self.assertEqual(plan['argv'][plan['argv'].index('--tensor-attention') + 1], 'heads')
+        self.assertEqual(plan['argv'][plan['argv'].index('--tensor-split') + 1], '3,1')
+        self.assertIsNone(self.controller.process)
+
     def test_actual_scoring_is_observed_independently_of_the_editing_draft(self):
         planned = self.controller.scoring_from_argv(['worker', '--kvmem-query-scorer', 'meanq-cosine',
             '--kvmem-score-agg', 'max', '--kvmem-graph-alpha', '.123456789', '--no-kvmem-lrfu'])
@@ -278,6 +307,55 @@ class ConsoleTests(unittest.TestCase):
         self.controller.redactions.add(key)
         self.controller.log_path.write_text('worker error: ' + key, encoding='utf-8')
         self.assertEqual(self.controller.log_tail(), 'worker error: <redacted>')
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows canonical launcher')
+    def test_polystrata_lan_key_reaches_real_preflight_without_disk_or_argv_exposure(self):
+        root = Path(self.tmp.name)
+        frontend = root / 'frontend/serve'; frontend.mkdir(parents=True)
+        tokenizer = root / 'tokenizer'; tokenizer.mkdir()
+        for path in (root/'worker.exe', root/'model.gguf', frontend/'server.py', frontend/'kvmem.py',
+                     *(tokenizer/name for name in ('vocab.json', 'merges.txt', 'tokenizer.json',
+                                                  'token_type.json', 'chat_template.jinja'))):
+            path.touch()
+        key = 'test-only-polystrata-page-key'
+        params = dict(Backend='polystrata', Model=str(root/'model.gguf'), Worker=str(root/'worker.exe'),
+                      Tokenizer=str(tokenizer), PolystrataSource=str(frontend.parent), Python=sys.executable,
+                      Gpu='GPU-12345678', Budget=4096, Reserve=1024, SinkTokens=64, RecentTokens=64)
+        actual_run = console.subprocess.run
+        seen = []
+        def inspect_run(argv, **kwargs):
+            config_path = Path(argv[argv.index('-ConfigFile') + 1])
+            self.assertNotIn(key, config_path.read_text(encoding='utf-8'))
+            self.assertNotIn(key, json.dumps(argv))
+            seen.append(kwargs.get('env'))
+            return actual_run(argv, **kwargs)
+        with patch.dict(os.environ, {'STRATA_API_KEY': ''}), \
+             patch.object(console.subprocess, 'run', side_effect=inspect_run), \
+             patch.object(self.controller, 'worker_capabilities', return_value={'block_tokens': {'supported': [32, 64]}}):
+            for host in ('0.0.0.0', '127.0.0.1'):
+                for reveal in (False, True):
+                    data = {'schema_version': 1, 'parameters': dict(params, ListenHost=host, ApiKey=key)}
+                    result = self.controller.plan(data, reveal_secrets=reveal)
+                    self.assertEqual(seen[-1]['STRATA_API_KEY'], key)
+                    self.assertEqual(result['environment']['STRATA_API_KEY'], key if reveal else '<redacted>')
+                    if not reveal: self.assertNotIn(key, json.dumps(result))
+                    self.assertEqual(data['parameters']['ApiKey'], key)
+                    self.assertEqual(os.environ['STRATA_API_KEY'], '')
+            with self.assertRaisesRegex(ValueError, 'non-loopback listener requires STRATA_API_KEY'):
+                self.controller.plan({'schema_version': 1, 'parameters': dict(params, ListenHost='0.0.0.0')})
+            self.controller.plan({'schema_version': 1, 'parameters': dict(params, ListenHost='127.0.0.1')})
+        self.assertEqual(list(root.glob('*.json')), [])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows canonical launcher')
+    def test_polystrata_preflight_error_redacts_key(self):
+        worker = Path(self.tmp.name)/'worker.exe'; worker.touch()
+        key = 'test-only-preflight-error-key'
+        data = {'schema_version': 1, 'parameters': dict(Backend='polystrata', Worker=str(worker), ApiKey=key)}
+        response = SimpleNamespace(returncode=1, stdout='', stderr='[KVMEM_CONFIG] rejected ' + key)
+        with patch.object(console.subprocess, 'run', return_value=response):
+            with self.assertRaisesRegex(ValueError, 'rejected <redacted>') as error:
+                self.controller.plan(data)
+            self.assertNotIn(key, str(error.exception))
 
     @unittest.skipUnless(os.name == 'nt', 'Windows canonical launcher')
     def test_native_service_mapping_and_private_launch_plan(self):

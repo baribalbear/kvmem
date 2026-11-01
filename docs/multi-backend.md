@@ -1,8 +1,8 @@
 # KVMem 多后端运行
 
-本文对应 `master` 的 0.18.0 多后端源码，包含活跃 KV 的 RAM/SSD 分层。Windows NInfer [0.18.0 正式版](https://github.com/kvmem/kvmem/releases/tag/v0.18.0)基于 RC3 引擎，默认 sink=12288 tokens（12K）、recent=1024 tokens（1K）。两后端参数差异见 [实现差异](multi-backend-differences.md)，历史验收范围见 [分层验收记录](active-kv-tiering-validation-20261010.md)。
+本文描述当前多后端源码，包含活跃 KV 的 RAM/SSD 分层；具体依赖以 `backends/versions.json` 为准。历史 Windows NInfer [0.18.0 正式版](https://github.com/kvmem/kvmem/releases/tag/v0.18.0)基于 RC3 引擎，默认 sink=12288 tokens（12K）、recent=1024 tokens（1K）。两后端参数差异见 [实现差异](multi-backend-differences.md)，历史验收范围见 [分层验收记录](active-kv-tiering-validation-20261010.md)。
 
-0.18.0 源码采用 `iamwavecut/ninfer-all` 的固定提交 `8319e8f51247`，llama.cpp 基线保持原值。当前迁移验收进度见 [迁移记录](ninfer-all-migration-validation.md)；下文各有日期的实验是旧基线证据，不能视为新基线已经完成同等覆盖。KVMem 暂不支持新增的 `qwen4_exp`、模型 suspend、prompt graft 和 router，开启这些组合时明确报错。
+本轮 NInfer 固定到 `iamwavecut/ninfer-all` 的 `2026-10-29.2` / `d0da39796697`，dense heads TP 的范围、测量及限制见 [本轮验收](ninfer-heads-validation-20261030.md)。0.18.0 的 `8319e8f51247` [迁移记录](ninfer-all-migration-validation.md)及下文各有日期的实验仍是历史证据，不能视为新基线已经完成同等覆盖。KVMem 暂不支持新增的 `qwen4_exp`、模型 suspend、prompt graft 和 router，开启这些组合时明确报错。
 
 Windows 入口 `scripts/windows/start-backend.ps1` 在当前源码可选择 `llamacpp`、`ninfer` 或下文限定范围的 `polystrata`。两个 worker 分进程运行，各自拥有推理引擎和 GPU 内存；公共 KVMem 策略库直接链接在 worker 内。
 
@@ -50,7 +50,7 @@ Qwen3.5/3.6/3.8 的 CPU 视觉权重在首次实际图片编码时加载。最�
 
 当前源码的 KVMem CLI v1 由两个 worker 共用解析和默认定义。两个 EXE 都支持 `--kvmem` / `--no-kvmem`，不传 KVMem 配置默认关闭；旧命令传正的 `--kvmem-budget` 仍会启用。启用后的默认 B/R/H 为 32768/1024/16384 MiB，sessions=4；B/R/H 显式 0 会报错，需配置能容纳 B+R 的原生上下文。`--kvmem-sessions` 和脚本 `-RetainedSessions` 在两个后端都只限制非活动历史，活动请求不计入；旧 llama `--kvmem-conversations` 是总数兼容模式，不是同值别名。SSD 额度 0 表示关闭且必须省略目录。C 接受 `--no-kvmem-lrfu` 兼容写法，拒绝启用 LRFU。新脚本必须与本轮新编译的 worker 配套；已有发布包不会被自动更新。完整定义见 [参数规范](native-cli-configuration-spec.md)。
 
-ninfer 源码的多卡采用上游 layer pipeline。`-Gpu 'GPU-a,GPU-b'` 保留 UUID 顺序，第一张卡承担 embedding、head、MTP 和 resident Vision；CPU Vision 保留原生 Host 编码路径。可加 `-StageLayers 40,24` 指定连续层数，省略时按各卡空闲内存规划；层数总和由模型装载器验证。统一启动器禁止重复或空设备、超过八卡，以及经 `WorkerArgs` 重复传入设备参数。物理卡必须具有相同 compute capability，显存容量可不同。B/R 仍是每请求的完整逻辑窗口，H 是共享预算；各卡只持有自己的层，不按卡数拆分 B/R 或重复建立 Host 历史。
+ninfer 多卡默认采用上游 layer pipeline；当前启动器也提供需配套新 worker 的 heads 张量并行入口。按层拆分时，`-Gpu 'GPU-a,GPU-b'` 保留 UUID 顺序，第一张卡承担 embedding、head、MTP 和 resident Vision；CPU Vision 保留原生 Host 编码路径。可加 `-StageLayers 40,24` 指定连续层数，省略时按各卡空闲内存规划；层数总和由模型装载器验证。统一启动器禁止重复或空设备、超过八卡，以及经 `WorkerArgs` 重复传入设备参数。新 worker 允许各卡 compute capability 不同，但每张卡都必须落在该二进制实际编译支持的架构范围内；只编译 `sm_120a` 的包不能据此用于其他架构，本轮不声明跨架构实测。B/R 仍是每请求的完整逻辑窗口，H 是共享预算；按层模式各卡只持有自己的层，不按卡数拆分 B/R 或重复建立 Host 历史。
 
 ```powershell
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
@@ -59,7 +59,18 @@ ninfer 源码的多卡采用上游 layer pipeline。`-Gpu 'GPU-a,GPU-b'` 保留 
   -MtpDrafts 3 -Budget 2048 -Reserve 512 -Prefill 512 -SinkTokens 64 -RecentTokens 64
 ```
 
-多卡范围与证据见 [多卡验收](ninfer-multigpu-validation-20261006.md)。当前源码也开放 NInfer DFlash2＋按层拆分：选择多张 GPU 和固定长度 DFlash2，或传 `-SpeculativeMode dflash2 -DraftTokens 5`；草稿和局部状态保留在第一张卡，其他卡回传目标层特征。Tensor parallel＋DFlash2 仍不开放。[双卡验证记录](dflash2-pipeline-validation-20261029.md)限定了实测范围。需要配套新 worker；已发布的 0.19-rc1 ZIP 仍保留单卡限制。多卡用于扩展容量，尚无本轮吞吐提升结论；`--cuda-memory-policy mixed/strict` 继续要求单卡，KVMem overlay Vision、原始 DFlash（非 DFlash2）、并行 prefill 和磁盘冷快照继续沿用当前限制。
+启用 heads TP 时，控制台选中两张或更多显卡后，在“硬件与加速”勾选“张量并行 · heads”；命令行增加 `-TensorParallel`。`-TensorSplit 3,1` 是按 `-Gpu` UUID 顺序填写的相对权重，省略时由引擎自动规划。权重不等于最终 KV head 数，也不保证对应显存占比；实际切分以服务 `/props` 的 `execution.tensor_shares` 和监控中的“实际 KV heads 分配”为准。移动显卡顺序时，控制台一起移动权重；更换选中显卡会清空权重。TP 与 `-StageLayers` 互斥，自动 budget 测算暂仍限单卡。
+
+```powershell
+./scripts/windows/start-backend.ps1 -Backend ninfer `
+  -Worker 'D:/build/apps/ninfer-serve.exe' -Model 'D:/models/dense.ninfer' `
+  -Gpu 'GPU-first-uuid,GPU-second-uuid' -TensorParallel -TensorSplit 3,1 `
+  -Budget 2048 -Reserve 512 -Prefill 512 -SinkTokens 64 -RecentTokens 64
+```
+
+启动器显式传入 `--tensor-attention heads`，不开放 positions，也不接受从 `WorkerArgs` 绕过专用 TP 选项。真实启动及导出配置必须通过 worker 的 `heads_tensor_parallel_revision >= 1` 整数能力检查；`-Describe` 和 `-DryRun` 只描述启动器能力及参数，不证明现有运行包支持 TP。默认仍不开启 TP，旧包不会因更新控制台配置而获得此能力。本轮在 5060 Ti＋5050 Laptop 上通过 dense heads 的普通/MTP/DFlash2、三种核心 KV、状态和 SSD 验证；[实测记录](ninfer-heads-validation-20261030.md)同时保留预填充变慢、首 token 延迟和未验证格式范围，不能承诺双卡普遍加速。
+
+按层多卡范围与证据见 [多卡验收](ninfer-multigpu-validation-20261006.md)。当前源码也开放 NInfer DFlash2＋按层拆分：选择多张 GPU 和固定长度 DFlash2，或传 `-SpeculativeMode dflash2 -DraftTokens 5`；草稿和局部状态保留在第一张卡，其他卡回传目标层特征。新 worker 已接入 heads TP＋DFlash2，但其真实 GPU 验收不能沿用按层测试结论。[双卡验证记录](dflash2-pipeline-validation-20261029.md)限定了历史按层实测范围。需要配套新 worker；已发布的 0.19-rc1 ZIP 仍保留单卡限制。多卡用于扩展容量，尚无本轮吞吐提升结论；`--cuda-memory-policy mixed/strict` 继续要求单卡，KVMem overlay Vision、原始 DFlash（非 DFlash2）、并行 prefill 和磁盘冷快照继续沿用当前限制。
 
 llama.cpp 示例：
 

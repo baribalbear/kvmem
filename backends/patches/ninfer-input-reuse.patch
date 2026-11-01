@@ -1,0 +1,506 @@
+diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
+index 768eeabccb31bb6488ec9aae0d3fc19acf76338c..f0c27b558d2eb6e93ffd0384d97b44824e4663a6 100644
+--- a/src/models/qwen3_5/program/prefill.cpp
++++ b/src/models/qwen3_5/program/prefill.cpp
+@@ -1367,6 +1367,9 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+                 static_cast<unsigned long long>(query.begin+query.count),
+                 static_cast<unsigned long long>(memory_query_probe(sequence,staged.prompt_tokens) ? plan.end-plan.begin : 0),
+                 kvmem_options.query_replay_max_tokens,sequence.window.query_capture ? 1U : 0U);
++            if (const auto input = request.allow_memory_reuse ? memory_input_reuse_frontier(staged.prompt) : 0U)
++                std::fprintf(stderr, "KVMEM_INPUT_REUSE_PLAN frontier=%u fallback=%u prompt=%u\n",
++                    input, staged.prompt.identity.rewrite_checkpoint->frontier, staged.prompt_tokens);
+         }
+         auto step_tokens = kvmem_window_tokens
+             ? prefill_chunk - staged.cursor % prefill_chunk : prefill_chunk;
+@@ -1572,11 +1575,25 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+                 const bool query_checkpoint = memory_query_probe(sequence, staged.prompt_tokens);
+                 const auto checkpoint_purpose = query_checkpoint ? kvmem::CheckpointPurpose::QueryReplay
+                                                                  : kvmem::CheckpointPurpose::PromptTail;
++                const auto memory_input_frontier = request.allow_memory_reuse
++                    ? memory_input_reuse_frontier(staged.prompt) : 0U;
++                const auto memory_rewrite_frontier = kvmem_window_tokens && request.allow_memory_reuse &&
++                    staged.prompt.identity.rewrite_checkpoint
++                    ? staged.prompt.identity.rewrite_checkpoint->frontier : 0U;
++                // A structural input source is independent of the earlier rewrite
++                // source and the still-active exact Query source. Establish an
++                // existing complete representative before adding an execution cut.
++                const bool input_source_ready = memory_input_frontier &&
++                    reuse_memory_input_checkpoint(sequence, memory_input_frontier, memory_rewrite_frontier,
++                        query_checkpoint || sequence.window.query_replay_active);
++                if (memory_input_frontier > staged.cursor && !input_source_ready &&
++                    (!split_frontier || memory_input_frontier < *split_frontier))
++                    split_frontier = memory_input_frontier;
+                 // Decide before splitting the chunk or allocating a StateImage.
+                 // Only an already captured, complete earlier state can substitute
+                 // for the ordinary prompt tail; a real Query rewind remains exact.
+-                const auto memory_frontier = request.allow_memory_reuse && !query_checkpoint &&
+-                    skip_memory_tail_checkpoint(sequence, staged.prompt_tokens) ? 0U :
++                const auto memory_frontier = !query_checkpoint && (memory_input_frontier ||
++                    (request.allow_memory_reuse && skip_memory_tail_checkpoint(sequence, staged.prompt_tokens))) ? 0U :
+                     memory_checkpoint_frontier(sequence, staged.prompt_tokens, request.allow_memory_reuse);
+                 if (memory_frontier > staged.cursor &&
+                     (!split_frontier || memory_frontier < *split_frontier)) {
+@@ -1588,9 +1605,6 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+                 // Frontend owns the exact generation opener/turn reconstruction
+                 // boundary. Keep one bounded fallback when later serialization
+                 // does not reproduce the generated endpoint byte for byte.
+-                const auto memory_rewrite_frontier = kvmem_window_tokens && request.allow_memory_reuse &&
+-                    staged.prompt.identity.rewrite_checkpoint
+-                    ? staged.prompt.identity.rewrite_checkpoint->frontier : 0U;
+                 if (memory_rewrite_frontier > staged.cursor &&
+                     (!split_frontier || memory_rewrite_frontier < *split_frontier)) {
+                     split_frontier = memory_rewrite_frontier;
+@@ -1662,6 +1676,9 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+                     capture_memory_anchor(sequence, result.processed_tokens);
+                 if (kvmem_window_tokens && request.allow_memory_reuse && !result.finalized)
+                     capture_memory_coverage(sequence, result.processed_tokens);
++                if (memory_input_frontier && !input_source_ready && staged.cursor == memory_input_frontier)
++                    capture_memory_input_reuse(sequence, result.processed_tokens, memory_input_frontier,
++                        memory_rewrite_frontier, query_checkpoint || sequence.window.query_replay_active);
+                 if (hybrid_lane != nullptr && !result.finalized) {
+                     // A branched read's frontier is a tap position too (its branches follow it).
+                     hybrid_after_prefill_chunk(sequence, staged.cursor,
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index 5643ab576c1d0983112c692d72b7cf5f26cdcf48..96271f93500fcc3041f6dddd871b34912b71b51d 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -555,12 +555,12 @@ struct KvmemCheckpointRecord {
+                 data ? data->state_bytes() + data->metadata_bytes() : 0};
+     }
+ };
+-enum class KvmemCheckpointKind : std::uint16_t { Base, Endpoint, InputFallback, Reconstruction, ReuseAnchor, PromptTail, CoverageBegin = 16 };
++enum class KvmemCheckpointKind : std::uint16_t { Base, Endpoint, InputFallback, Reconstruction, ReuseAnchor, PromptTail, InputReuse, CoverageBegin = 16 };
+ // Lookup priority for equal frontiers.
+ inline constexpr std::array kKvmemCheckpointKinds{
+     KvmemCheckpointKind::Endpoint, KvmemCheckpointKind::Reconstruction,
+     KvmemCheckpointKind::InputFallback, KvmemCheckpointKind::Base, KvmemCheckpointKind::ReuseAnchor,
+-    KvmemCheckpointKind::PromptTail};
++    KvmemCheckpointKind::PromptTail, KvmemCheckpointKind::InputReuse};
+ struct KvmemHistoryMatch {
+     std::size_t history;
+     KvmemCheckpointKind kind;
+@@ -667,7 +667,9 @@ struct KvmemWindowState {
+     std::uint32_t query_begin = 0, query_end = 0;
+     // QueryReplay owns the exact pre-Query execution state. PromptTail is a
+     // separate optional reuse point, or an alias leasing its earlier substitute.
+-    kvmem::CheckpointCatalog<KvmemCheckpointRecord> checkpoints{kvmem::CheckpointLimits{6}};
++    // InputReuse independently retains a deeper structural input boundary when
++    // conservative template rewrite recovery requires an earlier InputFallback.
++    kvmem::CheckpointCatalog<KvmemCheckpointRecord> checkpoints{kvmem::CheckpointLimits{7}};
+     kvmem::CheckpointArchive<KvmemCheckpointRecord> coverage;
+     kvmem::CheckpointCapturePlan capture_plan;
+     std::uint32_t reuse_anchor = 0;
+@@ -2134,6 +2136,12 @@ private:
+         std::uint32_t prompt_tokens, bool allow_reuse) const;
+     void capture_memory_prefix(SequenceState& sequence, std::uint32_t chunk_tokens, bool query_checkpoint);
+     bool skip_memory_tail_checkpoint(SequenceState& sequence, std::uint32_t prompt_tokens);
++    std::uint32_t memory_input_reuse_frontier(const PreparedPromptData& prompt) const;
++    bool reuse_memory_input_checkpoint(SequenceState& sequence, std::uint32_t frontier,
++                                        std::uint32_t fallback, bool query_protected);
++    void capture_memory_input_reuse(SequenceState& sequence, std::uint32_t chunk_tokens,
++                                     std::uint32_t frontier, std::uint32_t fallback,
++                                     bool query_protected) noexcept;
+     bool complete_memory_checkpoint(const SequenceState& sequence, const KvmemPrefixCheckpoint& checkpoint) const;
+     void prune_completed_memory_checkpoints(SequenceState& sequence);
+     std::unique_ptr<KvmemPrefixCheckpoint> capture_memory_checkpoint(SequenceState& sequence, bool optional = false);
+diff --git a/src/models/qwen3_5/program/storage/checkpoint_recompute_policy.h b/src/models/qwen3_5/program/storage/checkpoint_recompute_policy.h
+index 634934618b7d48b9d81fc39356b026dee489ca90..c2ed61ed31a8542f7384b2af6461c73163400a46 100644
+--- a/src/models/qwen3_5/program/storage/checkpoint_recompute_policy.h
++++ b/src/models/qwen3_5/program/storage/checkpoint_recompute_policy.h
+@@ -11,6 +11,16 @@
+ 
+ namespace ninfer::models::qwen3_5::detail {
+ 
++// The Frontend has already mapped both boundaries exactly through tokenization
++// and media expansion. Add a deeper input source only when conservative rewrite
++// recovery moved earlier; ordinary same-boundary requests keep their old policy.
++inline std::uint32_t structural_input_reuse_frontier(std::uint32_t prompt_tokens,
++                                                     std::uint32_t input_end,
++                                                     std::uint32_t rewrite_frontier) {
++    return rewrite_frontier && rewrite_frontier < input_end && input_end < prompt_tokens
++        ? input_end : 0U;
++}
++
+ // Publish only after capture/restore succeeded. The two roles replace the old
+ // single Base role across requests, so splitting their names must not retain
+ // an obsolete extra image. During a real replay its exact Query source remains
+@@ -59,6 +69,14 @@ inline bool checkpoint_recompute_allowed(std::uint64_t earlier, std::uint64_t fr
+            frontier - earlier <= limit;
+ }
+ 
++// A same-boundary native image can be shared even with thinning disabled. The
++// caller still has to prove complete native identity, state and KV coverage.
++inline bool input_reuse_source_allowed(std::uint64_t source, std::uint64_t frontier,
++                                       std::uint64_t limit, std::uint64_t query_end) {
++    return source && source >= query_end &&
++        (source == frontier || checkpoint_recompute_allowed(source, frontier, limit, query_end));
++}
++
+ struct CheckpointRecomputePoint {
+     std::uint64_t frontier = 0;
+     // A post-Query input point must retain an alternative that also contains the
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 77f418c61aa467a24e99f1b49e6bc1f9b44525f0..abd4aa90c3e9e7e036d9c3c7b94040d0b843d9f6 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -1088,6 +1088,66 @@ bool ProgramImpl::skip_memory_tail_checkpoint(SequenceState& sequence, std::uint
+     return true;
+ }
+ 
++std::uint32_t ProgramImpl::memory_input_reuse_frontier(const PreparedPromptData& prompt) const {
++    if (!kvmem_window_tokens || !prompt.identity.rewrite_checkpoint) return 0;
++    const auto frontier = structural_input_reuse_frontier(static_cast<std::uint32_t>(prompt.token_ids.size()),
++        prompt.memory_input_end, prompt.identity.rewrite_checkpoint->frontier);
++    const auto query = memory_query_span(prompt);
++    if (!frontier || (query.count && frontier < query.begin + query.count)) return 0;
++    for (const auto& item : prompt.vision_items) if (!item.token_spans.empty() &&
++        item.token_spans.front().begin < frontier &&
++        frontier < item.token_spans.back().begin + item.token_spans.back().count) return 0;
++    return frontier;
++}
++
++bool ProgramImpl::reuse_memory_input_checkpoint(SequenceState& sequence, std::uint32_t frontier,
++                                                std::uint32_t fallback, bool query_protected) {
++    auto& window = sequence.window;
++    const auto limit = window.coverage.policy().extra_recompute_tokens;
++    std::shared_ptr<KvmemPrefixCheckpoint> source;
++    for (const auto kind : checkpoint_kinds(window)) {
++        const auto& cp = memory_checkpoint_slot(window, kind);
++        if (!cp || !input_reuse_source_allowed(cp->prefix.size(), frontier, limit, window.query_end) ||
++            (source && cp->prefix.size() <= source->prefix.size()) ||
++            !complete_memory_checkpoint(sequence, *cp)) continue;
++        source = cp;
++    }
++    if (!source) return false;
++    auto& input = window.checkpoints.slot(kvmem::CheckpointPurpose::InputReuse).data;
++    const bool changed = input != source;
++    input = std::move(source);
++    // This role never retires QueryReplay. Its exact source remains necessary
++    // throughout the probe, waiting-for-rewind and active-replay phases.
++    if (changed && kvmem_options.verify_transfers)
++        std::fprintf(stderr, "KVMEM_INPUT_REUSE action=%s frontier=%u earlier=%zu extra_tokens=%zu limit=%llu fallback=%u query_protected=%d\n",
++            input->prefix.size() == frontier ? "share" : "nearby", frontier, input->prefix.size(),
++            frontier - input->prefix.size(), static_cast<unsigned long long>(limit), fallback, int(query_protected));
++    return true;
++}
++
++void ProgramImpl::capture_memory_input_reuse(SequenceState& sequence, std::uint32_t chunk_tokens,
++                                             std::uint32_t frontier, std::uint32_t fallback,
++                                             bool query_protected) noexcept {
++    try {
++        if (!chunk_tokens || sequence.text_kv_valid != frontier) return;
++        // An anchor/coverage image captured at this same completed chunk can
++        // serve both roles. Equal token position alone never proves validity.
++        if (reuse_memory_input_checkpoint(sequence, frontier, fallback, query_protected)) return;
++        copy_tail(sequence, prefill_hidden.slice(1, static_cast<std::int32_t>(chunk_tokens) - 1, 1));
++        auto captured = capture_memory_checkpoint(sequence, true);
++        sequence.window.checkpoints.slot(kvmem::CheckpointPurpose::InputReuse).data = std::move(captured);
++        if (kvmem_options.verify_transfers)
++            std::fprintf(stderr, "KVMEM_INPUT_REUSE action=capture frontier=%u earlier=%u extra_tokens=0 limit=%llu fallback=%u query_protected=%d\n",
++                frontier, frontier, static_cast<unsigned long long>(sequence.window.coverage.policy().extra_recompute_tokens),
++                fallback, int(query_protected));
++    } catch (const std::exception& error) {
++        // Optional input reuse must not consume the prior safe rewrite source,
++        // an in-flight Query source, or the previously retained input image.
++        std::fprintf(stderr, "KVMEM_INPUT_REUSE action=failed frontier=%u fallback=%u reason=%s\n",
++            frontier, fallback, error.what());
++    }
++}
++
+ void ProgramImpl::prune_completed_memory_checkpoints(SequenceState& sequence) {
+     auto& window = sequence.window;
+     const auto limit = window.coverage.policy().extra_recompute_tokens;
+@@ -1210,6 +1270,7 @@ std::shared_ptr<KvmemPrefixCheckpoint>& ProgramImpl::memory_checkpoint_slot(Kvme
+     case KvmemCheckpointKind::Reconstruction: return window.checkpoints.slot(kvmem::CheckpointPurpose::Reconstruction).data;
+     case KvmemCheckpointKind::ReuseAnchor: return window.checkpoints.slot(kvmem::CheckpointPurpose::ReuseAnchor).data;
+     case KvmemCheckpointKind::PromptTail: return window.checkpoints.slot(kvmem::CheckpointPurpose::PromptTail).data;
++    case KvmemCheckpointKind::InputReuse: return window.checkpoints.slot(kvmem::CheckpointPurpose::InputReuse).data;
+     }
+     const auto index = unsigned(kind)-unsigned(KvmemCheckpointKind::CoverageBegin);
+     if (auto* entry=window.coverage.at(index)) return entry->record.data;
+@@ -1226,6 +1287,7 @@ const KvmemPrefixCheckpoint* ProgramImpl::memory_checkpoint(const KvmemWindowSta
+     case KvmemCheckpointKind::Reconstruction: purpose = kvmem::CheckpointPurpose::Reconstruction; break;
+     case KvmemCheckpointKind::ReuseAnchor: purpose = kvmem::CheckpointPurpose::ReuseAnchor; break;
+     case KvmemCheckpointKind::PromptTail: purpose = kvmem::CheckpointPurpose::PromptTail; break;
++    case KvmemCheckpointKind::InputReuse: purpose = kvmem::CheckpointPurpose::InputReuse; break;
+     default: {
+         const auto* entry=window.coverage.at(unsigned(kind)-unsigned(KvmemCheckpointKind::CoverageBegin));
+         return entry ? entry->record.data.get() : nullptr;
+@@ -1927,7 +1989,8 @@ bool ProgramImpl::restore_memory_history(SequenceState& sequence, RequestControl
+         archive_memory_window(sequence);
+     }
+     window.query_probe_swaps=window.swaps;
+-    if (*frontier == memory_checkpoint_frontier(sequence, staged.prompt_tokens, true))
++    if (*frontier == memory_checkpoint_frontier(sequence, staged.prompt_tokens, true) &&
++        (memory_query_probe(sequence, staged.prompt_tokens) || !memory_input_reuse_frontier(staged.prompt)))
+         publish_memory_checkpoint_source(window, std::move(checkpoint), memory_query_probe(sequence, staged.prompt_tokens));
+     else
+         // An exact replay can start at the input capture boundary, so prefill
+@@ -2053,7 +2116,8 @@ void ProgramImpl::retain_memory_history(SequenceState& sequence, const RequestCo
+     if(window.coverage.policy().enabled) {
+       try {
+         std::shared_ptr<KvmemPrefixCheckpoint> input;
+-        if (window.coverage.policy().extra_recompute_tokens) {
++        if (window.coverage.policy().extra_recompute_tokens ||
++            memory_checkpoint(window, KvmemCheckpointKind::InputReuse)) {
+             for (const auto kind : checkpoint_kinds(window)) {
+                 const auto& cp = memory_checkpoint_slot(window, kind);
+                 if (!cp || cp->prefix.size() >= window.output_begin ||
+diff --git a/tests/experimental/p4_history.cpp b/tests/experimental/p4_history.cpp
+index 8b478762550104cde672b29d6b8306aac1f4cf99..fad9b544cf294f9c0cf4c17dbaea76c730b3a44b 100644
+--- a/tests/experimental/p4_history.cpp
++++ b/tests/experimental/p4_history.cpp
+@@ -2,6 +2,8 @@
+ #include "kvmem_test_options.h"
+ #include <algorithm>
+ #include <atomic>
++#include <charconv>
++#include <cstdlib>
+ #include <fstream>
+ #include <iostream>
+ #include <stdexcept>
+@@ -54,6 +56,68 @@ struct Sink final : ninfer::OutputSink {
+     }
+     void publish(ninfer::OutputDelta) override {}
+ };
++
++struct InputReuseBoundary {
++    std::vector<ninfer::TokenId> tokens;
++    std::uint32_t safe = 0, input_end = 0, opener = 0;
++};
++
++InputReuseBoundary input_reuse_boundary(ninfer::Engine& engine, const ninfer::PromptInput& prompt,
++                                       std::ofstream& output, const char* name) {
++    auto prepared = engine.prepare(prompt);
++    InputReuseBoundary result;
++    result.tokens.assign(prepared.token_ids().begin(), prepared.token_ids().end());
++    // This fixture deliberately qualifies the real Qwen ChatML artifact. Decode the actual
++    // tokens, including special tokens, instead of assuming a model-specific token count.
++    std::string rendered;
++    std::vector<std::size_t> offsets{0};
++    for (auto token : result.tokens) {
++        rendered += engine.token_bytes(token);
++        offsets.push_back(rendered.size());
++    }
++    constexpr std::string_view assistant = "<|im_start|>assistant\n";
++    constexpr std::string_view close = "<|im_end|>";
++    const auto first_assistant = rendered.find(assistant);
++    const auto last_assistant = rendered.rfind(assistant);
++    require(first_assistant != std::string::npos && last_assistant > first_assistant,
++            "input-reuse fixture is not the expected real ChatML history");
++    const auto last_close = rendered.rfind(close, last_assistant);
++    require(last_close != std::string::npos && last_close < last_assistant,
++            "input-reuse history has no completed input message");
++    const auto frontier = [&](std::size_t byte) {
++        const auto found = std::lower_bound(offsets.begin(), offsets.end(), byte);
++        require(found != offsets.end() && *found == byte,
++                "fixture marker is not an exact token boundary");
++        return static_cast<std::uint32_t>(found - offsets.begin());
++    };
++    result.safe = frontier(first_assistant);
++    auto input_byte_end = last_close + close.size();
++    if (input_byte_end < rendered.size() && rendered[input_byte_end] == '\n') ++input_byte_end;
++    result.input_end = frontier(input_byte_end);
++    result.opener = frontier(last_assistant);
++    require(result.safe < result.input_end && result.input_end <= result.opener &&
++            result.opener < result.tokens.size(), "fixture input frontiers are not ordered");
++    output << "INPUT_REUSE_BOUNDARY case=" << name << " safe=" << result.safe
++           << " input_end=" << result.input_end << " opener=" << result.opener
++           << " prompt=" << result.tokens.size() << " tokens=";
++    for (auto token : result.tokens) output << token << ',';
++    output << '\n'; output.flush();
++    std::cout << "INPUT_REUSE_BOUNDARY case=" << name << " safe=" << result.safe
++              << " input_end=" << result.input_end << " opener=" << result.opener
++              << " prompt=" << result.tokens.size() << std::endl;
++    return result;
++}
++
++std::uint32_t input_reuse_limit() {
++    const char* raw = std::getenv("KVMEM_CHECKPOINT_EXTRA_RECOMPUTE_TOKENS");
++    if (!raw || !*raw) return 0;
++    const std::string_view value(raw);
++    std::uint32_t limit = 0;
++    const auto parsed = std::from_chars(value.data(), value.data()+value.size(), limit);
++    require(parsed.ec == std::errc{} && parsed.ptr == value.data()+value.size() &&
++            limit <= 2147483647U, "invalid input-reuse test recompute limit");
++    return limit;
++}
+ }
+ 
+ int main(int argc, char** argv) {
+@@ -84,7 +148,8 @@ int main(int argc, char** argv) {
+         }
+         if (mode == "lrfu") { o.kvmem.lrfu = true; o.kvmem.score_agg_max = true; }
+         const bool input_fallback = mode == "input-fallback";
+-        if ((mode == "endpoint" || input_fallback) && o.speculative.draft_tokens) {
++        const bool input_reuse = mode == "input-reuse";
++        if ((mode == "endpoint" || input_fallback || input_reuse) && o.speculative.draft_tokens) {
+             o.speculative.ngram_draft_tokens = 31;
+             o.speculative.ngram_min_match = 4;
+         }
+@@ -98,7 +163,7 @@ int main(int argc, char** argv) {
+             } else if (feature == "fast") o.fast_prefill_kernel = true;
+             else throw std::invalid_argument("expected wddm, adaptive, fast or adaptive-fast");
+         }
+-        if (input_fallback) o.gdn_state_fp16 = true;
++        if (input_fallback || input_reuse) o.gdn_state_fp16 = true;
+         ninfer::Engine engine(o);
+         std::cout << "FEATURE drafts=" << o.speculative.draft_tokens << " adaptive="
+                   << (o.speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive)
+@@ -274,6 +339,101 @@ int main(int argc, char** argv) {
+             std::cout << "INPUT_FALLBACK PASS" << std::endl;
+             return 0;
+         }
++        if (input_reuse) {
++            ninfer::PromptInput chat;
++            chat.options.enable_thinking = true;
++            chat.options.preserve_thinking = true;
++            chat.context_cache.session_key = "input-reuse-real-template";
++            add(chat, ninfer::ChatRole::System, "Read the archive and reply with the single word violet.");
++            add(chat, ninfer::ChatRole::User, "What is the observatory's color? Use the tool records.");
++            add(chat, ninfer::ChatRole::Assistant, "I will read the archive.");
++            std::string records;
++            for (int i = 0; i < 100; ++i)
++                records += "Record " + std::to_string(i) + ": the violet observatory studies pulsars.\n";
++            add(chat, ninfer::ChatRole::Tool, records);
++            const auto base = input_reuse_boundary(engine, chat, output, "base");
++            require(base.tokens.size() > o.kvmem.selected_tokens + o.kvmem.reserve_tokens,
++                    "input-reuse fixture did not exercise sparse history");
++            const auto limit = input_reuse_limit();
++            require(base.input_end - base.safe > limit,
++                    "input-reuse threshold hides the deep-versus-safe distinction");
++            const auto lcp = [](const auto& left, const auto& right) {
++                return static_cast<std::uint32_t>(std::mismatch(left.begin(), left.end(),
++                                                              right.begin(), right.end()).first-left.begin());
++            };
++            const auto check = [&](const char* name, const ninfer::PromptInput& prompt,
++                                   std::uint32_t minimum, std::uint32_t maximum, bool cancel) {
++                ninfer::RequestOptions request;
++                request.execution.requested_output_tokens = 96;
++                request.execution.sampling.temperature = 0;
++                request.execution.sampling.seed = 42;
++                request.execution.thinking.budget = 16;
++                Sink sink; sink.cancel_output = cancel ? 8 : 0;
++                std::cout << "INPUT_REUSE_BEGIN case=" << name << " minimum=" << minimum
++                          << " maximum=" << maximum << " limit=" << limit << std::endl;
++                const auto result = engine.submit(engine.prepare(prompt), request,
++                    ninfer::OutputConsumerMode::Streaming,
++                    {.phase_timings = true, .live_timings = true, .prompt_progress = true})
++                    .wait(&sink, ninfer::CancellationView([&] { return sink.cancel.load(); }));
++                require(engine.is_available() && sink.starts == 1,
++                        "input-reuse request admission failed");
++                require(result.reused_prompt_tokens == sink.reused &&
++                        result.reused_prompt_tokens >= minimum && result.reused_prompt_tokens <= maximum,
++                        "input-reuse did not restore within the independently derived legal range");
++                if (cancel) require(result.finish_reason == ninfer::FinishReason::Cancelled,
++                                    "input-reuse cancellation did not terminate");
++                else {
++                    require(sink.processed == sink.total && !result.content.empty(),
++                            "input-reuse prompt or content did not complete");
++                    if (o.speculative.draft_tokens)
++                        require(result.speculative.enabled && result.speculative.rounds > 0 &&
++                                result.speculative.drafted_tokens > 0,
++                                "input-reuse MTP did not verify any drafts");
++                }
++                const auto memory = engine.memory_summary().kvmem;
++                require(memory.host_payload_bytes <= o.kvmem.host_bytes &&
++                        memory.resident_pages == 0 && memory.mtp_resident_pages == 0,
++                        "input-reuse retirement exceeded Host budget or retained device KV");
++                output << "INPUT_REUSE_RESULT case=" << name << " reused=" << result.reused_prompt_tokens
++                       << " minimum=" << minimum << " maximum=" << maximum
++                       << " cancelled=" << cancel << " host_payload_bytes=" << memory.host_payload_bytes
++                       << " generated=" << result.generated_token_ids.size() << '\n';
++                output.flush();
++                std::cout << "INPUT_REUSE_RESULT case=" << name << " reused=" << result.reused_prompt_tokens
++                          << " minimum=" << minimum << " maximum=" << maximum
++                          << " cancelled=" << cancel << " host_payload_bytes=" << memory.host_payload_bytes
++                          << " generated=" << result.generated_token_ids.size() << std::endl;
++            };
++            check("cold", chat, 0, 0, false);
++            check("repeat-input", chat, base.input_end-limit,
++                  static_cast<std::uint32_t>(base.tokens.size()-1), false);
++            // Discard the generated answer exactly as the old fixture does. The following
++            // transport Tool preserves the real template's existing input serialization.
++            add(chat, ninfer::ChatRole::Assistant, "The tool record is saved.");
++            add(chat, ninfer::ChatRole::Tool, "Additional archive fragment.\n" + records.substr(0, 600));
++            const auto tools = input_reuse_boundary(engine, chat, output, "tools");
++            const auto tool_lcp = lcp(base.tokens, tools.tokens);
++            require(tool_lcp >= base.input_end, "tool fixture does not preserve the deep input");
++            check("discard-and-tool", chat, base.input_end-limit, tool_lcp, false);
++            check("repeat-tool", chat, tools.input_end-limit,
++                  static_cast<std::uint32_t>(tools.tokens.size()-1), false);
++            check("cancel-tool", chat, tools.input_end-limit,
++                  static_cast<std::uint32_t>(tools.tokens.size()-1), true);
++            check("after-cancel", chat, tools.input_end-limit,
++                  static_cast<std::uint32_t>(tools.tokens.size()-1), false);
++            add(chat, ninfer::ChatRole::Assistant, "The tool record is saved.");
++            add(chat, ninfer::ChatRole::User, "What does the observatory study? Answer briefly.");
++            const auto next = input_reuse_boundary(engine, chat, output, "new-user");
++            const auto user_lcp = lcp(tools.tokens, next.tokens);
++            require(user_lcp >= base.safe && user_lcp < base.input_end,
++                    "new-user fixture did not rewrite old assistant packaging");
++            // A later input representative cannot stand in for the early rewrite-safe point.
++            const auto safe_minimum = base.safe > limit ? base.safe-limit : 1U;
++            check("new-user", chat, safe_minimum, user_lcp, false);
++            std::cout << "INPUT_REUSE PASS tool_lcp=" << tool_lcp << " user_lcp=" << user_lcp
++                      << " limit=" << limit << std::endl;
++            return 0;
++        }
+         if (mode == "endpoint") {
+             ninfer::RequestOptions one;
+             one.execution.requested_output_tokens = 1;
+diff --git a/tests/models/qwen3_5/test_checkpoint_recompute_policy.cpp b/tests/models/qwen3_5/test_checkpoint_recompute_policy.cpp
+index 9e1c4e462777211ebefd9e0f5f8f495fc09766ae..27a0894accde4c3266253f06a1ba0c547207a9db 100644
+--- a/tests/models/qwen3_5/test_checkpoint_recompute_policy.cpp
++++ b/tests/models/qwen3_5/test_checkpoint_recompute_policy.cpp
+@@ -9,6 +9,50 @@
+ int main() {
+     using namespace ninfer::models::qwen3_5::detail;
+     constexpr auto keep = no_checkpoint_surrogate;
++    // These are exact Frontend token boundaries, not a prompt-minus-constant
++    // estimate: the long tool input retains its 34-token safe rewrite source.
++    CHECK(structural_input_reuse_frontier(1452, 1450, 34) == 1450);
++    CHECK(structural_input_reuse_frontier(8002, 8000, 34) == 8000);
++    CHECK(structural_input_reuse_frontier(499, 492, 492) == 0);
++    CHECK(structural_input_reuse_frontier(499, 492, 0) == 0);
++    CHECK(structural_input_reuse_frontier(499, 0, 34) == 0);
++    CHECK(structural_input_reuse_frontier(499, 499, 34) == 0);
++    CHECK(structural_input_reuse_frontier(499, 501, 34) == 0);
++    CHECK(structural_input_reuse_frontier(499, 492, 493) == 0);
++    CHECK(input_reuse_source_allowed(1450, 1450, 0, 1440));
++    CHECK(input_reuse_source_allowed(1444, 1450, 16, 1440));
++    CHECK(!input_reuse_source_allowed(1444, 1450, 0, 1440));
++    CHECK(!input_reuse_source_allowed(1444, 1450, 5, 1440));
++    CHECK(!input_reuse_source_allowed(1444, 1450, 16, 1445));
++    CHECK(!input_reuse_source_allowed(1451, 1450, 16, 1440));
++    CHECK(!input_reuse_source_allowed(0, 10, 16, 0));
++    {
++        // The structured input and safe rewrite sources survive independently
++        // of execution-role publication. Query rewind invalidates the deeper
++        // first-pass state; only a fresh second-pass state may replace it.
++        auto fallback = std::make_shared<int>(34);
++        auto query = std::make_shared<int>(1200);
++        auto input = std::make_shared<int>(1450);
++        const auto probe_query = query;
++        std::weak_ptr<int> first_pass = input;
++        std::shared_ptr<int> tail;
++        CheckpointReplayCompletion completion{false, true, false, 0, 1440};
++        CHECK(!retire_query_checkpoint_after_prefill(query, tail, 0, completion));
++        CHECK(query == probe_query && *fallback == 34);
++        input.reset(); // Native restore truncates all roles after query_begin.
++        CHECK(first_pass.expired() && query == probe_query && *fallback == 34);
++        input = std::make_shared<int>(1450);
++        completion = {true, false, true, 1450, 1440};
++        // An InputReuse image is not an ordinary PromptTail publication: the
++        // existing T=0 execution retirement contract is not silently widened.
++        CHECK(!retire_query_checkpoint_after_prefill(query, tail, 0, completion));
++        CHECK(query == probe_query && *input == 1450 && *fallback == 34);
++        auto shared_input = input;
++        std::weak_ptr<int> retained_input = input;
++        input.reset();
++        CHECK(!retained_input.expired()); // Other role/history leases own bytes.
++        CHECK(*shared_input == 1450 && *fallback == 34);
++    }
+     {
+         // Short -> long: the successfully captured Query replaces the old tail
+         // without retaining a second unreferenced native image at T=0.

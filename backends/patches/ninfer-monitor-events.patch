@@ -1,5 +1,5 @@
 diff --git a/src/serve/generation_service.cpp b/src/serve/generation_service.cpp
-index 1eb985b4457a7edac2c8821f28756209746d1331..e0b66dce1bac60984c53ceef0f56078772e7304c 100644
+index 51964b91206faec88e9f5d6f70bd8696aa14e6fb..e0a0ffd98be8302d522df7f80bb68eaead26de16 100644
 --- a/src/serve/generation_service.cpp
 +++ b/src/serve/generation_service.cpp
 @@ -1,4 +1,7 @@
@@ -53,7 +53,7 @@ index 1eb985b4457a7edac2c8821f28756209746d1331..e0b66dce1bac60984c53ceef0f560787
  
  } // namespace
 diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
-index 0a867b65faba3b94f78b0216f67829d7c5053df6..571c4e63295f99be78f629656f9216227633fae1 100644
+index 9f24294ac88af328732baa5e4c85ad8f037adae6..13a126ee140cbdf40e58014ccb5ecb994f9dbc96 100644
 --- a/src/serve/http_server.cpp
 +++ b/src/serve/http_server.cpp
 @@ -1,5 +1,6 @@
@@ -171,10 +171,10 @@ index 205a499625fbb36ad80b1ec4401c79bf20a613cd..7683ba6d0edeb108f85f26ba7983fe48
      if (!request.stream) {
          GenerationOutcome outcome;
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 52498b39f4925d6d8fd5c7c9cd05ad2605180659..157c26f1e0a3f45a1e6ad4a8b28e76856553b42f 100644
+index c5785fe924ef0a2dea8165251102998dc1183769..e7936e5024eda7a768cd95aa5831e5d03a2dcb4f 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -234,3 +234,8 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_ptq1_tests_PROGRAMS
+@@ -235,3 +235,8 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_ptq1_tests_PROGRAMS
    ninfer_linear_topk_test ninfer_linear_t2_a16_test ninfer_linear_t2_a8_test)
  ninfer_finalize_bundle(ninfer_ptq1_tests)
  ninfer_stage_runtime_dlls(ninfer_ptq1_tests)

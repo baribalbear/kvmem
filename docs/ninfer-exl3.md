@@ -45,7 +45,7 @@ checked against the published 4.0 bpw directory. The output has not yet been loa
 
 | Area | Files |
 |---|---|
-| Format and geometry | `core/weight.h` (`QType::EXL3_MUL1 = 32`, `QuantLayout::TrellisT16 = 7`, `Weight::input_scales`, `bitrate_half_bits`), `core/weight_view.*` |
+| Format and geometry | `core/weight.h` (`QType::EXL3_MUL1 = 35`, `QuantLayout::TrellisT16 = 7`, `Weight::input_scales`, `bitrate_half_bits`), `core/weight_view.*` |
 | Artifact | `artifact/schema.*` (`bitrate_half_bits` tensor member), `formats.cpp`, `layouts.cpp`, new `exl3_trellis.*` |
 | Kernels | new `ops/linear/exl3/` (A16 decode, GEMV and MMA routes) |
 | Consumers | `linear`, `attn_input_proj`, `gdn_input_proj` (plain, conv snapshot, conv record), `linear_swiglu`, `linear_add`, `weight_input.cpp` |
@@ -64,6 +64,9 @@ Changes from ninfer-ext's code:
   sm_75 tiers. ninfer-ext targets sm_120 only.
 * kvmem's tree builds per-row MTP attention weights for every format. A row slice of an EXL3 parent is
   not a valid operand, so EXL3 banks skip them.
+* Tensor parallelism (`heads-tp`) splits projections into row and column pieces, which an EXL3 matrix
+  cannot be cut into. EXL3 runs on one GPU; a tensor-parallel launch rejects it as an unsupported
+  format.
 
 Not ported: the native quantizer (`ninfer-quantize`, `src/quantize/exl3`, `tools/exl3`), the EXL3
 artifact writer (`tensor_output.py`) and Flash-Next expert offload (`ops/offload_moe` EXL3 banks).
@@ -72,7 +75,7 @@ artifact writer (`tensor_output.py`) and Flash-Next expert offload (`ops/offload
 
 Done without a GPU:
 
-* `prepare-backends.py`'s `verify_patch_series` replays all 25 NInfer patches from the base commit
+* `prepare-backends.py`'s `verify_patch_series` replays all 28 NInfer patches from the base commit
   and reproduces every recorded tree.
 * `tests/artifact/test_exl3_layout.py`: 26 passed. The existing CPU-only artifact tests still pass.
 * `tests/test_model_health.py`: 24 passed.
@@ -99,11 +102,11 @@ this NInfer worker.
 ## Regenerating the patch
 
 Apply the series in `backends/ninfer`, edit, then diff against the tree the previous patch
-(`cross-owner-fork`) produces, not against `HEAD`, which is the upstream base:
+(`input-reuse`) produces, not against `HEAD`, which is the upstream base:
 
 ```bash
 git add -A
-git diff --cached --full-index bb98e6d4d106096627df42219d73807c3caba48e > ../patches/ninfer-exl3.patch
+git diff --cached --full-index 1e7a5d621c341f2c257b81b9a5632dd19b17b07f > ../patches/ninfer-exl3.patch
 git write-tree
 ```
 

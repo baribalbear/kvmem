@@ -95,7 +95,7 @@ index 0000000000000000000000000000000000000000..ad9a995cdb32467a75fb74bc9bbe3aad
 +};
 +} // namespace ninfer
 diff --git a/include/ninfer/engine.h b/include/ninfer/engine.h
-index 541ab6473268df732d821d98e1267e800ac3cd31..95873b3100fd94c5d580805ce0686a426724de89 100644
+index 19843b5013fb1aa61e2022da036fa0081e29f272..c0ee5855f55a952f1a37985f4b1c69c1adb5ea72 100644
 --- a/include/ninfer/engine.h
 +++ b/include/ninfer/engine.h
 @@ -1,6 +1,7 @@
@@ -117,7 +117,7 @@ index 541ab6473268df732d821d98e1267e800ac3cd31..95873b3100fd94c5d580805ce0686a42
      ~Engine();
  
 diff --git a/src/runtime/CMakeLists.txt b/src/runtime/CMakeLists.txt
-index 8b745a42a53a113523c2211b25e8934b85c9091b..5c0c39a148826583124e1ec475e70e5c790f9483 100644
+index ae103eafac738844345e28ecfb53504ee5512ff4..0ecb0b28f596db1f6a6687887b39220746261c14 100644
 --- a/src/runtime/CMakeLists.txt
 +++ b/src/runtime/CMakeLists.txt
 @@ -48,6 +48,7 @@ ninfer_stamp_build_id(ninfer_runtime_support)
@@ -294,10 +294,10 @@ index 0000000000000000000000000000000000000000..26af430c476782e46d56d2b22802a3ed
 +}
 +} // namespace ninfer::runtime
 diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
-index 805af65834debbf3171ae32f27d6dddc83868681..ef247a7bc6049dd40c6af013d770da5c66493a3a 100644
+index 4698b6ce90ee24d50ce8cdfe4538f8ded50b926d..3eaace60dbc7aae1f937a5b499a87491cec339a5 100644
 --- a/src/runtime/engine/model_instance.cpp
 +++ b/src/runtime/engine/model_instance.cpp
-@@ -22,6 +22,7 @@
+@@ -23,6 +23,7 @@
  #include "models/qwen3_5/measurement.h"
  #include "runtime/engine/host_memory.h"
  #include "runtime/engine/graph_probe.h"
@@ -305,7 +305,7 @@ index 805af65834debbf3171ae32f27d6dddc83868681..ef247a7bc6049dd40c6af013d770da5c
  #include "runtime/contract/rope_scaling.h"
  
  #include <algorithm>
-@@ -811,7 +812,8 @@ ResidencyTransition ModelInstance::resume(DeviceContext& device, DeviceSnapshot&
+@@ -812,7 +813,8 @@ ResidencyTransition ModelInstance::resume(DeviceContext& device, DeviceSnapshot&
      return out;
  }
  
@@ -315,7 +315,7 @@ index 805af65834debbf3171ae32f27d6dddc83868681..ef247a7bc6049dd40c6af013d770da5c
      validate_options(requested);
      install_device_route_profile_for(requested, device);
      std::shared_ptr<core::ResidentMemorySession> residency;
-@@ -927,6 +929,20 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
+@@ -943,6 +945,20 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
      }
      EngineOptions planning_options =
          artifact_scoped_disk_tier(options, instance->model->info().artifact_id);
@@ -336,7 +336,7 @@ index 805af65834debbf3171ae32f27d6dddc83868681..ef247a7bc6049dd40c6af013d770da5c
      // Calibrate dense single-device execution uniformly, including MTP and DFlash2.
      // Expert streaming, grafts and suspend need separate qualification of
      // temporary Program ownership. Do not reopen production disk stores in a probe.
-@@ -988,11 +1004,37 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
+@@ -1004,11 +1020,37 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
                  ? physical_upper_bound - options.cuda_vram_reserve_bytes : 0;
          }
      }
@@ -376,7 +376,7 @@ index 805af65834debbf3171ae32f27d6dddc83868681..ef247a7bc6049dd40c6af013d770da5c
      std::unique_ptr<models::qwen3_5::execution::NativeExpertRuntime> experts;
      if (!instance->model->expert_sources().layers.empty()) {
          // Price startup with the real allocations before the KV plan is finalized: the delivery
-@@ -1220,4 +1262,14 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
+@@ -1236,4 +1278,14 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
              std::move(context_cost.model), std::move(resolved)};
  }
  

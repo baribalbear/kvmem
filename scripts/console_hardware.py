@@ -5,12 +5,43 @@ clock; wall time is only for snapshot freshness. Engine cache I/O stays separate
 """
 import threading
 import time
+import re
+import os
+import subprocess
+from pathlib import Path
 from threading import Thread
 
 try:
     import psutil
 except ImportError:
     psutil = None
+
+
+def parse_rocr_agents(text):
+    """Use the runtime's own UUID spelling, never an AMD-SMI UUID or a GPU index."""
+    devices=[]
+    for agent in re.split(r'(?m)^Agent\s+\d+\s*$',text):
+        def value(name):
+            found=re.search(r'(?m)^\s*'+re.escape(name)+r':\s*(.*?)\s*$',agent)
+            return found.group(1) if found else ''
+        uuid=value('Uuid')
+        if value('Device Type')!='GPU' or not re.fullmatch(r'GPU-[0-9a-fA-F]{16}',uuid):continue
+        pools=re.findall(r'Segment:\s*GLOBAL; FLAGS: COARSE GRAINED\s+Size:\s*(\d+)',agent)
+        devices.append(dict(uuid=uuid,name=value('Marketing Name') or value('Name'),
+            memory_mib=str(int(pools[0])//1024) if pools else None,vendor='amd'))
+    return devices
+
+
+def amd_gpu_inventory():
+    # The optional ROCm inventory tool initializes no model or inference queue.
+    # Runtime paths may be versioned; try the explicitly selected installation.
+    root=os.environ.get('ROCM_PATH') or os.environ.get('HIP_PATH')
+    executable=str(Path(root)/'bin'/('rocminfo.exe' if os.name=='nt' else 'rocminfo')) if root else 'rocminfo'
+    try:
+        result=subprocess.run([executable],capture_output=True,text=True,timeout=5,
+            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        return parse_rocr_agents(result.stdout) if result.returncode==0 else []
+    except (OSError,subprocess.TimeoutExpired):return []
 
 
 class SystemDiskSampler:

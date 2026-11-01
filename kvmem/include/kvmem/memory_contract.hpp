@@ -36,7 +36,9 @@ struct SessionIdentity {
     uint64_t incarnation = 0; // changes on reset/replacement; edits advance content/history versions
     bool operator==(const SessionIdentity & other) const;
 };
-enum class PayloadPlaneKind { Key, Value, KeyScale, ValueScale };
+// PackedKeyValue preserves a backend-native page (including its scales) as an
+// opaque byte record. Append new kinds to preserve existing serialized values.
+enum class PayloadPlaneKind { Key, Value, KeyScale, ValueScale, PackedKeyValue };
 struct PayloadPlane {
     uint32_t layer = 0; // model layer identity, not a dense attention-layer index
     PayloadPlaneKind kind = PayloadPlaneKind::Key;
@@ -45,6 +47,12 @@ struct PayloadPlane {
     uint64_t alignment = 1;
     // Zero means opaque page encoding. Nonzero describes contiguous token rows.
     uint64_t token_stride = 0;
+    // Tensor shards of one model layer remain separate native planes. Zero
+    // head_count is the original unsharded encoding; otherwise heads are a
+    // contiguous [head_begin, head_begin + head_count) range in model order.
+    uint32_t rank = 0;
+    uint32_t head_begin = 0;
+    uint32_t head_count = 0;
     bool operator==(const PayloadPlane & other) const;
 };
 struct PayloadLayout {

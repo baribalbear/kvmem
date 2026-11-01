@@ -21,10 +21,10 @@ index 04f033babea0f3c95af30147a38c84a0fa4930ea..975c971dc2a08c6676c488db1deaca28
              options.attention = false;
          } else if (arg == "--no-linear-attention") {
 diff --git a/apps/cli/main.cpp b/apps/cli/main.cpp
-index 1e2e7973b104c8490e5e7958be2be9d01ea8f205..11fa1957f27ff5edbe63a1853c0d989010557866 100644
+index 764d1cbc8a2e9d46b7e1fbd3e6186ac5bb48d431..840ffa6cfc17ff408f7748132cfff6db9845c872 100644
 --- a/apps/cli/main.cpp
 +++ b/apps/cli/main.cpp
-@@ -411,6 +411,7 @@ int main(int argc, char** argv) {
+@@ -415,6 +415,7 @@ int main(int argc, char** argv) {
          engine_options.cuda_memory_probe_step_bytes = cli.cuda_memory_probe_step_bytes;
          engine_options.mlp_a8_decode            = cli.mlp_a8_decode;
          engine_options.prefill_a8               = cli.prefill_a8;
@@ -33,10 +33,10 @@ index 1e2e7973b104c8490e5e7958be2be9d01ea8f205..11fa1957f27ff5edbe63a1853c0d9890
          engine_options.prefill_cublas_projections = cli.prefill_cublas_projections;
          // One CLI invocation owns exactly one request, so retained cross-request context has no
 diff --git a/apps/cli/options.cpp b/apps/cli/options.cpp
-index 96077233f6fcffe6d808b5e8094215be01a78619..6c967120e4e4473fe3ccb34efbb017997fa110b7 100644
+index cac64efb3d0cac11912b491b3e03789cb5d3c72e..091cdb3cb923417e76189065d93639b4aec6907d 100644
 --- a/apps/cli/options.cpp
 +++ b/apps/cli/options.cpp
-@@ -245,6 +245,9 @@ std::string usage_text(const char* argv0) {
+@@ -259,6 +259,9 @@ std::string usage_text(const char* argv0) {
             "  --no-prefill-a8               return full prefill tiles to their A16 routes,\n"
             "                                which is how the integer routes are measured on\n"
             "                                a whole request\n"
@@ -46,7 +46,7 @@ index 96077233f6fcffe6d808b5e8094215be01a78619..6c967120e4e4473fe3ccb34efbb01799
             "  --prefill-cublas              hand wide prefill GEMMs to cuBLAS: a large\n"
             "                                prefill speedup for a small perplexity cost;\n"
             "                                wants a larger --prefill-chunk\n"
-@@ -487,6 +490,8 @@ Options parse_options(int argc, char** argv) {
+@@ -519,6 +522,8 @@ Options parse_options(int argc, char** argv) {
              options.mlp_a8_decode = true;
          } else if (arg == "--no-prefill-a8") {
              options.prefill_a8 = false;
@@ -56,10 +56,10 @@ index 96077233f6fcffe6d808b5e8094215be01a78619..6c967120e4e4473fe3ccb34efbb01799
              options.speculative.lookup_ngram = parse_u32(value("--lookup-ngram"), "lookup-ngram");
          } else if (arg == "--mtp-attention-window") {
 diff --git a/apps/cli/options.h b/apps/cli/options.h
-index 52124affbc51866604c2f60faf75559101230643..352bead83862a5f3535ae9c272be0023a1791c82 100644
+index b324f3c0a2eb1b176e3b93333602673491fce8d3..a8d481887d1d035ee07c4d8ba148cb87c667d08d 100644
 --- a/apps/cli/options.h
 +++ b/apps/cli/options.h
-@@ -68,6 +68,7 @@ struct Options {
+@@ -73,6 +73,7 @@ struct Options {
      bool use_alt_prefix_caching = false;
      bool mlp_a8_decode  = false;
      bool prefill_a8     = true;
@@ -68,10 +68,10 @@ index 52124affbc51866604c2f60faf75559101230643..352bead83862a5f3535ae9c272be0023
      bool prefill_cublas_projections = true;
  
 diff --git a/docs/device-profiles.md b/docs/device-profiles.md
-index a9fc19757d62799a980279217c8b9c0a5b355d51..c7fe388516b1c6257d925a195fa0d0a52c602c10 100644
+index a1981ec689e28ef9fe60a44cfb0a89b1d36fd985..3b5905cdc80976c4e535492051a28128d151edb6 100644
 --- a/docs/device-profiles.md
 +++ b/docs/device-profiles.md
-@@ -112,7 +112,8 @@ survives a second interleaved measurement, and its output matches the compiled r
+@@ -116,7 +116,8 @@ survives a second interleaved measurement, and its output matches the compiled r
  | `q6_head/248320x5120` | the Q6 vocabulary head's per-row GEMV (`gemv`, widths 1 and 2) or small-T MMA (`small_t`, widths up to 32) | widths 1 to 32 |
  | `q8_ksplit/<rows>x<k>` | the four-K-warp form (`kw4`: at most 128 registers a thread, four CTAs an SM) of the 8-column tile of the Q8 G32 K-split contraction, which MTP heads, DFlash2 drafters and Q8 heads run, instead of the route's own schedule | the eleven contraction shapes of those layers, widths 1 to 8 |
  | `unified/q4_q5_attn_input`, `unified/q4_q5_gdn_input`, `unified/q4_linear_swiglu`, `unified/q4_linear_add`, `unified/q5_linear_add/5120x<k>` | upstream's routes for the fused groupwise projections over the unified Linear templates (`unified`) instead of this line's own | the model shapes, widths 1 to 64 (the small-T launches only where those are all the switch covers) |
@@ -82,10 +82,10 @@ index a9fc19757d62799a980279217c8b9c0a5b355d51..c7fe388516b1c6257d925a195fa0d0a5
  | `gdn_two_stage/h<value heads>` | the two-stage GDN prefill (fused Q/K normalization and control preparation, then one FP32-state recurrence that also writes the output) instead of the WY/state-passing/output pipeline | prompts of 16 to 8192 tokens, 48 and 32 value heads |
  
 diff --git a/include/ninfer/engine_options.h b/include/ninfer/engine_options.h
-index 3367cfdccd3519f22eb735799c87a89366dcbd09..fc38adbdde5c2be79b0fa317dad84b1101af01b1 100644
+index a04106f49eeccdb75ff4e125b6782d741f1d65de..b0d3d898d5cf395b399e3afbf167cd425bab7cb7 100644
 --- a/include/ninfer/engine_options.h
 +++ b/include/ninfer/engine_options.h
-@@ -597,6 +597,12 @@ struct EngineOptions {
+@@ -619,6 +619,12 @@ struct EngineOptions {
      // already costs, the GDN half carrying nearly all of both. Separable because that is a
      // different trade from the MLP one and an owner may want only the cheaper half.
      bool prefill_cublas_projections        = true;
@@ -99,10 +99,10 @@ index 3367cfdccd3519f22eb735799c87a89366dcbd09..fc38adbdde5c2be79b0fa317dad84b11
      // preprocessing. Also bounds the overlay window.
      std::uint32_t vision_max_merged_tokens = 16384;
 diff --git a/src/calibration/device_calibration.cu b/src/calibration/device_calibration.cu
-index 27511dfa9b9bd43278a9556dd63cf90c9d344fa9..9028714c204c7e1b710c0742acd309ffd48c4dfd 100644
+index be48cbf47c024af5b5ea763e2e1638d2f5fabc80..e58b5efae495ae260bedf80a7668e76b255fd6d6 100644
 --- a/src/calibration/device_calibration.cu
 +++ b/src/calibration/device_calibration.cu
-@@ -15,13 +15,18 @@
+@@ -15,14 +15,19 @@
  #include "ninfer/ops/linear.h"
  #include "ninfer/ops/linear_add.h"
  #include "ninfer/ops/linear_swiglu.h"
@@ -113,6 +113,7 @@ index 27511dfa9b9bd43278a9556dd63cf90c9d344fa9..9028714c204c7e1b710c0742acd309ff
  #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.h"
 +#include "ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_plan.h"
  #include "ops/linear/common/route_table.h"
+ #include "ops/linear/gguf/ggml_bridge.h"
  #include "ops/linear/t2/t2_a8.h"
 +#include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
  #include "ops/linear_add/q4/q4_linear_add_dispatch.h"
@@ -121,7 +122,7 @@ index 27511dfa9b9bd43278a9556dd63cf90c9d344fa9..9028714c204c7e1b710c0742acd309ff
  #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
  #include "ops/linear_swiglu/q4cublas/cublas_prefill_gate.h"
  #include "ops/softmax_attention/dense/causal_cache/launch.h"
-@@ -175,6 +180,55 @@ SyntheticWeight row_split_weight(QType qtype, std::int32_t n, std::int32_t k) {
+@@ -176,6 +181,55 @@ SyntheticWeight row_split_weight(QType qtype, std::int32_t n, std::int32_t k) {
      return result;
  }
  
@@ -177,7 +178,7 @@ index 27511dfa9b9bd43278a9556dd63cf90c9d344fa9..9028714c204c7e1b710c0742acd309ff
  class Timer {
  public:
      explicit Timer(const CalibrationOptions& options)
-@@ -674,6 +728,123 @@ void calibrate_groupwise(ops::DeviceRouteProfile& profile, Timer& timer,
+@@ -1002,6 +1056,123 @@ void calibrate_groupwise(ops::DeviceRouteProfile& profile, Timer& timer,
      }
  }
  
@@ -301,12 +302,12 @@ index 27511dfa9b9bd43278a9556dd63cf90c9d344fa9..9028714c204c7e1b710c0742acd309ff
  // The cuBLAS prefill route's width gate (--prefill-cublas) per Op, through the public Ops under
  // AllowPrefillCublas, at the 27B's registered shapes. Each Op is timed twice: at widths the integer
  // A8 mainloop cannot take, where the A16 mainloop is the alternative, and at multiples of its
-@@ -1253,6 +1424,7 @@ ops::DeviceRouteProfile calibrate_device_routes(const CalibrationOptions& option
-         calibrate_cublas_prefill(profile, timer, options);
-         calibrate_q8_ksplit(profile, timer, options);
+@@ -1590,6 +1761,7 @@ ops::DeviceRouteProfile calibrate_device_routes(const CalibrationOptions& option
+         calibrate_gguf_moe_vector(profile, timer, options);
+         calibrate_gguf_moe_up(profile, timer, options);
      }
-+    if (projections && options.nvfp4) { calibrate_nvfp4_fused(profile, timer, options); }
-     if (options.linear_attention) { calibrate_linear_attention(profile, timer, options); }
++    if (projections && options.nvfp4 && !gguf_only) { calibrate_nvfp4_fused(profile, timer, options); }
+     if (options.linear_attention && !gguf_only) { calibrate_linear_attention(profile, timer, options); }
      if (attention) {
          calibrate_attention(profile, timer, options, KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
 diff --git a/src/calibration/device_calibration.h b/src/calibration/device_calibration.h
@@ -322,10 +323,10 @@ index 10e0e09c077b3e63e0d896af7dfa4e367e457407..332df6c63d622a444883081944104299
      bool linear_attention = true; // GDN prefill algorithm per prompt width
      int warmup     = 2;
 diff --git a/src/calibration/route_catalog.cpp b/src/calibration/route_catalog.cpp
-index fcc8360b6ddcfaef7fb7827e911851d879b754aa..15258bb94cb76fad5a86a618e5ae985615742f82 100644
+index a0c63e19371d050e7971d840f611bd8282e97ec6..16fe686ef157f5ee2b87ca414b3464030f6b345f 100644
 --- a/src/calibration/route_catalog.cpp
 +++ b/src/calibration/route_catalog.cpp
-@@ -75,6 +75,12 @@ std::vector<RouteCatalogEntry> build_catalog(ops::DeviceTier tier) {
+@@ -83,6 +83,12 @@ std::vector<RouteCatalogEntry> build_catalog(ops::DeviceTier tier) {
                    "unified/q4_linear_swiglu", "unified/q4_linear_add"}) {
                  add(key, {"unified"});
              }
@@ -339,10 +340,10 @@ index fcc8360b6ddcfaef7fb7827e911851d879b754aa..15258bb94cb76fad5a86a618e5ae9856
          // The cuBLAS prefill route's width gate per Op (--prefill-cublas), over the widths the
          // integer A8 mainloop cannot take and, under `/a8`, the multiples of its tile it can.
 diff --git a/src/models/load_options.h b/src/models/load_options.h
-index 8bb0d7d97df87a83c23ac783453fdaea51ff2fb1..aaef36e9c825f068abd1d80547ddbd7bbd7bc178 100644
+index 7f120d7b8dca315e20e2ac336e2fdd37bc4daca6..63441135f84a66094b200605c25e5da110a7612e 100644
 --- a/src/models/load_options.h
 +++ b/src/models/load_options.h
-@@ -28,6 +28,9 @@ struct LoadOptions {
+@@ -30,6 +30,9 @@ struct LoadOptions {
      bool mlp_a8_decode = false;
      // Clearing this returns full prefill tiles to their A16 routes; see EngineOptions::prefill_a8.
      bool prefill_a8 = true;
@@ -352,7 +353,7 @@ index 8bb0d7d97df87a83c23ac783453fdaea51ff2fb1..aaef36e9c825f068abd1d80547ddbd7b
      // See EngineOptions::prefill_cublas: hands wide prefill GEMMs to cuBLAS, a further quality
      // trade on top of prefill_a8 and therefore off unless asked for.
      bool prefill_cublas = false;
-@@ -130,6 +133,7 @@ struct LoadOptions {
+@@ -140,6 +143,7 @@ struct LoadOptions {
              .expert_residency = options.expert_residency,
              .mlp_a8_decode  = options.mlp_a8_decode,
              .prefill_a8     = options.prefill_a8,
@@ -361,7 +362,7 @@ index 8bb0d7d97df87a83c23ac783453fdaea51ff2fb1..aaef36e9c825f068abd1d80547ddbd7b
              .prefill_cublas_projections = options.prefill_cublas_projections,
              .gdn_state_fp16 = options.gdn_state_fp16,
 diff --git a/src/models/qwen3_5/execution/parameters.cpp b/src/models/qwen3_5/execution/parameters.cpp
-index 95efa85d8cd3f9b53b1ee4a0917a59f2cd3927dc..0dbd8a234b607d40f20c287cd00a724dcb02f9cc 100644
+index 8955d381fb718f916c1059a05db7ea765680c496..ade33e9f885cd562965106ab9cc0375b5b75fa61 100644
 --- a/src/models/qwen3_5/execution/parameters.cpp
 +++ b/src/models/qwen3_5/execution/parameters.cpp
 @@ -89,6 +89,25 @@ public:
@@ -390,7 +391,7 @@ index 95efa85d8cd3f9b53b1ee4a0917a59f2cd3927dc..0dbd8a234b607d40f20c287cd00a724d
      LinearParameters linear(WeightId id) const {
          return with_context(model_.weight(id).name,
                              [&] { return ops::prepare_linear_weight(model_.input(id)); });
-@@ -178,6 +197,8 @@ public:
+@@ -176,6 +195,8 @@ public:
          integer_route(out.down, QType::Q5_G64_FP16, 5120, 17408);
          integer_route(out.gate_up, QType::T2_G128_FP16, 34816, 5120);
          integer_route(out.down, QType::T2_G128_FP16, 5120, 17408);
@@ -399,7 +400,7 @@ index 95efa85d8cd3f9b53b1ee4a0917a59f2cd3927dc..0dbd8a234b607d40f20c287cd00a724d
          // --mlp-a8-decode is a separate verify-phase trade from --prefill-a8: it must admit the
          // decode route by this profile's own format/shape, not by whether prefill promotion
          // already ran, so the two flags stay orthogonal as documented.
-@@ -285,9 +306,11 @@ public:
+@@ -307,9 +328,11 @@ public:
              integer_route(attention_output, QType::Q4_G64_FP16, 5120, 6144);
              integer_route(attention_output, QType::Q5_G64_FP16, 5120, 6144);
              integer_route(attention_output, QType::T2_G128_FP16, 5120, 6144);
@@ -411,7 +412,7 @@ index 95efa85d8cd3f9b53b1ee4a0917a59f2cd3927dc..0dbd8a234b607d40f20c287cd00a724d
              integer_route_pair(attention_projection, QType::Q4_G64_FP16, 7168, QType::Q5_G64_FP16,
                                 7168, 5120);
              integer_route_pair(attention_projection, QType::T2_G128_FP16, 7168, QType::T2_G128_FP16,
-@@ -302,9 +325,11 @@ public:
+@@ -324,9 +347,11 @@ public:
              integer_route(gdn_output, QType::Q4_G64_FP16, 5120, 6144);
              integer_route(gdn_output, QType::Q5_G64_FP16, 5120, 6144);
              integer_route(gdn_output, QType::T2_G128_FP16, 5120, 6144);
@@ -423,7 +424,7 @@ index 95efa85d8cd3f9b53b1ee4a0917a59f2cd3927dc..0dbd8a234b607d40f20c287cd00a724d
              integer_route_pair(gdn_projection, QType::Q4_G64_FP16, 4096, QType::Q5_G64_FP16, 12288,
                                 5120);
              integer_route_pair(gdn_projection, QType::T2_G128_FP16, 4096, QType::T2_G128_FP16,
-@@ -388,6 +413,7 @@ public:
+@@ -419,6 +444,7 @@ public:
          }
          if (packable) {
              out.projection.packed = ops::prepare_linear_weight(inputs);
@@ -431,12 +432,12 @@ index 95efa85d8cd3f9b53b1ee4a0917a59f2cd3927dc..0dbd8a234b607d40f20c287cd00a724d
          }
          if (model_.config().text.architecture == Architecture::Qwen3_5) {
              out.projection.rows = {linear(a.query), linear(a.key), linear(a.gate), linear(a.value)};
-@@ -395,6 +421,7 @@ public:
+@@ -426,6 +452,7 @@ public:
          out.query_norm  = tensor(a.query_norm);
          out.key_norm    = tensor(a.key_norm);
          out.output      = linear(a.output);
 +        nvfp4_w4a16_route(out.output, 5120, 6144);
-         out.ffn         = ffn(w.layer);
+         out.ffn         = ffn(w.layer.ffn);
          out.output_head = head(w.output_head_use);
          return out;
 diff --git a/src/ops/attn_input_proj/nvfp4/nvfp4_attn_input_a16.cu b/src/ops/attn_input_proj/nvfp4/nvfp4_attn_input_a16.cu
@@ -865,10 +866,10 @@ index 62c1eed8fabc21d15842cbbbca387a40c380a441..b003f0525afe0c52094df16f79e22dfc
          if (tokens == 1) { return {Nvfp4GdnConvScheduleId::DecodeFusedA16}; }
          if (tokens <= 16) { return {Nvfp4GdnConvScheduleId::SmallTFusedA16}; }
 diff --git a/src/ops/kv_cache/fp8_e4m3_row_codec.cuh b/src/ops/kv_cache/fp8_e4m3_row_codec.cuh
-index 8e89e565026ad4a660053e4c963bbb6f47dca7dd..4b6f6cb3e25e9ea74e304b2bca3463a4d7b10a0f 100644
+index fc3afcdc1262d2b2475de1759134940413186dea..31c8d1c91f8895762c7ae29981cdbe70a921f044 100644
 --- a/src/ops/kv_cache/fp8_e4m3_row_codec.cuh
 +++ b/src/ops/kv_cache/fp8_e4m3_row_codec.cuh
-@@ -88,7 +88,13 @@ __device__ __forceinline__ __half2 kv_cache_fp8_code2_to_half2_x2m8(unsigned cod
+@@ -85,7 +85,13 @@ __device__ __forceinline__ __half2 kv_cache_fp8_code2_to_half2_x2m8(unsigned cod
  
  __device__ __forceinline__ __half2 kv_cache_fp8_dequant_code2_to_half2(std::uint16_t storage,
                                                                         __half scale) {
@@ -883,7 +884,7 @@ index 8e89e565026ad4a660053e4c963bbb6f47dca7dd..4b6f6cb3e25e9ea74e304b2bca3463a4
  }
  
  // Dequantizes 8 contiguous E4M3 codes (16 bytes) to FP16, for PV MMA operands on hardware with
-@@ -112,15 +118,17 @@ __device__ __forceinline__ int4 kv_cache_fp8_dequant_f16x8(const std::uint8_t* c
+@@ -109,15 +115,17 @@ __device__ __forceinline__ int4 kv_cache_fp8_dequant_f16x8(const std::uint8_t* c
  // Blackwell-only mma.sync...kind::f8f6f4, so K needs a real (not just reinterpreted) wide copy.
  __device__ __forceinline__ int4 kv_cache_fp8_dequant_bf16x8(const std::uint8_t* codes,
                                                               __half scale) {
@@ -906,10 +907,10 @@ index 8e89e565026ad4a660053e4c963bbb6f47dca7dd..4b6f6cb3e25e9ea74e304b2bca3463a4
              __floats2bfloat162_rn(decoded.x * scale_f, decoded.y * scale_f);
          packed[i] = *reinterpret_cast<const unsigned*>(&value2);
 diff --git a/src/ops/kv_cache/nvfp4_group16_codec.cuh b/src/ops/kv_cache/nvfp4_group16_codec.cuh
-index d79fe1ad0c4372ee07fba6a240352d01ff920b04..10508005d40cf874e206bf265979a3e5eb143840 100644
+index b701ed59a70ba9ef325b05e1e62e4a909087cb22..6c3aa460f3168cb5b257f8019a772c15fe36f9e8 100644
 --- a/src/ops/kv_cache/nvfp4_group16_codec.cuh
 +++ b/src/ops/kv_cache/nvfp4_group16_codec.cuh
-@@ -93,18 +93,26 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
+@@ -91,18 +91,26 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
      // Every finite E2M1 value times a legal nonnegative E4M3 cache scale is exactly representable
      // in FP16 (at most four product fraction bits and magnitude <= 2688). Half2 multiplication is
      // therefore the exact FP16 expansion boundary, not an additional approximation.
@@ -943,7 +944,7 @@ index d79fe1ad0c4372ee07fba6a240352d01ff920b04..10508005d40cf874e206bf265979a3e5
          half_bits[pair]     = *reinterpret_cast<const unsigned*>(&value);
      }
      return make_int4(static_cast<int>(half_bits[0]), static_cast<int>(half_bits[1]),
-@@ -116,17 +124,16 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
+@@ -114,17 +122,16 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
  // Q's storage) instead of FP16.
  __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_bf16x8(const std::uint8_t* codes,
                                                                std::uint8_t scale_code) {
@@ -966,7 +967,7 @@ index d79fe1ad0c4372ee07fba6a240352d01ff920b04..10508005d40cf874e206bf265979a3e5
          const __nv_bfloat162 value =
              __floats2bfloat162_rn(decoded.x * scale_f, decoded.y * scale_f);
          bf16_bits[pair] = *reinterpret_cast<const unsigned*>(&value);
-@@ -142,18 +149,14 @@ struct KVCacheNvfp4DequantizedF16x16 {
+@@ -140,18 +147,14 @@ struct KVCacheNvfp4DequantizedF16x16 {
  
  __device__ __forceinline__ KVCacheNvfp4DequantizedF16x16
  kv_cache_nvfp4_dequant_f16x16(const std::uint8_t* codes, std::uint8_t scale_code) {
@@ -2378,10 +2379,10 @@ index 05ce967c173d15b38ce8430e18abd700c2104c84..8715e725278f48354e179df0791fb518
    "${CMAKE_CURRENT_LIST_DIR}/nvfp4/nvfp4_linear_swiglu_a4.cu"
    "${CMAKE_CURRENT_LIST_DIR}/nvfp4/nvfp4_linear_swiglu_plan.cpp"
 diff --git a/src/serve/generation_service.cpp b/src/serve/generation_service.cpp
-index a855e057da000b776a40d602f341f6d7cbc48ed8..c914b1ee6a8375e10ca8edfe8f7b20a603d19dce 100644
+index a5c30ff8c1ac3005ba0127adb3ab269aa0069f61..182927752c1d5322d762baeefa4915f32f7f3857 100644
 --- a/src/serve/generation_service.cpp
 +++ b/src/serve/generation_service.cpp
-@@ -323,6 +323,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
+@@ -324,6 +324,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
      engine_options.suspend                  = options.suspend;
      engine_options.mlp_a8_decode            = options.mlp_a8_decode;
      engine_options.prefill_a8               = options.prefill_a8;
@@ -2390,10 +2391,10 @@ index a855e057da000b776a40d602f341f6d7cbc48ed8..c914b1ee6a8375e10ca8edfe8f7b20a6
      engine_options.prefill_cublas_projections = options.prefill_cublas_projections;
      engine_options.speculative              = options.speculative;
 diff --git a/src/serve/request_log.cpp b/src/serve/request_log.cpp
-index 76244fc4ab947a32cb78dae382776cbf71689593..9d2130ba72fb8bada58547c0c03e47e50e3304cf 100644
+index f82ab5cdb6cb7bacc40dadb4f363b3216be3f4ac..ba8dec733e3f957eb3119051d2efacc26eb96276 100644
 --- a/src/serve/request_log.cpp
 +++ b/src/serve/request_log.cpp
-@@ -844,6 +844,7 @@ std::string format_server_start_json(
+@@ -846,6 +846,7 @@ std::string format_server_start_json(
          {"auto_resume", engine_options.suspend.auto_resume},
          {"mlp_a8_decode", engine_options.mlp_a8_decode},
          {"prefill_a8", engine_options.prefill_a8},
@@ -2402,10 +2403,10 @@ index 76244fc4ab947a32cb78dae382776cbf71689593..9d2130ba72fb8bada58547c0c03e47e5
          {"speculative_backend",
           product::speculative_backend_name(engine_options.speculative.backend)},
 diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
-index 5b7c5ec7f811901813ebcc161ef3b9790a85b171..7c8ac6339a2b8e62db2aaae45ee8e68d4e9928c2 100644
+index 2bcefee26105b953edc98801074d25c15557985b..199fe3d84078ee61cd92dadda3b9e76213af7cd6 100644
 --- a/src/serve/serve_options.cpp
 +++ b/src/serve/serve_options.cpp
-@@ -184,6 +184,8 @@ std::string serve_usage_text(const char* argv0) {
+@@ -216,6 +216,8 @@ std::string serve_usage_text(const char* argv0) {
             "                                GDN input projections off that route\n"
             "  --no-prefill-a8               prefill every projection on the A16 routes\n"
             "                                instead of the integer-activation ones\n"
@@ -2414,7 +2415,7 @@ index 5b7c5ec7f811901813ebcc161ef3b9790a85b171..7c8ac6339a2b8e62db2aaae45ee8e68d
             "  --mlp-a8-decode               integer-activation MLP gate_up at decode and\n"
             "                                verify widths\n"
             "  --lm-head-q4 | --lm-head-q6   store the output head as Q4 or Q6 while loading\n"
-@@ -1513,6 +1515,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1582,6 +1584,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              options.prefill_a8 = false;
              continue;
          }
@@ -2426,10 +2427,10 @@ index 5b7c5ec7f811901813ebcc161ef3b9790a85b171..7c8ac6339a2b8e62db2aaae45ee8e68d
              options.speculative.lookup_ngram = static_cast<std::uint32_t>(
                  parse_nonnegative_int(require_value("--lookup-ngram"), "lookup-ngram"));
 diff --git a/src/serve/serve_options.h b/src/serve/serve_options.h
-index 4aa96581da5e8d11cb7abeb8cbaca70ccb6adce6..0ddc9758f7366fc191e3cd445e8255a4202f9581 100644
+index 0dd60f63266c43b9bfc1696c77d63c8dac044f7e..4a036cd14823956ec2e8ece4ffd6d6c26be5401d 100644
 --- a/src/serve/serve_options.h
 +++ b/src/serve/serve_options.h
-@@ -127,6 +127,7 @@ struct ServeOptions {
+@@ -132,6 +132,7 @@ struct ServeOptions {
      [[nodiscard]] bool router() const noexcept { return models_dir || models_preset; }
      bool mlp_a8_decode      = false;
      bool prefill_a8         = true;
@@ -2438,10 +2439,10 @@ index 4aa96581da5e8d11cb7abeb8cbaca70ccb6adce6..0ddc9758f7366fc191e3cd445e8255a4
      bool prefill_cublas_projections = true;
      // Explicit total CUDA Graph driver-state allowance in MiB; 0 keeps the computed allowance.
 diff --git a/tests/ops/linear/linear_test_common.cpp b/tests/ops/linear/linear_test_common.cpp
-index 012db17f95f5d346ffe6dd28fd5545894b25ed96..c288da1f63f64feebb4998557f042f8b511b8616 100644
+index fc9a47c53fa355f5dec54ac05fd93ee6ae125bc6..480fcb0a003d749e5373ba0bd10390a3f295b494 100644
 --- a/tests/ops/linear/linear_test_common.cpp
 +++ b/tests/ops/linear/linear_test_common.cpp
-@@ -256,9 +256,21 @@ quantized_weight::PackedWeight make_t2_g128_fp16_weight(std::int32_t n, std::int
+@@ -271,9 +271,21 @@ quantized_weight::PackedWeight make_t2_g128_fp16_weight(std::int32_t n, std::int
  
  quantized_weight::PackedWeight make_nvfp4_weight(std::int32_t n, std::int32_t k,
                                                   std::uint32_t seed) {
@@ -2465,10 +2466,10 @@ index 012db17f95f5d346ffe6dd28fd5545894b25ed96..c288da1f63f64feebb4998557f042f8b
  }
  
 diff --git a/tests/ops/linear/linear_test_common.h b/tests/ops/linear/linear_test_common.h
-index de8fca4dc04e1d563520ddda0fe6aaf059e82fff..a545316b9de5af9d3cb97d20178fa910727a8200 100644
+index 528c55cb5435f4dfb8150ab250319da44209d9c6..222f9772c49c71e6b0514bb5baae8b71323cbc9f 100644
 --- a/tests/ops/linear/linear_test_common.h
 +++ b/tests/ops/linear/linear_test_common.h
-@@ -88,6 +88,17 @@ quantized_weight::PackedWeight make_t2_g128_fp16_weight(std::int32_t n, std::int
+@@ -93,6 +93,17 @@ quantized_weight::PackedWeight make_t2_g128_fp16_weight(std::int32_t n, std::int
                                                          std::uint32_t seed);
  quantized_weight::PackedWeight make_nvfp4_weight(std::int32_t n, std::int32_t k,
                                                   std::uint32_t seed);

@@ -11,7 +11,8 @@
 namespace kvmem {
 enum class CheckpointPurpose : uint32_t {
     None = 0, ReuseAnchor = 1, QueryReplay = 2, InputFallback = 4,
-    Reconstruction = 8, Endpoint = 16, MediaBoundary = 32
+    Reconstruction = 8, Endpoint = 16, MediaBoundary = 32, PromptTail = 64,
+    InputReuse = 128
 };
 inline CheckpointPurpose operator|(CheckpointPurpose a, CheckpointPurpose b) {
     return CheckpointPurpose(uint32_t(a) | uint32_t(b));

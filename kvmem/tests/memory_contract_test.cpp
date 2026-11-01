@@ -301,7 +301,65 @@ static void policy_and_checkpoint() {
         CHECK(!ck.compatible_with(changed));
     }
 }
+static void tensor_head_layout() {
+    // Two ranks store 3:1 heads. Deliberately give each native plane the same
+    // byte length: compatibility must include head identity, not only size.
+    PayloadLayout layout{"native-heads", 2, 64, 1024, 256, {
+        {3, PayloadPlaneKind::Key, 0, 256, 1, 0, 0, 0, 3},
+        {3, PayloadPlaneKind::Value, 256, 256, 1, 0, 0, 0, 3},
+        {3, PayloadPlaneKind::Key, 512, 256, 1, 0, 1, 3, 1},
+        {3, PayloadPlaneKind::Value, 768, 256, 1, 0, 1, 3, 1}}};
+    layout.validate();
+    auto changed = layout;
+    changed.planes[0].head_count = changed.planes[1].head_count = 2;
+    changed.planes[2].head_begin = changed.planes[3].head_begin = 2;
+    changed.planes[2].head_count = changed.planes[3].head_count = 2;
+    changed.validate();
+    CHECK(!(layout == changed));
+    auto be = std::make_shared<TestBackend>(0);
+    CheckpointIdentity original{be->desc.identity, layout, be->stamp()};
+    CheckpointIdentity other{be->desc.identity, changed, be->stamp()};
+    CHECK(!original.compatible_with(other));
+    // An opaque packed record can also carry rank/head identity. It remains
+    // opaque: explicit tensor ownership never enables token-stride addressing.
+    PayloadLayout packed{"native-packed-heads", 1, 64, 512, 1, {
+        {3, PayloadPlaneKind::PackedKeyValue, 0, 256, 1, 0, 0, 0, 3},
+        {3, PayloadPlaneKind::PackedKeyValue, 256, 256, 1, 0, 1, 3, 1}}};
+    packed.validate();
+    auto bad_packed = packed;
+    bad_packed.planes[1].token_stride = 1;
+    rejects(MemoryErrorCode::InvalidPlan, [&] { bad_packed.validate(); });
+    bad_packed = packed;
+    bad_packed.planes[1].head_begin = 2;
+    rejects(MemoryErrorCode::InvalidPlan, [&] { bad_packed.validate(); });
+    for (int fault = 0; fault < 6; ++fault) {
+        auto invalid = layout;
+        if (fault == 0) invalid.planes[3].head_count = 2; // K/V disagree
+        if (fault == 1) invalid.planes[2].rank = 0; // duplicate K
+        if (fault == 2) { invalid.planes[2].head_begin = 2; invalid.planes[3].head_begin = 2; } // overlap
+        if (fault == 3) { invalid.planes[2].head_begin = 4; invalid.planes[3].head_begin = 4; } // gap
+        if (fault == 4) invalid.planes.pop_back(); // missing V on rank 1
+        if (fault == 5) { invalid.planes[0].head_count = 0; invalid.planes[1].head_count = 0; }
+        rejects(MemoryErrorCode::InvalidPlan, [&] { invalid.validate(); });
+    }
+}
 int main() {
+    // Native packed pages carry their scales inside the opaque record. They
+    // cannot advertise per-token addressing or overlap split K/V planes.
+    PayloadLayout packed{"packed-test", 1, 128, 256, 1,
+        {{0, PayloadPlaneKind::PackedKeyValue, 0, 256, 1, 0}}};
+    packed.validate();
+    auto invalid = packed;
+    invalid.planes[0].token_stride = 1;
+    rejects(MemoryErrorCode::InvalidPlan, [&] { invalid.validate(); });
+    for (auto kind : {PayloadPlaneKind::Key, PayloadPlaneKind::Value,
+                     PayloadPlaneKind::KeyScale, PayloadPlaneKind::ValueScale}) {
+        invalid = packed;
+        invalid.record_bytes = 512;
+        invalid.planes.push_back({0, kind, 256, 256, 1, 0});
+        rejects(MemoryErrorCode::InvalidPlan, [&] { invalid.validate(); });
+    }
+    tensor_head_layout();
     for (int profile = 0; profile < 3; ++profile) success(profile);
     planning_failures();
     no_op_and_park();

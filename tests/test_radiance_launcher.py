@@ -1,0 +1,129 @@
+"""Radiance shared-launcher contracts, without model loading or GPU access."""
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'scripts'))
+from launcher.plan import build_plan,token_settings
+from console_hardware import parse_rocr_agents
+
+
+class RadiancePlanTest(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name).resolve()
+        self.worker=self.root/'radiance-kvmem-server';self.worker.write_text('worker');self.worker.chmod(0o755)
+        self.model=self.root/'model.rad';self.model.touch()
+        self.home=self.root/'radiance_home'
+        for name in ('kernels','architectures'):(self.home/name).mkdir(parents=True)
+        (self.home/'kernels.rkb').touch()
+
+    def plan(self,**settings):
+        parameters=dict(Backend='radiance',Model=str(self.model),Worker=str(self.worker),
+            RadianceHome=str(self.home),Gpu='GPU-65471d75ce486b4f')
+        parameters.update(settings)
+        return build_plan(dict(schema_version=1,parameters=parameters))
+
+    def test_units_identity_scoring_and_backend_flags(self):
+        p=self.plan(Concurrency=8,SpeculativeMode='mtp',DraftTokens=3,RetainedSessions=0,
+            QueryScorer='meanq-cosine',Lrfu=True,LrfuTopFraction=.75,QueryMaxTokens=128,
+            QueryReplayMaxTokens=768,ModelAlias='model with spaces',ApiKey='local-secret')
+        args=p['argv']
+        for flag,value in [('--max-num-seqs','8'),('--num-speculative-tokens','3'),('--kvmem-sessions','0'),
+            ('--kvmem-gen-reserve','1024'),('--served-model-name','model with spaces'),('--api-key','<redacted>'),
+            ('--kvmem-query-max-tokens','128'),('--kvmem-query-replay-max-tokens','768')]:
+            self.assertEqual(args.count(flag),1);self.assertEqual(args[args.index(flag)+1],value)
+        self.assertNotIn('CUDA_VISIBLE_DEVICES',p['environment'])
+        self.assertEqual(p['environment']['ROCR_VISIBLE_DEVICES'],'GPU-65471d75ce486b4f')
+        self.assertEqual(p['resolved_scoring']['top_frac'],.75)
+        self.assertNotIn('local-secret',json.dumps(p))
+        self.assertNotIn('--default-max-tokens',args)
+
+    def test_unsupported_features_are_rejected_before_launch(self):
+        for values in [dict(Vision=True),dict(DiskPath=str(self.root),DiskMiB=0),dict(DiskMiB=2),dict(StageLayers=[64]),
+            dict(Gpu='GPU-65471d75ce486b4f,GPU-0000000000000001,GPU-0000000000000002'),
+            dict(Gpu='GPU-65471d75ce486b4f,GPU-65471d75ce486b4f'),dict(KvType='nvfp4'),
+            dict(FastPrefill=True),dict(Reserve=640),dict(Prefill=1024),dict(SpeculativeMode='dflash2'),
+            dict(SpeculativeMode='none',DraftPolicy='adaptive'),dict(RetainedSessions=1025)]:
+            with self.subTest(values=values),self.assertRaises(ValueError):self.plan(**values)
+
+    def test_two_devices_use_exact_native_tensor_parallelism(self):
+        ids='GPU-9d36683ccd630821,GPU-dc5c3305d734c5fc'
+        with mock.patch('launcher.radiance.vision_geometry',return_value=(16,2)):
+            p=self.plan(Gpu=ids,Concurrency=8,SpeculativeMode='mtp',DraftTokens=7,
+                        DraftPolicy='adaptive',Vision=True)
+        args=p['argv']
+        for flag,value in [('--tp','2'),('--tp-wire','exact'),('--max-num-seqs','8'),('--num-speculative-tokens','7')]:
+            self.assertEqual(args.count(flag),1);self.assertEqual(args[args.index(flag)+1],value)
+        self.assertEqual(p['environment']['ROCR_VISIBLE_DEVICES'],ids)
+        self.assertEqual(p['environment']['HIP_VISIBLE_DEVICES'],'0,1')
+        self.assertEqual(p['capabilities']['supported_combinations']['text']['max_devices'],2)
+        self.assertNotIn('--stage-layers',args)
+        with self.assertRaises(ValueError):self.plan(Gpu=ids,StageLayers=[32,32])
+
+    def test_shared_ssd_budget_and_path(self):
+        args=self.plan(DiskPath=str(self.root/'cache with spaces'),DiskMiB=4096,HostMiB=32)['argv']
+        for flag,value in [('--kvmem-disk-path',str(self.root/'cache with spaces')),
+                           ('--kvmem-disk-mib','4096'),('--kvmem-host-mib','32')]:
+            self.assertEqual(args.count(flag),1);self.assertEqual(args[args.index(flag)+1],value)
+        self.assertNotIn('--kvmem-disk-path',self.plan()['argv'])
+
+    def test_native_adaptive_mtp(self):
+        for depth in (3,5,7):
+            for policy in ('fixed','adaptive'):
+                with self.subTest(depth=depth,policy=policy):
+                    args=self.plan(SpeculativeMode='mtp',DraftTokens=depth,DraftPolicy=policy)['argv']
+                    self.assertEqual(args[args.index('--draft-window')+1],policy)
+                    self.assertEqual(args[args.index('--num-speculative-tokens')+1],str(depth))
+        for values in (dict(DraftTokens=8),dict(DraftTokens=15),dict(MtpDrafts=8)):
+            with self.subTest(values=values),self.assertRaises(ValueError):
+                self.plan(SpeculativeMode='mtp',**values)
+
+    def test_native_image_geometry_and_residency(self):
+        with mock.patch('launcher.radiance.vision_geometry',return_value=(16,2)):
+            args=self.plan(Vision=True,VisionTokens=1024)['argv']
+            self.assertEqual(args[args.index('--mm-max-patches')+1],'4096')
+            self.assertEqual(args[args.index('--image-max-pixels')+1],'1048576')
+            for values in (dict(VisionResidency='cpu'),dict(VisionTokens=63),dict(VisionTokens=16385)):
+                with self.subTest(values=values),self.assertRaises(ValueError):self.plan(Vision=True,**values)
+        args=self.plan(Vision=False)['argv']
+        self.assertEqual(args[args.index('--mm-max-patches')+1],'0')
+        self.assertNotIn('--image-max-pixels',args)
+
+    def test_mtp_default_and_legacy_alias(self):
+        for values in (dict(SpeculativeMode='mtp'),dict(MtpDrafts=3)):
+            args=self.plan(**values)['argv'];self.assertEqual(args[args.index('--num-speculative-tokens')+1],'3')
+
+    def test_alignment_and_generation_headroom(self):
+        p=self.plan(Budget=4300,Reserve=1100,SinkTokens=160,RecentTokens=300)['token_settings']
+        self.assertEqual(p['block_tokens'],128)
+        self.assertEqual(p['effective']['Budget'],4224)
+        self.assertEqual(p['effective']['Reserve'],1024)
+        self.assertGreater(p['effective']['Reserve'],p['effective']['Prefill']+128)
+
+    def test_rocr_uuid_is_not_management_uuid_or_cpu(self):
+        data='''Agent 1
+  Name: CPU
+  Uuid: CPU-00000000
+  Device Type: CPU
+Agent 2
+  Name: gfx1201
+  Uuid: GPU-65471d75ce486b4f
+  Marketing Name: AMD Radeon AI PRO R9700
+  Device Type: GPU
+  Segment: GLOBAL; FLAGS: COARSE GRAINED
+  Size: 33406976 (0x1fdc000) KB
+'''
+        devices=parse_rocr_agents(data)
+        self.assertEqual(len(devices),1)
+        self.assertEqual(devices[0]['uuid'],'GPU-65471d75ce486b4f')
+        self.assertEqual(devices[0]['memory_mib'],'32624')
+        self.assertEqual(devices[0]['vendor'],'amd')
+
+
+if __name__=='__main__':unittest.main()

@@ -1,8 +1,8 @@
 diff --git a/docs/serving.md b/docs/serving.md
-index bb4c54861a650492d98635c339a1b35ba1ec3a39..5a727a7f2a0a6a1a3a8f16b9220ac3e81da528c1 100644
+index 7774d6c475fa09637882a9d3dd76572d16237194..5c229175b79758378d2150463070ed0b02a02413 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
-@@ -957,11 +957,21 @@ Each capability rejection identifies the affected field and the guarantee NInfer
+@@ -991,11 +991,21 @@ Each capability rejection identifies the affected field and the guarantee NInfer
  Semantically neutral fields do not make an otherwise executable request fail. All-zero
  `logit_bias`, `logprobs:false`, `verbosity:"medium"`, empty legacy tool controls,
  text-only `audio` configuration, and `prediction` are accepted without changing Engine execution.
@@ -44,7 +44,7 @@ index da62ddeed8d673093d5b99d24becdd647fe55303..97281929c4598f9bd52d58a4cff6253e
      std::string id;
      std::string model;
 diff --git a/src/serve/openai_chat_http.cpp b/src/serve/openai_chat_http.cpp
-index 7683ba6d0edeb108f85f26ba7983fe48b2072711..6557e321514bb42a57ef34c89fc12fb3fbda9c4a 100644
+index 5d95d20a3645fbf40f469308a10c04d00fc298af..0aecd771bdded5e67460f41191867e1a2d4549dd 100644
 --- a/src/serve/openai_chat_http.cpp
 +++ b/src/serve/openai_chat_http.cpp
 @@ -24,11 +24,13 @@ std::string sse_error_event(const ApiError& error) {
@@ -61,7 +61,7 @@ index 7683ba6d0edeb108f85f26ba7983fe48b2072711..6557e321514bb42a57ef34c89fc12fb3
          request.generation.ngram_session = resolve_ngram_session(req, body, options_);
          lease                            = lease_model(request.model, req);
          request.model                    = lease.model();
-@@ -52,7 +54,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
+@@ -53,7 +55,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
          prepared = service->prepare(request.generation,
                                      request.stream ? GenerationConsumerMode::Streaming
                                                     : GenerationConsumerMode::Aggregate,
