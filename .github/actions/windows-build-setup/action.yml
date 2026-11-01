@@ -37,6 +37,21 @@ runs:
         if ($LASTEXITCODE -ne 0) { throw 'NInfer preparation failed' }
         python scripts/prepare-backends.py --backend ninfer --check
         if ($LASTEXITCODE -ne 0) { throw 'NInfer preparation check failed' }
+    - name: Stamp the kvmem build identity
+      if: inputs.ninfer == 'true'
+      shell: pwsh
+      env:
+        ARCHS: ${{ inputs.archs }}
+      run: |
+        # NInfer logs `<VERSION>+<build id>`. Without NINFER_BUILD_ID it uses the pinned upstream
+        # revision, marked dirty by the uncommitted patch series, and its own VERSION. Name the
+        # kvmem commit, the prepared NInfer tree and the architectures, as kvmem's releases do.
+        $tree = (Get-Content backends/versions.json -Raw | ConvertFrom-Json).ninfer.patched_tree.Substring(0, 8)
+        $commit = (git rev-parse --short=7 HEAD).Trim()
+        $archs = $env:ARCHS -replace '[^0-9A-Za-z]+', '-'
+        "NINFER_BUILD_ID=kvmem-$commit-ninfer-$tree-sm$archs" >> $env:GITHUB_ENV
+        # Only cmake/GenerateBuildId.cmake reads VERSION; no compiled source changes.
+        Set-Content -NoNewline -Encoding ascii backends/ninfer/VERSION (Get-Content VERSION -Raw).Trim()
     - name: Install the official CUDA Toolkit
       shell: pwsh
       env:
