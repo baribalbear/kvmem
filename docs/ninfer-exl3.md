@@ -12,6 +12,35 @@ Download a published artifact, e.g. `qwen3_8_27b_exl3_4bpw.ninfer` from
 with the NInfer backend like any other `.ninfer`. Its non-EXL3 tensors (BF16 embedding and vision,
 Q4/Q5/Q6/Q8 proposal head and small matrices) already load on this tree.
 
+## Pruned (ASCII-condensed) vocabulary
+
+exllamav3 checkpoints, such as `turboderp/Qwen3.8-27B-exl3`, do not load: there is no importer, and
+exllamav3's codebook rounding and per-member input scales differ from this format. Instead, give the
+published EXL3 artifact the vocabulary of a vocab-pruned `.ninfer` of the same model (see
+[ninfer-pruned-vocab.md](ninfer-pruned-vocab.md)) with `scripts/prune-ninfer-vocab.py`:
+
+```bash
+python scripts/prune-ninfer-vocab.py --source qwen3_8_27b_exl3_4bpw.ninfer \
+  --donor qwen3_8_27b_ascii_iq4xs.ninfer --out qwen3_8_27b_exl3_4bpw_ascii.ninfer
+```
+
+It copies every layer, the MTP layer and Vision byte for byte, with no calibration or GPU. Only the
+vocabulary changes:
+
+* The BF16 token embedding keeps the source's rows of the donor's tokens, in the donor's order.
+* The output head is the donor's. An EXL3 head cannot drop rows: `trellis_t16_v1` needs both
+  dimensions divisible by 128, and the output rotation mixes 128-row blocks.
+* `tokenizer.json`, `tokenizer_config.json`, `generation_config.json` and `vocab_size` come from
+  the donor. `--chat-template donor` also takes the donor's template.
+* The indexed proposal head is dropped. Its fused top-k kernel takes exactly 131072 rows, more
+  than a pruned vocabulary has, so MTP drafts through the output head, as in the donor.
+
+For the 4.0 bpw artifact and troed's 129006-row vocabulary, the output is 13.8 GiB instead of
+15.7 GiB. The head keeps the donor's format and quality, not the source's 6 bpw EXL3.
+
+`tests/test_prune_ninfer_vocab.py` checks the tool on synthetic artifacts. Its planning was also
+checked against the published 4.0 bpw directory. The output has not yet been loaded on a GPU.
+
 ## What the patch adds
 
 | Area | Files |
