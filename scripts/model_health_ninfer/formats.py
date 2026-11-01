@@ -62,8 +62,15 @@ class GgufFormat:
     block_bytes: int
 
 
+@dataclass(frozen=True, slots=True)
+class Exl3Format:
+    """Mul1 trellis codes whose per-tensor bitrate is stored with the tensor object."""
+
+    name: str
+
+
 NumericFormat: TypeAlias = (
-    DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat | GgufFormat
+    DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat | GgufFormat | Exl3Format
 )
 
 
@@ -85,6 +92,7 @@ T5_G128_FP16 = QuantFormat("t5_g128_fp16", 2, 128, -1, 1)
 NVFP4 = Nvfp4Format("nvfp4", 16)
 FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16")
 FP8_E4M3FN_ROW_FP16 = Fp8RowFormat("fp8_e4m3fn_row_fp16", "fp16")
+EXL3_MUL1 = Exl3Format("exl3_mul1")
 
 # ggml block types (ggml-common.h), kept byte for byte.
 GGUF_Q2_K = GgufFormat("gguf_q2_k", 10, 256, 84)
@@ -144,6 +152,7 @@ GGUF_FORMATS = MappingProxyType(
         )
     }
 )
+EXL3_FORMATS = MappingProxyType({EXL3_MUL1.name: EXL3_MUL1})
 GGUF_FORMATS_BY_TYPE = MappingProxyType(
     {item.ggml_type: item for item in GGUF_FORMATS.values()}
 )
@@ -154,6 +163,7 @@ NUMERIC_FORMATS = MappingProxyType(
         **NVFP4_FORMATS,
         **FP8_ROW_FORMATS,
         **GGUF_FORMATS,
+        **EXL3_FORMATS,
     }
 )
 
@@ -238,11 +248,13 @@ __all__ = [
     "NVFP4",
     "FP8_E4M3FN_ROW_BF16",
     "FP8_E4M3FN_ROW_FP16",
+    "EXL3_MUL1",
     "DIRECT_FORMATS",
     "QUANT_FORMATS",
     "NVFP4_FORMATS",
     "FP8_ROW_FORMATS",
     "GGUF_FORMATS",
+    "EXL3_FORMATS",
     "GGUF_FORMATS_BY_TYPE",
     "NUMERIC_FORMATS",
     "DirectFormat",
@@ -250,6 +262,7 @@ __all__ = [
     "Nvfp4Format",
     "Fp8RowFormat",
     "GgufFormat",
+    "Exl3Format",
     "NumericFormat",
     "get_format",
     "decode_e2m1_word",

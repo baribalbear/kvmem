@@ -1,0 +1,236 @@
+name: KVMem Windows release
+
+# Builds the llama.cpp and NInfer workers for Windows x64 with CUDA and packages them with the
+# offline console and chat UI through scripts/windows/package-backends.ps1, as a kvmem release ZIP.
+# NInfer compiles in object shards that fill a compiler cache, the way NInfer's own release does.
+# The runners have no GPU, so this proves the build, dependency loading and the launch contract;
+# it does not run inference or the GPU tests. PolyStrata is not included.
+#
+# Manual only: a run takes over an hour, and upstream syncs change backends/ often.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cuda:
+        description: CUDA Toolkit version
+        default: '13.4.3'
+      archs:
+        description: CMAKE_CUDA_ARCHITECTURES (default 120a, RTX 50 series; also 70, 75, 80, 86, 89)
+        default: '120a'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_VERSION: ${{ inputs.cuda || '13.4.3' }}
+  CUDA_ARCHS: ${{ inputs.archs || '120a' }}
+  # CUDA 13 installer packages, as in NInfer's native release (CUDA 12 has no crt/nvvm entries).
+  CUDA_PACKAGES: '["nvcc", "crt", "nvvm", "cudart", "cublas", "cublas_dev", "nvtx", "thrust", "cuda_profiler_api", "cuobjdump", "nvprune"]'
+  SHARDS: 4
+  CCACHE_DIR: ${{ github.workspace }}/.cache/ninfer-objects
+  CCACHE_MAXSIZE: 8Gi
+  CCACHE_COMPILERCHECK: content
+  CCACHE_DEPEND: 'true'
+  CCACHE_COMPRESSLEVEL: '5'
+  # The offline console runtime. SHA-256 values were computed from the official files: the Python
+  # archive matches python.org's published MD5, the psutil wheel PyPI's published SHA-256.
+  PYTHON_URL: https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip
+  PYTHON_SHA256: 4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3
+  PSUTIL_URL: https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl
+  PSUTIL_SHA256: eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988
+
+jobs:
+  # Builds FFmpeg and curl once per vcpkg baseline, so the shards restore them instead.
+  dependencies:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - id: setup
+        uses: ./.github/actions/windows-build-setup
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          archs: ${{ env.CUDA_ARCHS }}
+          packages: ${{ env.CUDA_PACKAGES }}
+      - if: steps.setup.outputs.vcpkg-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: ${{ steps.setup.outputs.vcpkg-key }}
+      - name: Preserve configure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ninfer-windows-configure-logs
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            backends/ninfer/build-release/CMakeFiles/CMakeConfigureLog.yaml
+            backends/ninfer/build-release/vcpkg-manifest-install.log
+            .vcpkg/buildtrees/**/*.log
+
+  ninfer-objects:
+    needs: dependencies
+    runs-on: windows-2022
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/windows-build-setup
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          archs: ${{ env.CUDA_ARCHS }}
+          packages: ${{ env.CUDA_PACKAGES }}
+      - name: Compile object shard ${{ matrix.shard }}
+        working-directory: backends/ninfer
+        run: |
+          ccache --zero-stats
+          python .github/scripts/build-object-shard.py --build build-release --shard ${{ matrix.shard }} --count $env:SHARDS --jobs 2
+          if ($LASTEXITCODE -ne 0) { throw 'Object shard compilation failed' }
+          ccache --show-stats
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ninfer-objects-${{ matrix.shard }}
+          path: .cache/ninfer-objects
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
+  llamacpp:
+    runs-on: windows-2022
+    timeout-minutes: 340
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/windows-build-setup
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          archs: ${{ env.CUDA_ARCHS }}
+          packages: ${{ env.CUDA_PACKAGES }}
+          ninfer: 'false'
+      - name: Build llama-kvmem-server
+        run: |
+          # llama.cpp takes real architectures; 120a becomes 120a-real.
+          $archs = ($env:CUDA_ARCHS -split ';' | ForEach-Object { if ($_ -match '-(real|virtual)$') { $_ } else { "$_-real" } }) -join ';'
+          # ggml-cuda imports the driver for its memory pools. Delay-loading it lets the packager start
+          # the worker on these GPU-less runners; the driver still loads on first CUDA use.
+          ./scripts/windows/build.ps1 -BuildOnly -Jobs 3 -CudaArchitectures $archs `
+            -CMakeArgs @('-DCMAKE_EXE_LINKER_FLAGS=/DELAYLOAD:nvcuda.dll delayimp.lib')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llamacpp-worker
+          path: |
+            build-win/bin/llama-kvmem-server.exe
+            build-win/bin/*.dll
+          if-no-files-found: error
+          retention-days: 3
+
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # The lightweight unified chat, which the offline console requires.
+      - run: python3 scripts/build-webui.py --output build/share/kvmem/ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chat-ui
+          path: build/share/kvmem/ui
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
+  package:
+    needs: [ninfer-objects, llamacpp, ui]
+    runs-on: windows-2022
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/windows-build-setup
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          archs: ${{ env.CUDA_ARCHS }}
+          packages: ${{ env.CUDA_PACKAGES }}
+      - name: Restore every object shard
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ninfer-objects-*
+          path: .cache/ninfer-objects
+          merge-multiple: true
+      - name: Link ninfer-serve
+        working-directory: backends/ninfer
+        run: |
+          ccache --zero-stats
+          cmake --build build-release -j 2 --target ninfer-serve
+          if ($LASTEXITCODE -ne 0) { throw 'NInfer worker build failed' }
+          ccache --show-stats
+      - uses: actions/download-artifact@v4
+        with:
+          name: llamacpp-worker
+          path: workers-in/llamacpp
+      - uses: actions/download-artifact@v4
+        with:
+          name: chat-ui
+          path: workers-in/ui
+      - name: Package the release
+        run: |
+          # The license and vendor notices of the llama.cpp source the worker was built from.
+          python scripts/prepare-backends.py --backend llamacpp
+          if ($LASTEXITCODE -ne 0) { throw 'llama.cpp preparation failed' }
+          python backends/ninfer/.github/scripts/fetch-cuda-license.py --version $env:CUDA_VERSION --output "$env:CUDA_PATH/EULA.txt"
+          if ($LASTEXITCODE -ne 0) { throw 'CUDA licence extraction failed' }
+          $downloads = Join-Path $env:RUNNER_TEMP 'downloads'
+          $null = New-Item -ItemType Directory -Path $downloads -Force
+          $python = Join-Path $downloads ([IO.Path]::GetFileName($env:PYTHON_URL))
+          $psutil = Join-Path $downloads ([IO.Path]::GetFileName($env:PSUTIL_URL))
+          Invoke-WebRequest -Uri $env:PYTHON_URL -OutFile $python
+          Invoke-WebRequest -Uri $env:PSUTIL_URL -OutFile $psutil
+          $ninfer = @(Get-ChildItem backends/ninfer/build-release -Recurse -File -Filter ninfer-serve.exe)
+          if ($ninfer.Count -ne 1) { throw "Expected one ninfer-serve.exe, found $($ninfer.Count)" }
+          $version = (Get-Content VERSION -Raw).Trim()
+          $archs = $env:CUDA_ARCHS -replace '[^0-9A-Za-z]+', '-'
+          $name = "KVMem-$version-windows-x64-cuda$env:CUDA_VERSION-sm$archs"
+          "PACKAGE_NAME=$name" >> $env:GITHUB_ENV
+          ./scripts/windows/package-backends.ps1 -Backend all `
+            -LlamaWorker workers-in/llamacpp/llama-kvmem-server.exe `
+            -NinferWorker $ninfer[0].FullName -NinferSource backends/ninfer `
+            -VcpkgInstalled backends/ninfer/build-release/vcpkg_installed `
+            -LlamaUiDir workers-in/ui `
+            -PythonArchive $python -PythonSha256 $env:PYTHON_SHA256 `
+            -PsutilWheel $psutil -PsutilSha256 $env:PSUTIL_SHA256 `
+            -OutputDir "dist/$name"
+          # One package root, as scripts/windows/package-unified.py expects of release ZIPs.
+          7z a -tzip -mx=5 "dist/$name.zip" "./dist/$name"
+          if ($LASTEXITCODE -ne 0) { throw 'Archiving failed' }
+          $hash = (Get-FileHash "dist/$name.zip").Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Set-Content -NoNewline -Encoding ascii "dist/$name.zip.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

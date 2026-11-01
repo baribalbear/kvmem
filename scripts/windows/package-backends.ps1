@@ -91,7 +91,8 @@ foreach ($entry in $workerEntries) {
             if ($line -notmatch '^\s+([\w.+-]+\.dll)\s*$') { continue }
             $name = $Matches[1]
             if ($seen.ContainsKey($name)) { continue }; $seen[$name] = $true
-            if ($name -match '^(api-ms-|ext-ms-)' -or
+            # nvcuda.dll is the NVIDIA driver, never redistributed; build machines may have no GPU.
+            if ($name -ieq 'nvcuda.dll' -or $name -match '^(api-ms-|ext-ms-)' -or
                 (Test-Path -LiteralPath (Join-Path $env:SystemRoot "System32/$name"))) { continue }
             $found = $null
             foreach ($dir in $search) {

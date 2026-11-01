@@ -1,0 +1,141 @@
+name: Prepare a Windows KVMem build
+description: >-
+  Install the CUDA Toolkit and import Visual Studio 2022. For the NInfer worker, also apply the
+  pinned NInfer patch series, install the pinned ccache and configure backends/ninfer/build-release
+  against vcpkg's FFmpeg and curl.
+inputs:
+  cuda:
+    description: Full CUDA Toolkit version, e.g. 13.4.3
+    required: true
+  archs:
+    description: CMAKE_CUDA_ARCHITECTURES
+    required: true
+  packages:
+    description: JSON list of CUDA network-installer packages
+    required: true
+  ninfer:
+    description: Prepare and configure the NInfer worker build
+    default: 'true'
+outputs:
+  vcpkg-key:
+    description: Cache key of the vcpkg binary archives
+    value: ${{ steps.vcpkg.outputs.key }}
+  vcpkg-hit:
+    description: Whether the vcpkg archives were restored exactly
+    value: ${{ steps.vcpkg-cache.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Prepare the pinned NInfer patch series
+      if: inputs.ninfer == 'true'
+      shell: pwsh
+      run: |
+        python scripts/prepare-backends.py --backend ninfer
+        if ($LASTEXITCODE -ne 0) { throw 'NInfer preparation failed' }
+        python scripts/prepare-backends.py --backend ninfer --check
+        if ($LASTEXITCODE -ne 0) { throw 'NInfer preparation check failed' }
+    - name: Stamp the kvmem build identity
+      if: inputs.ninfer == 'true'
+      shell: pwsh
+      env:
+        ARCHS: ${{ inputs.archs }}
+      run: |
+        # NInfer logs `<VERSION>+<build id>`. Without NINFER_BUILD_ID it uses the pinned upstream
+        # revision, marked dirty by the uncommitted patch series, and its own VERSION. Name the
+        # kvmem commit, the prepared NInfer tree and the architectures, as kvmem's releases do.
+        $tree = (Get-Content backends/versions.json -Raw | ConvertFrom-Json).ninfer.patched_tree.Substring(0, 8)
+        $commit = (git rev-parse --short=7 HEAD).Trim()
+        $archs = $env:ARCHS -replace '[^0-9A-Za-z]+', '-'
+        "NINFER_BUILD_ID=kvmem-$commit-ninfer-$tree-sm$archs" >> $env:GITHUB_ENV
+        # Only cmake/GenerateBuildId.cmake reads VERSION; no compiled source changes.
+        Set-Content -NoNewline -Encoding ascii backends/ninfer/VERSION (Get-Content VERSION -Raw).Trim()
+    - name: Install the official CUDA Toolkit
+      shell: pwsh
+      env:
+        CUDA_VERSION: ${{ inputs.cuda }}
+        CUDA_PACKAGES: ${{ inputs.packages }}
+      run: |
+        $short = ($env:CUDA_VERSION -split '\.')[0..1] -join '.'
+        $installer = Join-Path $env:RUNNER_TEMP 'cuda.exe'
+        $url = "https://developer.download.nvidia.com/compute/cuda/$env:CUDA_VERSION/network_installers/cuda_$($env:CUDA_VERSION)_windows_x86_64_network.exe"
+        Invoke-WebRequest -Uri $url -OutFile $installer
+        $packages = ($env:CUDA_PACKAGES | ConvertFrom-Json) | ForEach-Object { "${_}_$short" }
+        $process = Start-Process $installer -ArgumentList (@('-s') + $packages) -Wait -PassThru
+        if ($process.ExitCode -ne 0) { throw "CUDA installer failed ($($process.ExitCode))" }
+        $cuda = "${env:ProgramFiles}\NVIDIA GPU Computing Toolkit\CUDA\v$short"
+        foreach ($file in 'bin\nvcc.exe', 'bin\cuobjdump.exe', 'bin\nvprune.exe', 'include\cuda_runtime.h', 'lib\x64\cublas.lib') {
+          if (-not (Test-Path (Join-Path $cuda $file))) { throw "Missing CUDA component: $file" }
+        }
+        "CUDA_PATH=$cuda" >> $env:GITHUB_ENV
+        "$cuda\bin" >> $env:GITHUB_PATH
+    - name: Import Visual Studio 2022 environment
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vs = & $vswhere -latest -products * -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw 'Visual Studio 2022 x64 tools are missing' }
+        $before = @{}
+        Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+        $vars = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set"
+        if ($LASTEXITCODE -ne 0) { throw 'vcvars64 failed' }
+        $vars | ForEach-Object {
+          if ($_ -match '^([^=]+)=(.*)$' -and $Matches[1] -notin 'CUDA_PATH', 'VCPKG_ROOT') {
+            if ($before[$Matches[1]] -cne $Matches[2]) { "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV }
+          }
+        }
+    - name: Install the pinned ccache
+      if: inputs.ninfer == 'true'
+      shell: pwsh
+      working-directory: backends/ninfer
+      run: |
+        python .github/scripts/install-compiler-cache.py
+        if ($LASTEXITCODE -ne 0) { throw 'ccache installation failed' }
+    - name: Resolve the pinned vcpkg revision
+      if: inputs.ninfer == 'true'
+      id: vcpkg
+      shell: pwsh
+      run: |
+        $baseline = (Get-Content backends/ninfer/vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+        "baseline=$baseline" >> $env:GITHUB_OUTPUT
+        "key=ninfer-vcpkg-$baseline-${{ hashFiles('backends/ninfer/vcpkg.json') }}-${{ inputs.cuda }}" >> $env:GITHUB_OUTPUT
+    - if: inputs.ninfer == 'true'
+      uses: actions/checkout@v4
+      with:
+        repository: microsoft/vcpkg
+        ref: ${{ steps.vcpkg.outputs.baseline }}
+        path: .vcpkg
+    - if: inputs.ninfer == 'true'
+      id: vcpkg-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/AppData/Local/vcpkg/archives
+        key: ${{ steps.vcpkg.outputs.key }}
+    - name: Configure the NInfer worker with vcpkg's FFmpeg and curl
+      if: inputs.ninfer == 'true'
+      shell: pwsh
+      working-directory: backends/ninfer
+      env:
+        ARCHS: ${{ inputs.archs }}
+      run: |
+        $vcpkg = Join-Path $env:GITHUB_WORKSPACE '.vcpkg'
+        & "$vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+        if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+        # kvmem's worker options (scripts/windows/build-backends.ps1): a standalone ninfer-serve.exe
+        # with its DLLs beside it, which scripts/windows/package-backends.ps1 packages. The object
+        # shards also compile ninfer and ninfer_bench, so benchmarks stay on.
+        # A one-element array from an if statement unwraps to a string, so build the list explicitly.
+        $native = @()
+        if ($env:ARCHS -eq '120a') { $native += '-DNINFER_SM120_NATIVE=ON' }
+        cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release `
+          "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+          -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_HOST_TRIPLET=x64-windows `
+          "-DCMAKE_CUDA_COMPILER=$env:CUDA_PATH/bin/nvcc.exe" "-DCUDAToolkit_ROOT=$env:CUDA_PATH" `
+          "-DCMAKE_CUDA_ARCHITECTURES=$env:ARCHS" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+          -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache `
+          -DNINFER_NVCC_SPLIT_COMPILE=2 -DNINFER_CUDA_PRUNE_PTX=ON `
+          -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=OFF -DNINFER_BUILD_BENCHMARKS=ON $native
+        if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
