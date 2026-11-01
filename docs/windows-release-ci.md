@@ -5,9 +5,10 @@ NInfer workers with their runtime DLLs, the offline console (embeddable Python 3
 and the unified chat UI, packaged by `scripts/windows/package-backends.ps1 -Backend all`.
 PolyStrata is not included.
 
-It runs on pushes that change `VERSION`, `backends/`, `scripts/windows/` or the workflow, or
-manually with a CUDA version and architecture list. The defaults are CUDA 13.4.3 and `120a`
-(RTX 50 series). A `120a` NInfer build uses `NINFER_SM120_NATIVE=ON`, as `build-backends.ps1` does.
+It runs only when started manually: **Actions → KVMem Windows release → Run workflow**, with a
+branch, a CUDA version and an architecture list. The defaults are CUDA 13.4.3 and `120a` (RTX 50
+series). A `120a` NInfer build uses `NINFER_SM120_NATIVE=ON`, as `build-backends.ps1` does. The
+NInfer startup log names the build as `<VERSION>+kvmem-<commit>-ninfer-<patched tree>-sm<archs>`.
 
 | Job | Work |
 |---|---|

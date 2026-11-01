@@ -5,6 +5,8 @@ name: KVMem Windows release
 # NInfer compiles in object shards that fill a compiler cache, the way NInfer's own release does.
 # The runners have no GPU, so this proves the build, dependency loading and the launch contract;
 # it does not run inference or the GPU tests. PolyStrata is not included.
+#
+# Manual only: a run takes over an hour, and upstream syncs change backends/ often.
 
 on:
   workflow_dispatch:
@@ -15,13 +17,6 @@ on:
       archs:
         description: CMAKE_CUDA_ARCHITECTURES (default 120a, RTX 50 series; also 70, 75, 80, 86, 89)
         default: '120a'
-  push:
-    paths:
-      - VERSION
-      - backends/**
-      - scripts/windows/**
-      - .github/workflows/windows-release.yml
-      - .github/actions/windows-build-setup/**
 
 permissions:
   contents: read
