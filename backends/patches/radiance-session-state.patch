@@ -1,0 +1,178 @@
+--- a/core/runtime/step_observer.h
++++ b/core/runtime/step_observer.h
+@@ -53,6 +53,10 @@
+     // After issue/collection, before Scheduler::commit can free terminal KV.
+     // Borrowed plan/result are valid only during this call; no queued next step.
+     virtual int collect(const StepPlan&, const Scheduler::StepResult&) noexcept = 0;
++    // Successful terminal commit, after output is bounded and before native
++    // pages/state are freed. The stream is drained; no next plan may be issued.
++    // Cancellation/failure never publishes a reusable conversation snapshot.
++    virtual int finish(const StepEntry&, const Request&) noexcept { return RAD_OK; }
+     virtual void retire(uint64_t) noexcept {}
+     // Called while streams and pools still exist, also after partial startup.
+     virtual void shutdown() noexcept = 0;
+--- a/core/sched/scheduler.h
++++ b/core/sched/scheduler.h
+@@ -23,6 +23,7 @@
+ #include "metrics.h"
+ 
+ #include <chrono>
++#include <functional>
+ #include <memory>
+ #include <mutex>
+ #include <unordered_map>
+@@ -350,7 +351,8 @@
+     bool            next_open() const { return next_open_; }
+     /* Fold the step's outcome back in: append tokens, roll back rejected speculation, retire
+      * finished requests, feed the draft controller. */
+-    int             commit(const StepResult& r);
++    using FinishObserver = std::function<int(const StepEntry&, const Request&)>;
++    int             commit(const StepResult& r, const FinishObserver& finish = {});
+     // Model-only prefill probe: emit nothing and schedule its dependent suffix
+     // again. The caller drained kernels and restored matching native KV/state.
+     int             finish_probe(uint64_t seq, int64_t replay_from);
+--- a/core/sched/scheduler.cpp
++++ b/core/sched/scheduler.cpp
+@@ -1807,7 +1807,7 @@
+     return RAD_OK;
+ }
+ 
+-int Scheduler::commit(const StepResult& res) {
++int Scheduler::commit(const StepResult& res, const FinishObserver& finish) {
+     std::lock_guard<std::mutex> lk(mu_);
+     if (!step_open_) return RAD_E_STATE;
+     if (res.n_seq != (int)plan_.e.size()) {
+@@ -1996,10 +1996,23 @@
+          * them. Its commit finds the request no longer running and gives them back. */
+         const bool carried = next_open_ && s.entry_next >= 0;
+ 
++        // This seam is synchronous and successful-terminal only. In particular,
++        // HTTP cancellation must not run device work from its own thread.
++        int finish_status = RAD_OK;
++        const bool terminal = eos || (r.max_tokens > 0 && (int64_t)r.output.size() >= r.max_tokens)
++                                  || (ctx_limit_ > 0 && s.seq_len() >= ctx_limit_);
++        if (finish && terminal && !carried && !overflowed && !lp_failed && !server::sink_cancelled(r.sink))
++            finish_status = finish(e, r);
++
+         /* Finish. The emit above already stops at max_tokens, so `output` cannot run past it --
+          * the resize below is the belt to that braces, kept because a >= test that can only ever
+          * be == is the kind of thing a later change makes wrong quietly. */
+-        if (overflowed) {
++        if (finish_status < 0) {
++            close_request(s, ReqState::Failed, "state_snapshot", carried, true, finish_status,
++                          "the accepted state could not be retained safely");
++            ++m_.failed;
++            completed_.push_back(r.id);
++        } else if (overflowed) {
+             /* The sink has already failed the request -- a consumer that far behind is gone --
+              * so all that is left is to stop generating for it and give its blocks back. */
+             close_request(s, ReqState::Failed, "sink_overflow", carried);
+--- a/core/engine.cpp
++++ b/core/engine.cpp
+@@ -913,11 +913,27 @@
+             res.lp        = so.lp.data();
+             res.first_row = so.first_row.data();
+         }
++        std::vector<int32_t> observer_accepted;
+         if (observer_) {
++            // A terminal verify may have accepted more drafts than the caller's
++            // output budget can emit. Do not publish KV/statistics beyond that
++            // caller-visible history. The emitted prefix is unchanged: commit
++            // already checks the same budget for each emitted token.
++            observer_accepted = so.accepted;
++            res.n_accepted = observer_accepted.data();
++            for (size_t i = 0; i < plan.e.size(); ++i) {
++                const auto& e = plan.e[i];
++                if (!e.is_prefill && e.req && e.req->max_tokens > 0) {
++                    const int64_t room = std::max<int64_t>(0, e.req->max_tokens - (int64_t)e.req->output.size());
++                    observer_accepted[i] = (int32_t)std::min<int64_t>(observer_accepted[i], room);
++                }
++            }
+             st = sched_.locked([&] { return observer_->collect(plan, res); });
+             if (st < 0) return fail_loop(st);
+         }
+-        st = sched_.commit(res);
++        st = observer_ ? sched_.commit(res, [this](const StepEntry& e, const Request& r) {
++            return observer_->finish(e, r);
++        }) : sched_.commit(res);
+         if (t_on) phase_mark(PH_COMMIT);
+         if (st < 0) { RAD_ERR("commit: %s", rad_strerror(st)); return fail_loop(st); }
+ 
+--- a/tests/sched_test.cpp
++++ b/tests/sched_test.cpp
+@@ -3382,4 +3382,25 @@
+     CHECK_EQ(sink.n_draft_accepted(), accepted);
+ }
+ 
++TEST(terminal_observer_sees_committed_output_before_native_free) {
++    for (bool cancel : {false, true}) {
++        Fixture f; f.build(); CHECK_OK(f.start());
++        const auto id=f.submit(8,1);
++        CHECK(f.sch.step()!=nullptr);
++        int32_t token=5, accepted=0; uint8_t eos=0;
++        Scheduler::StepResult result{}; result.n_seq=1;
++        result.token=&token; result.n_accepted=&accepted; result.eos=&eos;
++        if (cancel) CHECK_OK(f.sch.cancel(id));
++        int calls=0;
++        CHECK_OK(f.sch.commit(result,[&](const StepEntry& e,const Request& r) {
++            ++calls;
++            CHECK_EQ(e.seq,id); CHECK_EQ(r.output.size(),size_t(1));
++            CHECK_EQ(r.n_computed,int64_t(8)); CHECK(f.kv.has_sequence(id));
++            return RAD_OK;
++        }));
++        CHECK_EQ(calls,cancel ? 0 : 1);
++        CHECK(!f.kv.has_sequence(id));
++    }
++}
++
+ RAD_TEST_MAIN()
+--- a/libr4d/r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip
++++ b/libr4d/r4d_gdn_recurrent_update_k128_v128_bf16_fp32state.hip
+@@ -321,7 +321,7 @@
+   const int hk = hv / (H / Hg);
+   /* The head's two constants, read here so their latency runs under the prologue's loads rather
+    * than behind the barriers in front of the token loop. */
+-  const float a_log_h = A_log[hv], dtb = dt_bias[hv];
++  const float a_log_h = empty ? 0.0f : A_log[hv], dtb = empty ? 0.0f : dt_bias[hv];
+ 
+   // ---- CV: the convolution's inputs, issued first so the history and this step's tokens are in
+   // flight while the anchor replay below runs; they are consumed after it. Thread `tid` owns one
+@@ -987,6 +987,38 @@
+   return (int)hipGetLastError();
+ }
+ 
++// Optional accepted-state export, versioned independently of kernel dispatch.
++// state = two contiguous [heads,128,128] slots, first anchor then factors.
++// Caller has fenced its producer and owns the clone exclusively. Synchronous;
++// leaves the live sequence and the process's anchor-mode setting untouched.
++extern "C" int rad_gdn_materialize_v1(void* state, int heads, int fp16, int accepted) {
++  if (!state || heads <= 0 || heads > 65535 || (fp16 != 0 && fp16 != 1) ||
++      accepted < 0 || accepted > RU_TMAX || (int64_t)accepted * RU_FSTR > RU_MARK_OFF)
++    return -1;
++  hipStream_t stream = nullptr;
++  int* meta = nullptr;
++  int status = 0;
++  const int host[9] = {0, 0, 0, 0, 0, 1, 1, 1, accepted};
++  if (hipStreamCreateWithFlags(&stream, hipStreamNonBlocking) != hipSuccess) return -2;
++  if (hipMalloc((void**)&meta, sizeof(host)) != hipSuccess) status = -3;
++  if (!status && hipMemcpyAsync(meta, host, sizeof(host), hipMemcpyHostToDevice, stream) != hipSuccess)
++    status = -4;
++  if (!status) {
++    const int64_t sh = RU_K * RU_V, ss = (int64_t)heads * sh;
++#define MATERIALIZE(SDT) hipLaunchKernelGGL((r4d_gdn_recurrent_update_kernel<0,0,1,0,1,0,SDT>), \
++      dim3(1,heads,1), dim3(RU_V*2), 0, stream, nullptr, nullptr, nullptr, nullptr, nullptr, 0, \
++      nullptr, nullptr, (ru_state<SDT>::T*)state, ss, sh, nullptr, nullptr, nullptr, 0, 0, \
++      meta, meta+2, 6, meta+8, nullptr, 0, nullptr, 0.0f, 0, heads, heads, 1.0f, 20.0f, RuConv{})
++    if (fp16) { MATERIALIZE(1); } else { MATERIALIZE(0); }
++#undef MATERIALIZE
++    if (hipGetLastError() != hipSuccess) status = -5;
++  }
++  if (hipStreamSynchronize(stream) != hipSuccess) status = -6;
++  if (meta && hipFree(meta) != hipSuccess) status = -7;
++  if (hipStreamDestroy(stream) != hipSuccess) status = -8;
++  return status;
++}
++
+ extern "C" int r4d_gdn_recurrent_update_k128_v128_bf16_fp32state(
+     const void* q, const void* k, const void* v, const void* a, const void* b,
+     int64_t ab_stride, int ab_is_bf16, const void* A_log, const void* dt_bias, void* state,

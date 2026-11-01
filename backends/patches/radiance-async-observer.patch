@@ -1,0 +1,280 @@
+--- a/core/runtime/step_observer.h
++++ b/core/runtime/step_observer.h
+@@ -25,6 +25,10 @@
+     // Expected capacity refusals are per request. The engine drains this list
+     // outside the scheduler lock before commit, preserving other batch entries.
+     virtual uint64_t take_capacity_refusal() noexcept { return 0; }
++    // Engine-thread polling only. Pending host I/O owns the sequence until it
++    // publishes or aborts; HTTP cancellation must not free its pages or slot.
++    virtual int poll_pending() noexcept { return RAD_OK; }
++    virtual bool holds_sequence(uint64_t) const noexcept { return false; }
+     // Isolated host-storage/capacity failures; device faults still stop the engine.
+     virtual uint64_t take_request_refusal(int* status) noexcept {
+         *status=RAD_E_FULL;return take_capacity_refusal();
+@@ -48,7 +52,9 @@
+     // Before any kernels for a fresh request, after new state slots are cleared.
+     // A controller may restore an exact retained prefix and return its frontier;
+     // the engine then retires this UNISSUED plan and rebuilds it. A refusal ends
+-    // only this request. Ordinary observers leave both outputs unchanged.
++    // only this request. A zero frontier plus holds_sequence means its CPU
++    // prefix read is pending: discard this unissued plan, then retry resume
++    // when the hold clears. Ordinary observers leave both outputs unchanged.
+     virtual int resume(const StepPlan&, int64_t* frontier, std::string* refusal) noexcept {
+         *frontier = -1; refusal->clear(); return RAD_OK;
+     }
+--- a/core/sched/scheduler.h
++++ b/core/sched/scheduler.h
+@@ -48,6 +48,7 @@
+      * step in flight can still name it and never longer. */
+     int32_t  card = -1;
+     bool     running = false;
++    bool     observer_hold = false;
+ 
+     /* WALL CLOCK, for the live request table. `arrival` above is a monotonic COUNTER -- it
+      * orders the queue and cannot say how long anything has been in it. */
+@@ -211,6 +212,7 @@
+     int fail_capacity(uint64_t id);
+     int fail_observer(uint64_t id,int status);
+     int reject_unsampled(uint64_t id,int status=RAD_E_FULL);
++    int defer_resume(uint64_t id);
+     using RequestObserver=std::function<void(const Request&,int64_t,int64_t)>;
+     void set_request_observer(RequestObserver fn) { request_observer_=std::move(fn); }
+     Request* find(uint64_t id);
+@@ -242,6 +244,14 @@
+     template <class Fn> auto locked(Fn&& fn) {
+         std::lock_guard<std::mutex> lk(mu_);
+         return fn();
++    }
++    // Publish observer ownership before releasing the same lock that guards
++    // its device operations. Cancellation/reap cannot enter between these two.
++    template<class Fn,class Holds> int observing(Fn&& fn,Holds&& holds) {
++        std::lock_guard<std::mutex> lk(mu_);
++        const int status=fn();
++        for(auto& up:reqs_)if(up && up->req)up->observer_hold=holds(up->req->id);
++        return status;
+     }
+     /* The same lock, held for the rest of the caller's scope. */
+     [[nodiscard]] std::unique_lock<std::mutex> hold() { return std::unique_lock<std::mutex>(mu_); }
+--- a/core/sched/scheduler.cpp
++++ b/core/sched/scheduler.cpp
+@@ -377,6 +377,7 @@
+ 
+ void Scheduler::close_request(SchedReq& s, ReqState st, const char* reason, bool defer_free,
+                               bool publish, int status, const char* why) {
++    defer_free=defer_free || s.observer_hold;
+     /* PUBLISH BEFORE FREEING. This is the only moment the sequence's whole prefix is both
+      * computed and still owned, and it is what makes the cache a cache rather than a permanently
+      * empty lookup: insert() takes its own KV references, so the blocks survive the free below.
+@@ -548,7 +549,7 @@
+         if (!up) continue;
+         SchedReq& s = *up;
+         if (!s.req || (!s.reap_pending && !s.pending_free)) continue;
+-        if (in_step(s)) continue;
++        if (in_step(s) || s.observer_hold) continue;
+         if (block_holds(s.req->id)) continue;
+         if (s.reap_pending) { release_locked(s); continue; }
+         /* A free deferred on a drafter snapshot, for a request nobody has reaped yet. The Request
+@@ -620,7 +621,7 @@
+      *     sequence's drafts to another.
+      *
+      * Both are the same one-step window `pending_free` covers, and both close the same way. */
+-    if (in_step(s) || block_holds(id)) {
++    if (in_step(s) || block_holds(id) || s.observer_hold) {
+         if (!s.reap_pending) ++n_deferred_;
+         s.reap_pending = true;
+         return RAD_OK;
+@@ -1188,7 +1189,7 @@
+     bool have_decode=false, have_prefill=!waiting_.empty() && !free_cards_.empty() &&
+                                          (int64_t)running_.size()<cfg_.max_seqs;
+     if (serial_prefill_) for (int32_t slot:running_) {
+-        const auto& s=*reqs_[(size_t)slot];const auto& r=*s.req;
++        const auto& s=*reqs_[(size_t)slot];if(s.observer_hold)continue;const auto& r=*s.req;
+         const bool pf=r.n_computed<(int64_t)r.prompt.size() || r.n_computed+1<s.seq_len();
+         have_prefill=have_prefill || pf;have_decode=have_decode || !pf;
+     }
+@@ -1204,6 +1205,7 @@
+         int32_t slot = running_[i];
+         SchedReq& s = *reqs_[(size_t)slot];
+         Request& r = *s.req;
++        if(s.observer_hold){++i;continue;}
+ 
+         const int64_t target = s.seq_len();
+         const bool prefill = (r.n_computed < (int64_t)r.prompt.size()) ||
+@@ -1301,9 +1303,13 @@
+                 failed = true;
+                 break;
+             }
++            // A pending transfer still owns the lower-priority request's
++            // physical pages. Retry after it completes; never preempt its I/O.
++            if(reqs_[(size_t)running_.back()]->observer_hold){budget=0;break;}
+             preempt_back();
+             preempted_here = true;
+         }
++        if(!budget)break;
+         if (failed) continue;   /* close_request removed it from running_; i now indexes the next */
+ 
+         StepEntry e;
+@@ -1799,6 +1805,15 @@
+ }
+ 
+ /* ------------------------------------------------------------------ commit */
++int Scheduler::defer_resume(uint64_t seq) {
++    std::lock_guard<std::mutex> lk(mu_);
++    if(!step_open_ || next_open_ || plan_.e.size()!=1 || cfg_.prefix_cache)return RAD_E_STATE;
++    const auto& e=plan_.e[0];auto& s=*reqs_[(size_t)e.slot];
++    if(e.seq!=seq || !e.is_prefill || e.ctx_len!=0 || e.dev || e.ckpt_slot>=0 ||
++        !s.observer_hold || !s.req || !s.req->output.empty() || s.req->n_computed!=0)return RAD_E_STATE;
++    s.entry=-1;s.sched_tokens=0;step_open_=false;step_prefill_tok_=step_decode_tok_=0;
++    sweep_deferred();return RAD_OK;
++}
+ int Scheduler::finish_resume(uint64_t seq, int64_t pos, const std::string& refusal) {
+     std::lock_guard<std::mutex> lk(mu_);
+     if (!step_open_ || next_open_ || plan_.e.size() != 1 || cfg_.prefix_cache)
+@@ -1896,7 +1911,7 @@
+             s.entry = -1;
+             /* Unless the drafter's snapshot still names it, or the next step carries it: the
+              * sweep below, or that step's commit, releases it once nothing does. */
+-            if (s.pending_free && !block_holds(r.id) && !(next_open_ && s.entry_next >= 0)) {
++            if (s.pending_free && !s.observer_hold && !block_holds(r.id) && !(next_open_ && s.entry_next >= 0)) {
+                 free_kv(s);
+                 s.pending_free = false;
+                 --n_deferred_;
+--- a/core/engine.cpp
++++ b/core/engine.cpp
+@@ -438,7 +438,22 @@
+     /* THE NEXT STEP'S FORWARD PASS, when it is already on the card: issued behind the step before
+      * it, before that step was read back (Scheduler::step_next). */
+     const RadBatch* ahead = nullptr;
++    const auto observe=[&](auto&& fn) {
++        return sched_.observing(fn,[&](uint64_t id){return observer_->holds_sequence(id);});
++    };
+     while (!stopping_.load(std::memory_order_acquire)) {
++        if(observer_) {
++            // Retire cancellations before polling. retire drains/cancels CPU I/O
++            // while its held native pages and request slot still exist.
++            drain_completed();
++            const int polled=observe([&]{return observer_->poll_pending();});
++            if(polled<0)return fail_loop(polled);
++            int status=RAD_E_FULL;
++            for(auto id=observer_->take_request_refusal(&status);id;id=observer_->take_request_refusal(&status)) {
++                const int rc=sched_.fail_observer(id,status);if(rc<0)return fail_loop(rc);
++            }
++            sched_.release_deferred();
++        }
+         phase_t_ = std::chrono::steady_clock::now();
+         /* MEDIA A WAITING REQUEST NEEDS, encoded while nothing is in flight: the last step has been
+          * collected and none was issued ahead of it -- the scheduler issues none while a request
+@@ -484,7 +499,7 @@
+              * all. `all` does both.
+              *
+              * If the difference survives the scrub, bytes left behind are not its cause. */
+-            if (scrub_ && idle == 0) {
++            if (scrub_ && idle == 0 && !observer_) {
+                 for (auto& rk : ranks_) {
+                     if (scrub_ & 1)
+                         for (const KVGroupPlan& p : rk->kv.plans()) {
+@@ -565,7 +580,7 @@
+         if (observer_) {
+             int64_t resumed = -1;
+             std::string refusal;
+-            const int rs = sched_.locked([&] { return observer_->resume(plan, &resumed, &refusal); });
++            const int rs = observe([&] { return observer_->resume(plan, &resumed, &refusal); });
+             if((rs==RAD_E_IO || rs==RAD_E_FULL) && plan.e.size()==1 && plan.e[0].is_prefill) {
+                 for(auto& rank:ranks_) {
+                     const int drained=rad_stream_sync(rank->ctx.stream());
+@@ -576,6 +591,11 @@
+                 sched_.step_finished();drain_completed();sched_.publish(false);continue;
+             }
+             if (rs < 0) return fail_loop(rs);
++            if(resumed==0 && refusal.empty()) {
++                if(plan.e.size()!=1)return fail_loop(RAD_E_STATE);
++                const int rc=sched_.defer_resume(plan.e[0].seq);if(rc<0)return fail_loop(rc);
++                sched_.step_finished();drain_completed();sched_.publish(false);continue;
++            }
+             if (resumed >= 0 || !refusal.empty()) {
+                 if (plan.e.size() != 1) return fail_loop(RAD_E_STATE);
+                 const int rc = sched_.finish_resume(plan.e[0].seq, resumed, refusal);
+@@ -584,7 +604,7 @@
+                 sched_.publish(false);
+                 continue;
+             }
+-            const int os = sched_.locked([&] { return observer_->begin(plan); });
++            const int os = observe([&] { return observer_->begin(plan); });
+             if (os < 0) return fail_loop(os);
+         }
+         /* ONE ENTRY PER REQUEST, and the row counter is separate. Sampler::build_step expands
+@@ -788,7 +808,7 @@
+ 
+         if (observer_ && observer_->split_sampling(plan)) {
+             int64_t replay_from = -1;
+-            st = sched_.locked([&] { return observer_->after_forward(plan, &replay_from); });
++            st = observe([&] { return observer_->after_forward(plan, &replay_from); });
+             if ((st==RAD_E_FULL || st==RAD_E_IO) && plan.e.size()==1 && plan.e[0].is_prefill) {
+                 for(auto& rank:ranks_) {
+                     const int drained=rad_stream_sync(rank->ctx.stream());
+@@ -947,7 +967,7 @@
+                     observer_accepted[i] = (int32_t)std::min<int64_t>(observer_accepted[i], room);
+                 }
+             }
+-            st = sched_.locked([&] { return observer_->collect(plan, res); });
++            st = observe([&] { return observer_->collect(plan, res); });
+             if (st < 0) return fail_loop(st);
+             int refusal_status=RAD_E_FULL;
+             for(auto id=observer_->take_request_refusal(&refusal_status);id;id=observer_->take_request_refusal(&refusal_status)) {
+@@ -1647,7 +1667,11 @@
+      * the cost stays proportional to what finished rather than to everything that ever has. */
+     sched_.take_completed(&done_);
+     for (uint64_t id : done_) {
+-        if (observer_) sched_.locked([&] { observer_->retire(id); });
++        if (observer_) {
++            sched_.observing([&]{observer_->retire(id);return RAD_OK;},
++                [&](uint64_t request){return observer_->holds_sequence(request);});
++            sched_.release_deferred();
++        }
+         for (auto& rk : ranks_) rk->sampler.end_request(id);
+     }
+ }
+--- a/tests/sched_test.cpp
++++ b/tests/sched_test.cpp
+@@ -3485,4 +3485,41 @@
+     CHECK(f.sch.find(next)->finish_reason=="storage");
+ }
+ 
++TEST(observer_fresh_prefix_wait_has_no_committed_progress) {
++    Fixture f;f.build();f.cfg.prefix_cache=false;f.pc.allow_checkpoints=false;
++    CHECK_OK(f.start());f.sch.set_serial_prefill(true);
++    const auto a=f.submit(8,20),b=f.submit(8,20);
++    CHECK(f.sch.step()!=nullptr);CHECK_EQ(f.sch.plan().e.size(),size_t(1));
++    CHECK_EQ(f.sch.defer_resume(a),RAD_E_STATE);
++    CHECK_OK(f.sch.observing([]{return RAD_OK;},[&](uint64_t id){return id==a;}));
++    CHECK_OK(f.sch.defer_resume(a));CHECK_EQ(f.sch.find(a)->n_computed,0);
++    CHECK_EQ(f.sch.find(a)->n_cached,0);CHECK(f.sch.find(a)->output.empty());
++    CHECK(f.sch.step()!=nullptr);CHECK_EQ(f.sch.plan().e[0].seq,b);
++}
++TEST(observer_pending_keeps_owned_sequence_out_of_steps) {
++    Fixture f;f.build();CHECK_OK(f.start());
++    const auto a=f.submit(8,20),b=f.submit(8,20);
++    CHECK(f.sch.step()!=nullptr);
++    int32_t accepted[2]={},tokens[2]={5,5};uint8_t eos[2]={};
++    Scheduler::StepResult result{};result.n_seq=2;result.n_accepted=accepted;result.token=tokens;result.eos=eos;
++    CHECK_OK(f.sch.observing([]{return RAD_OK;},[&](uint64_t id){return id==a;}));
++    CHECK_OK(f.sch.commit(result));
++    CHECK(f.sch.step()!=nullptr);CHECK_EQ(f.sch.plan().e.size(),size_t(1));CHECK_EQ(f.sch.plan().e[0].seq,b);
++    CHECK_OK(f.sch.cancel(a));CHECK_OK(f.sch.reap(a));
++    CHECK(f.kv.has_sequence(a));CHECK(f.sch.find(a)!=nullptr);
++    result.n_seq=1;CHECK_OK(f.sch.commit(result));f.sch.release_deferred();
++    CHECK(f.kv.has_sequence(a));
++    CHECK_OK(f.sch.observing([]{return RAD_OK;},[](uint64_t){return false;}));
++    f.sch.release_deferred();CHECK(!f.kv.has_sequence(a));CHECK(f.sch.find(a)==nullptr);
++    CHECK(f.kv.has_sequence(b));
++}
++TEST(observer_shutdown_preserves_pending_ownership_until_drained) {
++    Fixture f;f.build();CHECK_OK(f.start());const auto a=f.submit(8,20);
++    CHECK(f.sch.step()!=nullptr);
++    CHECK_OK(f.sch.observing([]{return RAD_OK;},[&](uint64_t id){return id==a;}));
++    f.sch.shutdown("fixture");CHECK_OK(f.sch.reap(a));CHECK(f.kv.has_sequence(a));
++    CHECK_OK(f.sch.observing([]{return RAD_OK;},[](uint64_t){return false;}));
++    f.sch.release_deferred();CHECK(!f.kv.has_sequence(a));
++}
++
+ RAD_TEST_MAIN()

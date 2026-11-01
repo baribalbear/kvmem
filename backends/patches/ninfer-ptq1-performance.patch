@@ -1,8 +1,8 @@
 diff --git a/src/calibration/device_calibration.cu b/src/calibration/device_calibration.cu
-index b4f00a3b5d5a6edb2738730ed9a6f877486aaec7..27511dfa9b9bd43278a9556dd63cf90c9d344fa9 100644
+index d0780fd15df4363e53304fcea8b1047b179148fe..be48cbf47c024af5b5ea763e2e1638d2f5fabc80 100644
 --- a/src/calibration/device_calibration.cu
 +++ b/src/calibration/device_calibration.cu
-@@ -128,13 +128,17 @@ SyntheticWeight row_split_weight(QType qtype, std::int32_t n, std::int32_t k) {
+@@ -129,13 +129,17 @@ SyntheticWeight row_split_weight(QType qtype, std::int32_t n, std::int32_t k) {
      case QType::T2_G128_FP16:
          group = 128;
          break;
@@ -21,7 +21,7 @@ index b4f00a3b5d5a6edb2738730ed9a6f877486aaec7..27511dfa9b9bd43278a9556dd63cf90c
      const std::uint64_t high_total   = groups * static_cast<std::uint64_t>(high_bytes);
      const std::uint64_t high_offset  = align(low_bytes);
      const std::uint64_t scale_offset = high_offset + align(high_total);
-@@ -465,6 +469,40 @@ void calibrate_ternary(ops::DeviceRouteProfile& profile, Timer& timer,
+@@ -793,6 +797,40 @@ void calibrate_ternary(ops::DeviceRouteProfile& profile, Timer& timer,
      }
  }
  
@@ -62,19 +62,19 @@ index b4f00a3b5d5a6edb2738730ed9a6f877486aaec7..27511dfa9b9bd43278a9556dd63cf90c
  // Qwen3.6/3.8-27B groupwise-int fused projections at their registered shapes.
  void calibrate_groupwise(ops::DeviceRouteProfile& profile, Timer& timer,
                           const CalibrationOptions& options) {
-@@ -1209,6 +1247,7 @@ ops::DeviceRouteProfile calibrate_device_routes(const CalibrationOptions& option
-     const bool projections = !ops::current_device_volta();
-     const bool attention   = projections && options.attention;
-     if (projections && options.ternary) { calibrate_ternary(profile, timer, options); }
-+    if (projections && options.ternary) { calibrate_ptq1(profile, timer, options); }
-     if (projections && options.groupwise) {
-         calibrate_groupwise(profile, timer, options);
-         calibrate_cublas_prefill(profile, timer, options);
+@@ -1540,6 +1578,7 @@ ops::DeviceRouteProfile calibrate_device_routes(const CalibrationOptions& option
+     const bool attention   = projections && options.attention && !gguf_only;
+     if (projections && options.ternary && !gguf_only) {
+         calibrate_ternary(profile, timer, options);
++        calibrate_ptq1(profile, timer, options);
+     }
+     if (options.groupwise) {
+         if (projections && !gguf_only) {
 diff --git a/src/calibration/route_catalog.cpp b/src/calibration/route_catalog.cpp
-index 33327bc8ca848f6fb85539f1cc6f7999c267df50..fcc8360b6ddcfaef7fb7827e911851d879b754aa 100644
+index ea21e13c656f57b1f5bba99774cd849ada3f39eb..a0c63e19371d050e7971d840f611bd8282e97ec6 100644
 --- a/src/calibration/route_catalog.cpp
 +++ b/src/calibration/route_catalog.cpp
-@@ -38,6 +38,10 @@ std::vector<RouteCatalogEntry> build_catalog(ops::DeviceTier tier) {
+@@ -46,6 +46,10 @@ std::vector<RouteCatalogEntry> build_catalog(ops::DeviceTier tier) {
              add(std::string("t2_i8_small/") + shape, t2_small);
          }
          add("t2_i8_route", {"small", "tile"});
@@ -86,7 +86,7 @@ index 33327bc8ca848f6fb85539f1cc6f7999c267df50..fcc8360b6ddcfaef7fb7827e911851d8
          // Qwen3.6/3.8 groupwise-int fused projections, and the switch of each onto the unified
          // templates.
 diff --git a/src/models/qwen3_5/execution/parameters.cpp b/src/models/qwen3_5/execution/parameters.cpp
-index 22daef1c25ad17232ac1c4fa0bc0a56e2b0ab6fd..95efa85d8cd3f9b53b1ee4a0917a59f2cd3927dc 100644
+index 918f78a64d5a7f29c6c46c59d3188170ab9ac697..8955d381fb718f916c1059a05db7ea765680c496 100644
 --- a/src/models/qwen3_5/execution/parameters.cpp
 +++ b/src/models/qwen3_5/execution/parameters.cpp
 @@ -31,6 +31,12 @@ public:
@@ -122,7 +122,7 @@ index 22daef1c25ad17232ac1c4fa0bc0a56e2b0ab6fd..95efa85d8cd3f9b53b1ee4a0917a59f2
          if (!model_.options().prefill_a8) { return; }
          auto* pair = std::get_if<ops::PairedProjectionWeights>(&projection);
 diff --git a/src/ops/linear/linear.cpp b/src/ops/linear/linear.cpp
-index 5f62cbb58ec237d2b27657c4a9c6b893296f24b9..5b2ade3fea9e10dea6da157ab4033b45e9066294 100644
+index f89fe4a0f5e6197ebbe421863d80f7c340bab636..ff74b8ca713bb1a12b39a9d0263ccbc2b3b389b8 100644
 --- a/src/ops/linear/linear.cpp
 +++ b/src/ops/linear/linear.cpp
 @@ -5,6 +5,7 @@
@@ -133,7 +133,7 @@ index 5f62cbb58ec237d2b27657c4a9c6b893296f24b9..5b2ade3fea9e10dea6da157ab4033b45
  #include "ops/linear/q4/q4_dispatch.h"
  #include "ops/linear/q5/q5_dispatch.h"
  #include "ops/linear/q6/q6_dispatch.h"
-@@ -130,7 +131,7 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
+@@ -133,7 +134,7 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
              detail::t2_a8_linear(x, w, out, *workspace, stream);
              return;
          }
@@ -141,8 +141,8 @@ index 5f62cbb58ec237d2b27657c4a9c6b893296f24b9..5b2ade3fea9e10dea6da157ab4033b45
 +        detail::ptq1_dispatch(x, w, out, policy, stream);
          return;
      case QType::T2_G128_FP16:
-         if (workspace != nullptr && detail::t2_a8_admits(policy) &&
-@@ -178,8 +179,8 @@ std::size_t linear_route_workspace_bytes(QType qtype, std::int32_t output_rows,
+         if (workspace != nullptr && out.dtype == DType::BF16 && detail::t2_a8_admits(policy) &&
+@@ -181,8 +182,8 @@ std::size_t linear_route_workspace_bytes(QType qtype, std::int32_t output_rows,
          (void)detail::select_q8_launch(output_rows, input_rows, max_tokens, policy);
          return 0;
      case QType::PTQ1_G128_FP16:
@@ -351,7 +351,7 @@ index bd09c2ab1b5ccf95442e293437d1df8e6f076fbb..5c87b31defc6720f504eac1c50a9adb9
  // Against the 128x64 prefill tile the small-T launches stop paying from 96 columns on the RTX 3090
  // (a GDN layer's four projections: 790 vs 918 us at 96, 1091 vs 1840 us at 192; even at 64).
 diff --git a/src/ops/linear/t2/t2_dispatch.cpp b/src/ops/linear/t2/t2_dispatch.cpp
-index 48766aabbd8fa98e4c584e3038183b33d91e2e63..49a61e4e9365f3c910364e8dd69b66c8e23c41ab 100644
+index 097c55aae298aad0bfd4fb55213690535c08346e..1bb2623aef3230cf11a5f4ea700fbbad2aaa88c4 100644
 --- a/src/ops/linear/t2/t2_dispatch.cpp
 +++ b/src/ops/linear/t2/t2_dispatch.cpp
 @@ -1,4 +1,5 @@
@@ -360,7 +360,7 @@ index 48766aabbd8fa98e4c584e3038183b33d91e2e63..49a61e4e9365f3c910364e8dd69b66c8
  
  #include <cstdlib>
  #include <stdexcept>
-@@ -91,16 +92,7 @@ void t2_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy pol
+@@ -108,16 +109,7 @@ void t2_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy pol
          throw std::invalid_argument("t2 linear: requires a row-split weight");
      }
      if (w.qtype == QType::PTQ1_G128_FP16) {
@@ -377,7 +377,7 @@ index 48766aabbd8fa98e4c584e3038183b33d91e2e63..49a61e4e9365f3c910364e8dd69b66c8
 +        ptq1_dispatch(x, w, out, policy, stream);
          return;
      }
-     const T2Launch launch = select_t2_launch(w.n, w.k, x.ne[1], policy);
+     const T2Launch launch = out.dtype == DType::FP32
 diff --git a/tests/ops/linear/test_ptq1_a8.cpp b/tests/ops/linear/test_ptq1_a8.cpp
 index 1c9eeb9b465bc02aab45a48453a41fff082385e7..2198c0fcd2024c2ffa0cf213626a0ef7101d1a88 100644
 --- a/tests/ops/linear/test_ptq1_a8.cpp

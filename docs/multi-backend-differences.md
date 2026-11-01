@@ -75,7 +75,7 @@ RTX 5050 Laptop 已通过 [超过 R 的真实输出验证](reserve-output-5050-v
 | API 模型名 | `-a` / `--alias NAME` | `--model-id ID` |
 | 聊天模板 | `--chat-template` 接收 Jinja 正文，`--chat-template-file` 接收文件；提供 `--chat-template-kwargs` | `--chat-template` 接收文件路径；同名参数的输入类型不同 |
 | 主模型设备 | `--device CUDA0,CUDA1,...` 等原生设备名；支持相应的设备与切分配置 | `--device N` 选择一张 `CUDA_VISIBLE_DEVICES` 内的设备。多卡用 `--devices A,B,...`（2–8 张），与 `--device` 互斥 |
-| 多卡切分 | 当前 KVMem 开放相应的 layer/tensor 路径，具体组合受模型、MTP 和 lane 配置约束 | 源码使用上游 layer pipeline，不是 TP 或 NCCL。启动器 `-Gpu` 的 UUID 顺序就是 stage 顺序；第一张卡承担 embedding、head、MTP 和 resident Vision，CPU Vision 仍走 Host 编码。可选 `--stage-layers` 或 `-StageLayers`，省略时按各卡空闲内存规划。各卡 compute capability 必须相同，显存可以不同。一份逻辑历史、一份选页结果和一份 B/R/H；各卡只持有自己层的 KV。`mixed`/`strict` 显存策略仍要求单卡。DFlash2 可组合按层拆分，草稿及局部状态在第一张卡，见 [双卡验证](dflash2-pipeline-validation-20261029.md)；0.19-rc1 已发布 worker 仍限单卡。overlay Vision、原始 DFlash、并行 prefill 和冷快照不因多卡而开放。验收见 [多卡验收](ninfer-multigpu-validation-20261006.md) |
+| 多卡切分 | 当前 KVMem 开放相应的 layer/tensor 路径，具体组合受模型、MTP 和 lane 配置约束 | 默认 layer pipeline，可选 `-StageLayers`；开启 `-TensorParallel` 则显式使用 heads TP，可选 `-TensorSplit` 相对权重，两种分配互斥。`-Gpu` 的 UUID 顺序对应 stage/rank 及权重顺序。按层模式第一张卡承担 embedding、head、MTP 和 resident Vision，CPU Vision 走 Host 编码。每张卡均须处于该二进制编译支持的架构范围；新 worker 不再要求各卡 compute capability 相同，但本轮无跨架构实测结论。B/R 仍为完整逻辑窗口，H 共享；TP 实际 KV head 分配由 `/props` 报告，不能按输入权重推定。heads TP 必须通过 worker revision 能力门禁，静态描述不升级旧包。`mixed`/`strict` 仍要求单卡；完整用法与边界见 [多后端运行](multi-backend.md)。历史按层证据见 [多卡验收](ninfer-multigpu-validation-20261006.md) 与 [DFlash2 双卡验证](dflash2-pipeline-validation-20261029.md) |
 | 长上下文位置缩放 | 当前自定义 worker 没有开放 RoPE/YaRN 启动覆盖项，沿用原生配置和模型元数据 | 开放 `--rope-yarn`、`--rope-yarn-factor`、`--rope-scaling-factor` 等原生选项；增大 context 与启用位置缩放是不同设置 |
 
 KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 llama q8_0 都包含 8-bit 数据，但不能视为相同格式或直接互换 KV。跨后端 KV 迁移不支持。
@@ -106,7 +106,7 @@ KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 
 |---|---|---|
 | MTP 启用 | `--spec-type draft-mtp`；默认 none | `--spec mtp`；默认关闭；原生 DFlash 选项在 KVMem 组合中被拒绝 |
 | 草稿长度 | `--spec-draft-n-max`，默认 3；当前 KVMem replay 模式要求 1..5 | `--draft-tokens`，KVMem 开放固定或自适应 MTP1..15 |
-| DFlash2 | 公共入口使用独立 GGUF；仍限单 GPU | `--spec dflash2` 使用内置草稿；支持单卡或 2–8 卡按层拆分，不支持当前基线的 tensor parallel；需配套新 worker |
+| DFlash2 | 公共入口使用独立 GGUF；仍限单 GPU | `--spec dflash2` 使用内置草稿；支持单卡或 2–8 卡按层拆分。新 worker 已接入 heads TP，真实 GPU 验收不能沿用按层结论；需配套 worker |
 | MTP 状态策略 | `--kvmem-mtp-state snapshots\|auto\|replay`；默认 replay；tensor 路径只开放 snapshots | 使用 ninfer 的原生状态与事务流程，没有对应策略选项 |
 | 自适应 MTP | 当前 worker 未开放对应参数 | `--adaptive-mtp`，必须启用 MTP，并遵守各组合限制 |
 | ngram 草稿 | 当前 worker 未开放 ninfer 的对应参数 | `--ngram-draft-tokens` / `--ngram-min-match`；KVMem 要求 MTP；1..8路可用，启动并发大于1时，配置的16..63自动降至15并提示；单路保留宽度，文本及 resident/CPU 图片均放行九种原生 KV |
@@ -150,9 +150,9 @@ KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 
 
 | 入口配置 | 当前映射和限制 |
 |---|---|
-| 两边共用 | Backend、Model、Worker、Gpu、ListenHost、Port、Context、Budget、Reserve、Prefill、MaxTokens、KvType、HostMiB、DiskPath、DiskMiB、SinkTokens、RecentTokens、NoLrfu、LrfuLambda、LrfuTopFraction、ScoreAggregation，以及 WorkerArgs。ninfer 的 `-Gpu` 接受 1–8 个不重复 UUID，顺序即 layer stage 顺序 |
+| 两边共用 | Backend、Model、Worker、Gpu、ListenHost、Port、Context、Budget、Reserve、Prefill、MaxTokens、KvType、HostMiB、DiskPath、DiskMiB、SinkTokens、RecentTokens、NoLrfu、LrfuLambda、LrfuTopFraction、ScoreAggregation，以及 WorkerArgs。ninfer 的 `-Gpu` 接受 1–8 个不重复 UUID，顺序即 layer stage 或 TP rank 顺序 |
 | 共用脚本默认值 | 端口 18200、Context=262144、B=32768、R=1024、Prefill=128、MaxTokens=1024、Concurrency=1；sink=12288、recent=1024 tokens（12K/1K，16页 recent），计入 B；默认 C：Mean-K page softmax + Query 图传播，pressure 累计 attention；KV 默认 llama q8_0 / ninfer int8；ninfer 视觉 token 默认 1024。相同 MaxTokens 仍受各后端的输出限制。直接运行 worker 时仍沿用前文的 sink/recent 默认值 |
-| 只为 ninfer 映射 | StageLayers、MtpDrafts、AdaptiveMtp、FastPrefill、NgramDrafts/MinMatch、Concurrency、RetainedSessions、Vision/Residency/Tokens、DeviceProfile、ThinkingBudget；显式传给 llama 会被脚本拒绝。省略 ThinkingBudget 不限制思考。DiskPath/MiB 映射到两后端的公共进程内 SSD 分层，必须通过顶层参数传入。ninfer 的设备参数只能走 `-Gpu` 和 `-StageLayers`，思考预算只能走 `-ThinkingBudget`，sink/recent 只能走 `-SinkTokens` 和 `-RecentTokens`，不能再从 WorkerArgs 传 `--device`、`--devices`、`--stage-layers`、`--default-thinking-budget`、`--kvmem-sink-tokens` 或 `--kvmem-recent-tokens` |
+| 只为 ninfer 映射 | StageLayers、TensorParallel、TensorSplit、MtpDrafts、AdaptiveMtp、FastPrefill、NgramDrafts/MinMatch、Concurrency、RetainedSessions、Vision/Residency/Tokens、DeviceProfile、ThinkingBudget；显式传给 llama 会被脚本拒绝。省略 ThinkingBudget 不限制思考。DiskPath/MiB 映射到两后端的公共进程内 SSD 分层，必须通过顶层参数传入。ninfer 设备参数只能走 `-Gpu`、`-StageLayers`、`-TensorParallel`、`-TensorSplit`，思考预算只能走 `-ThinkingBudget`，sink/recent 只能走 `-SinkTokens` 和 `-RecentTokens`；不能从 WorkerArgs 传对应设备、TP、思考预算或 sink/recent 原生参数。TP 固定 heads，不开放 positions |
 | llama 的对应能力 | MTP、lane、会话、视觉和冷磁盘等已有能力仍可用，当前需要通过 WorkerArgs 传原生参数；脚本拒绝对应入口选项不表示后端没有该能力 |
 | 默认 ninfer 快捷脚本 | `start-ninfer.ps1` 调用统一启动器。Context=204800、B=36864、R=16384、Host=12288MiB、Prefill=256、输出上限16384、思考预算8192、sink=12288、recent=1024 tokens（12K/1K，16页 recent）、单路、INT8、自适应MTP上限4、ngram31、CPU视觉、每图1024 tokens、保留1个非活动 Host 会话。默认 C：Mean-K page softmax + Query 图传播，pressure 累计 attention。可用 `-Gpu`、`-StageLayers`、`-SinkTokens`、`-RecentTokens` 覆盖资源设置，`-DryRun` 查看完整参数。预算、MTP 等配方值与共用脚本默认值不同 |
 
@@ -166,6 +166,6 @@ KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 
 | recent、sink | ninfer 已按整页向下取整规则开放 `--kvmem-sink-tokens` 和 `--kvmem-recent-tokens`。recent 至少 64 tokens，省略时仍是一页，与 llama 允许 0 的规则不同。query 长度仍未开放 |
 | 思考、输出预算、MTP、并发 | 优先统一用户入口和默认值说明；当前 C 已实现 accepted 驻留工作集上的 pressure 持续追加，仍分别遵守上下文与输出预算 |
 | 会话和内存预算 | 统一单位与展示，并明确预算范围、活动/非活动计数、硬预算与软上限 |
-| 原生 KV 格式和多卡实现 | ninfer 源码已开放 layer pipeline；llama 保持自己的 layer/tensor 路径。两者不等价，也不迁移 KV。按包、模型和功能组合校验 |
+| 原生 KV 格式和多卡实现 | ninfer 默认 layer pipeline，新 worker 可显式启用 heads TP；llama 保持自己的 layer/tensor 路径。两者不等价，也不迁移 KV。按包、模型和功能组合校验 |
 
 维护参数时，应同步更新 worker 解析、统一入口、能力说明和本表。参数名称相同但语义不同的项目，应先说明行为，再决定是否统一。

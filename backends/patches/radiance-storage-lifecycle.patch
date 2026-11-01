@@ -1,0 +1,138 @@
+--- a/core/runtime/step_observer.h
++++ b/core/runtime/step_observer.h
+@@ -25,6 +25,10 @@
+     // Expected capacity refusals are per request. The engine drains this list
+     // outside the scheduler lock before commit, preserving other batch entries.
+     virtual uint64_t take_capacity_refusal() noexcept { return 0; }
++    // Isolated host-storage/capacity failures; device faults still stop the engine.
++    virtual uint64_t take_request_refusal(int* status) noexcept {
++        *status=RAD_E_FULL;return take_capacity_refusal();
++    }
+     // Metadata only, under the scheduler lock; may run on an HTTP thread.
+     // No device work, retained Request pointers or prompt/output text copies.
+     virtual void request_metadata(const Request&, int64_t age_us, int64_t first_us) noexcept {}
+--- a/core/sched/scheduler.h
++++ b/core/sched/scheduler.h
+@@ -209,7 +209,8 @@
+     // Startup-only observer policy; ordinary native scheduling is unchanged.
+     void set_serial_prefill(bool value) { serial_prefill_=value; }
+     int fail_capacity(uint64_t id);
+-    int reject_unsampled(uint64_t id);
++    int fail_observer(uint64_t id,int status);
++    int reject_unsampled(uint64_t id,int status=RAD_E_FULL);
+     using RequestObserver=std::function<void(const Request&,int64_t,int64_t)>;
+     void set_request_observer(RequestObserver fn) { request_observer_=std::move(fn); }
+     Request* find(uint64_t id);
+--- a/core/sched/scheduler.cpp
++++ b/core/sched/scheduler.cpp
+@@ -436,16 +436,19 @@
+     else server::sink_finish(s.req->sink, finish_of(st, s.req->finish_reason));
+ }
+ 
+-int Scheduler::fail_capacity(uint64_t id) {
++int Scheduler::fail_capacity(uint64_t id) { return fail_observer(id,RAD_E_FULL); }
++int Scheduler::fail_observer(uint64_t id,int status) {
++    if(status!=RAD_E_FULL && status!=RAD_E_IO)return RAD_E_INVAL;
+     std::lock_guard<std::mutex> lk(mu_);
+     auto it=by_id_.find(id);if(it==by_id_.end())return RAD_E_NOTFOUND;
+     auto& s=*reqs_[(size_t)it->second];
+     if(s.req->state!=ReqState::Running)return RAD_OK;
+-    close_request(s,ReqState::Failed,"capacity",in_step(s)||block_holds(id),true,RAD_E_FULL,
+-                  "KVMem shared cache capacity is exhausted for this request");
++    close_request(s,ReqState::Failed,status==RAD_E_IO ? "storage" : "capacity",in_step(s)||block_holds(id),true,status,
++                  status==RAD_E_IO ? "KVMem backing storage failed for this request" : "KVMem shared cache capacity is exhausted for this request");
+     ++m_.failed;completed_.push_back(id);return RAD_OK;
+ }
+-int Scheduler::reject_unsampled(uint64_t id) {
++int Scheduler::reject_unsampled(uint64_t id,int status) {
++    if(status!=RAD_E_FULL && status!=RAD_E_IO)return RAD_E_INVAL;
+     std::lock_guard<std::mutex> lk(mu_);
+     if(!step_open_ || next_open_ || plan_.e.size()!=1 || plan_.e[0].seq!=id || !plan_.e[0].is_prefill)
+         return RAD_E_STATE;
+@@ -454,8 +457,8 @@
+     // issued for this probe, and no other sequence shares this prefill step.
+     s.entry=-1;s.sched_tokens=0;step_open_=false;step_prefill_tok_=step_decode_tok_=0;
+     if(s.req->state==ReqState::Running) {
+-        close_request(s,ReqState::Failed,"capacity",false,true,RAD_E_FULL,
+-                      "KVMem shared cache capacity is exhausted for this request");
++        close_request(s,ReqState::Failed,status==RAD_E_IO ? "storage" : "capacity",false,true,status,
++                      status==RAD_E_IO ? "KVMem backing storage failed for this request" : "KVMem shared cache capacity is exhausted for this request");
+         ++m_.failed;completed_.push_back(id);
+     }
+     sweep_deferred();return RAD_OK;
+--- a/core/engine.cpp
++++ b/core/engine.cpp
+@@ -566,6 +566,15 @@
+             int64_t resumed = -1;
+             std::string refusal;
+             const int rs = sched_.locked([&] { return observer_->resume(plan, &resumed, &refusal); });
++            if((rs==RAD_E_IO || rs==RAD_E_FULL) && plan.e.size()==1 && plan.e[0].is_prefill) {
++                for(auto& rank:ranks_) {
++                    const int drained=rad_stream_sync(rank->ctx.stream());
++                    if(drained<0)return fail_loop(drained);
++                }
++                const int rc=sched_.reject_unsampled(plan.e[0].seq,rs);
++                if(rc<0)return fail_loop(rc);
++                sched_.step_finished();drain_completed();sched_.publish(false);continue;
++            }
+             if (rs < 0) return fail_loop(rs);
+             if (resumed >= 0 || !refusal.empty()) {
+                 if (plan.e.size() != 1) return fail_loop(RAD_E_STATE);
+@@ -780,12 +789,12 @@
+         if (observer_ && observer_->split_sampling(plan)) {
+             int64_t replay_from = -1;
+             st = sched_.locked([&] { return observer_->after_forward(plan, &replay_from); });
+-            if (st == RAD_E_FULL && plan.e.size()==1 && plan.e[0].is_prefill) {
++            if ((st==RAD_E_FULL || st==RAD_E_IO) && plan.e.size()==1 && plan.e[0].is_prefill) {
+                 for(auto& rank:ranks_) {
+                     const int drained=rad_stream_sync(rank->ctx.stream());
+                     if(drained<0)return fail_loop(drained);
+                 }
+-                st=sched_.reject_unsampled(plan.e[0].seq);
++                st=sched_.reject_unsampled(plan.e[0].seq,st);
+                 if(st<0)return fail_loop(st);
+                 sched_.step_finished();drain_completed();sched_.publish(false);
+                 continue;
+@@ -940,8 +949,9 @@
+             }
+             st = sched_.locked([&] { return observer_->collect(plan, res); });
+             if (st < 0) return fail_loop(st);
+-            for(auto id=observer_->take_capacity_refusal();id;id=observer_->take_capacity_refusal()) {
+-                st=sched_.fail_capacity(id);if(st<0)return fail_loop(st);
++            int refusal_status=RAD_E_FULL;
++            for(auto id=observer_->take_request_refusal(&refusal_status);id;id=observer_->take_request_refusal(&refusal_status)) {
++                st=sched_.fail_observer(id,refusal_status);if(st<0)return fail_loop(st);
+             }
+         }
+         st = observer_ ? sched_.commit(res, [this](const StepEntry& e, const Request& r) {
+--- a/tests/sched_test.cpp
++++ b/tests/sched_test.cpp
+@@ -3461,4 +3461,28 @@
+     CHECK_EQ(closed,2);CHECK(running>0);
+ }
+ 
++TEST(observer_storage_refusal_preserves_other_batch_entries) {
++    Fixture f;f.build();CHECK_OK(f.start());
++    const auto a=f.submit(8,4),b=f.submit(8,4),c=f.submit(8,4);
++    CHECK(f.sch.step()!=nullptr);CHECK_EQ(f.sch.plan().e.size(),size_t(3));
++    CHECK_EQ(f.sch.fail_observer(b,RAD_E_STATE),RAD_E_INVAL);
++    CHECK_OK(f.sch.fail_observer(b,RAD_E_IO));
++    CHECK(f.sch.find(b)->finish_reason=="storage");
++    int32_t accepted[3]={},tokens[3]={5,5,5};uint8_t eos[3]={};
++    Scheduler::StepResult result{};result.n_seq=3;
++    result.n_accepted=accepted;result.token=tokens;result.eos=eos;
++    CHECK_OK(f.sch.commit(result));
++    CHECK(f.kv.has_sequence(a));CHECK(!f.kv.has_sequence(b));CHECK(f.kv.has_sequence(c));
++    int done=0;
++    for(int i=0;i<10;++i) {
++        std::vector<uint64_t> ids;f.sch.take_completed(&ids);done+=int(ids.size());
++        if(!f.sch.step())break;
++        result.n_seq=int(f.sch.plan().e.size());CHECK_OK(f.sch.commit(result));
++    }
++    CHECK_EQ(done,3);
++    const auto next=f.submit(8,4);CHECK(f.sch.step()!=nullptr);
++    CHECK_OK(f.sch.reject_unsampled(next,RAD_E_IO));CHECK(!f.kv.has_sequence(next));
++    CHECK(f.sch.find(next)->finish_reason=="storage");
++}
++
+ RAD_TEST_MAIN()

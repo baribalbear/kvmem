@@ -1,0 +1,3 @@
+#pragma once
+inline constexpr int kvmem_radiance_max_draft_tokens = @radiance_mtp_max_draft_tokens@;
+inline constexpr const char* kvmem_radiance_capabilities = R"json(@radiance_capabilities@)json";

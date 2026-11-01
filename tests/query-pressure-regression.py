@@ -31,6 +31,7 @@ def main():
     if isinstance(command, dict):
         command = command['argv']
     command = list(command)
+    expected_spec = command[command.index('--spec')+1] if '--spec' in command else 'none'
     scorer = command[command.index('--kvmem-query-scorer') + 1] if '--kvmem-query-scorer' in command else 'page-softmax'
     query_limit = int(command[command.index('--kvmem-query-max-tokens') + 1]) if '--kvmem-query-max-tokens' in command else 512
     with socket.socket() as sock:
@@ -105,6 +106,23 @@ def main():
                     if time.monotonic()>deadline:
                         raise TimeoutError('server readiness')
                     time.sleep(.25)
+            if a.backend == 'ninfer':
+                props = call('/props')
+                (a.output/'props.json').write_text(json.dumps(props, indent=2), encoding='utf-8')
+                if expected_spec in ('mtp', 'dflash2'):
+                    check('worker reports requested speculation',
+                          props.get('speculative', {}).get('algorithm') == expected_spec)
+                if '--tensor-parallel' in command:
+                    execution = props.get('execution', {})
+                    check('worker reports heads TP', execution.get('mode') == 'tensor' and
+                          execution.get('tensor_attention') == 'heads')
+                    shares = execution.get('tensor_shares', [])
+                    check('worker reports actual rank shares', len(shares) >= 2)
+                elif '--stage-layers' in command:
+                    expected_layers = [int(x) for x in command[command.index('--stage-layers')+1].split(',')]
+                    check('worker reports requested layer pipeline',
+                          props.get('execution', {}).get('mode') == 'layer' and
+                          props['execution'].get('stage_layers') == expected_layers)
             document = ''.join(f'Record {i}: the river flows through the valley.\n' for i in range(240))
             document += '\nReply briefly to acknowledge the reference text.'
             messages = [{'role':'user','content':document}]
@@ -182,6 +200,13 @@ def main():
             _,trace=ask('new-query-after-resident',follow,16,session='policy-fits')
             if not a.reject_replay:
                 check('new Query captures fresh features','KVMEM_QUERY scorer='+scorer in trace)
+            if a.backend == 'ninfer' and expected_spec in ('mtp', 'dflash2'):
+                after = call('/props')
+                (a.output/'props-after.json').write_text(json.dumps(after, indent=2), encoding='utf-8')
+                stats = after['speculative']['statistics']
+                check('speculation actually drafts', stats['rounds'] > 0 and stats['drafted_tokens'] > 0)
+                check('accepted tokens stay within drafted tokens',
+                      0 <= stats['accepted_tokens'] <= stats['drafted_tokens'])
             report['status']='passed'
             save()
         finally:

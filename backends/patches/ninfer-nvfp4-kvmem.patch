@@ -1,8 +1,8 @@
 diff --git a/docs/cli.md b/docs/cli.md
-index bb54aea00d3727532e7b280932852fafc02284e0..edd58e9660d222c1da47a4587dad20f6971478e1 100644
+index f9ca68d73f753e4ec6307d2ae5831bc13e88c7f6..32ddd5b510062bcce5188ba72bc91f692f41cdce 100644
 --- a/docs/cli.md
 +++ b/docs/cli.md
-@@ -298,6 +298,8 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
+@@ -303,6 +303,8 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
  | `--mtp-experts-q4` | Qwen3.6-35B-A3B: store the MTP layer's routed experts in the text layers' formats | off |
  | `--gdn-state-fp16` | keep the GDN recurrent state in FP16 | FP32 |
  | `--mlp-a8-decode` | integer-activation MLP gate_up at decode and verify widths | off |
@@ -10,12 +10,12 @@ index bb54aea00d3727532e7b280932852fafc02284e0..edd58e9660d222c1da47a4587dad20f6
 +| `--nvfp4-w4a8-int` | admit G32 INT8 activations for the registered NVFP4 projections; independent of KV storage; W4A16 wins if both flags are set | off |
  | `--no-prefill-a8` | return full prefill tiles to their A16 routes, which is how the integer routes are measured on a whole request | integer routes |
  | `--vision` | enable image/video input and load Vision GPU allocations | off |
- | `--vision-residency resident\|overlay\|cpu` | `overlay` keeps the Vision tower host-pinned and borrows device memory per image from the evictable text weight tail (no resident Vision cost; needs CUDA VMM); for Gemma 4 the tower's blocks stay pinned and stream through a two-block device window. `--vision-offload on\|off` is accepted as an alias for `overlay\|resident`. `cpu` encodes on CPU threads from host FP32 weights, with no device Vision memory and `--vision-max-merged` capped at 256 unless given. Qwen3.8-Flash-Next keeps its tower resident | `resident` |
+ | `--vision-residency resident\|overlay\|cpu` | `overlay` keeps the Vision tower host-pinned and borrows device memory per image from the evictable text weight tail (no resident Vision cost; needs CUDA VMM); for Gemma 4 the tower's blocks stay pinned and stream through a two-block device window. `--vision-offload on\|off` is accepted as an alias for `overlay\|resident`. `cpu` encodes on CPU threads from host FP32 weights, with no device Vision memory and `--vision-max-merged` capped at 256 unless given. Qwen3.8-Flash-Next keeps its tower resident; DeepSeek-V4.1 keeps it resident or, with `overlay`, streams its blocks from pinned memory through a two-block device window, and refuses `cpu` ([DeepSeek-V4.1](deepseek-v41.md#images)) | `resident` |
 diff --git a/docs/device-profiles.md b/docs/device-profiles.md
-index 804c14422cb2e1aa48d862a5baeeea77f490b682..fa76ced5678cd8b94b2d2a3f4afb87af18b5ffd6 100644
+index 33c4d5709c645f9cce59c7d95e78835ad27b6434..9a125d2d3f6569aa6808564ae98104f7231225cc 100644
 --- a/docs/device-profiles.md
 +++ b/docs/device-profiles.md
-@@ -123,6 +123,11 @@ survives a second interleaved measurement, and its output matches the compiled r
+@@ -127,6 +127,11 @@ survives a second interleaved measurement, and its output matches the compiled r
  turns the prompt key splits off and `N` forces N splits wherever a call may split; `NINFER_LINEAR_ROUTES`
  (`legacy` or `unified`) takes one table for every Linear shape and every `unified/*` switch. `--fast-prefill-kernel` turns the fast prompt kernel on regardless.
  
@@ -28,10 +28,10 @@ index 804c14422cb2e1aa48d862a5baeeea77f490b682..fa76ced5678cd8b94b2d2a3f4afb87af
  
  A profile picks each width's fastest schedule, and schedules differ in the order in which they sum.
 diff --git a/docs/serving.md b/docs/serving.md
-index 94f795abd0f7a3a237076bac0cc41f1783a5c7b5..1e09ba3e12e8e7fdc4d7809213fe9d38a934c508 100644
+index 4085814a760ec013c936975bbc00514a81979745..51ee3f4ca711554ccf9582810aab3ab291c5a82d 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
-@@ -2214,6 +2214,8 @@ The table lists executable defaults. The startup example selects a long-context
+@@ -2259,6 +2259,8 @@ The table lists executable defaults. The startup example selects a long-context
  | `--no-prefill-cublas-projections` | with `--prefill-cublas`, keep the attention and GDN input projections off that route | projections on |
  | `--no-prefill-a8` | prefill every projection on the A16 routes instead of the integer-activation ones | integer routes |
  | `--mlp-a8-decode` | integer-activation MLP gate_up at decode and verify widths | off |
@@ -57,10 +57,10 @@ index efcade9e992e8f1413e2aed5eb3b0a3c32b8184e..a3455f192ca74249c88b20acd481680f
          const auto& a      = *t.attention;
          facts["attention"] = {a.num_attention_heads, a.num_key_value_heads, a.head_dim};
 diff --git a/src/ops/kv_cache/fp8_e4m3_row_codec.cuh b/src/ops/kv_cache/fp8_e4m3_row_codec.cuh
-index 4b6f6cb3e25e9ea74e304b2bca3463a4d7b10a0f..b648aa276dab14a3aec6220bd605ac4edf1f9e02 100644
+index 31c8d1c91f8895762c7ae29981cdbe70a921f044..159b8a087a603f663c59a422f2110b9a19ac6b52 100644
 --- a/src/ops/kv_cache/fp8_e4m3_row_codec.cuh
 +++ b/src/ops/kv_cache/fp8_e4m3_row_codec.cuh
-@@ -88,6 +88,12 @@ __device__ __forceinline__ __half2 kv_cache_fp8_code2_to_half2_x2m8(unsigned cod
+@@ -85,6 +85,12 @@ __device__ __forceinline__ __half2 kv_cache_fp8_code2_to_half2_x2m8(unsigned cod
  
  __device__ __forceinline__ __half2 kv_cache_fp8_dequant_code2_to_half2(std::uint16_t storage,
                                                                         __half scale) {
@@ -73,7 +73,7 @@ index 4b6f6cb3e25e9ea74e304b2bca3463a4d7b10a0f..b648aa276dab14a3aec6220bd605ac4e
      // The integer expansion above carries the code times 2^-8 exactly, so the 2^8 that the vendor
      // conversion applies rides in a second half2 operand instead: scaling by a power of two is
      // exact, and the final multiply rounds once, exactly where the converted code times the scale
-@@ -95,6 +101,8 @@ __device__ __forceinline__ __half2 kv_cache_fp8_dequant_code2_to_half2(std::uint
+@@ -92,6 +98,8 @@ __device__ __forceinline__ __half2 kv_cache_fp8_dequant_code2_to_half2(std::uint
      const __half2 bias = __float2half2_rn(256.0F);
      return __hmul2(__hmul2(kv_cache_fp8_code2_to_half2_x2m8(storage), bias),
                     __halves2half2(scale, scale));
@@ -82,7 +82,7 @@ index 4b6f6cb3e25e9ea74e304b2bca3463a4d7b10a0f..b648aa276dab14a3aec6220bd605ac4e
  }
  
  // Dequantizes 8 contiguous E4M3 codes (16 bytes) to FP16, for PV MMA operands on hardware with
-@@ -118,6 +126,26 @@ __device__ __forceinline__ int4 kv_cache_fp8_dequant_f16x8(const std::uint8_t* c
+@@ -115,6 +123,26 @@ __device__ __forceinline__ int4 kv_cache_fp8_dequant_f16x8(const std::uint8_t* c
  // Blackwell-only mma.sync...kind::f8f6f4, so K needs a real (not just reinterpreted) wide copy.
  __device__ __forceinline__ int4 kv_cache_fp8_dequant_bf16x8(const std::uint8_t* codes,
                                                               __half scale) {
@@ -109,7 +109,7 @@ index 4b6f6cb3e25e9ea74e304b2bca3463a4d7b10a0f..b648aa276dab14a3aec6220bd605ac4e
      // The integer expansion carries the code times 2^-8 exactly, so the scale absorbs the 2^8
      // (exact, a power of two) and the product is the same FP32 value the vendor conversion feeds
      // the bf16 rounding. The K plane of k8v4 reads through here, and that path is issue-bound on
-@@ -135,6 +163,8 @@ __device__ __forceinline__ int4 kv_cache_fp8_dequant_bf16x8(const std::uint8_t*
+@@ -132,6 +160,8 @@ __device__ __forceinline__ int4 kv_cache_fp8_dequant_bf16x8(const std::uint8_t*
      }
      return make_int4(static_cast<int>(packed[0]), static_cast<int>(packed[1]),
                       static_cast<int>(packed[2]), static_cast<int>(packed[3]));
@@ -119,10 +119,10 @@ index 4b6f6cb3e25e9ea74e304b2bca3463a4d7b10a0f..b648aa276dab14a3aec6220bd605ac4e
  
  } // namespace ninfer::ops
 diff --git a/src/ops/kv_cache/nvfp4_group16_codec.cuh b/src/ops/kv_cache/nvfp4_group16_codec.cuh
-index 10508005d40cf874e206bf265979a3e5eb143840..eb44f1f2a3fb8559c1a4ab3ef6bc1d8341600485 100644
+index 6c3aa460f3168cb5b257f8019a772c15fe36f9e8..60671bdc12cfa0485bbd21e206c4fc983337ed8f 100644
 --- a/src/ops/kv_cache/nvfp4_group16_codec.cuh
 +++ b/src/ops/kv_cache/nvfp4_group16_codec.cuh
-@@ -90,6 +90,30 @@ __device__ __forceinline__ __half2 kv_cache_e2m1x2_to_half2(unsigned codes) {
+@@ -88,6 +88,30 @@ __device__ __forceinline__ __half2 kv_cache_e2m1x2_to_half2(unsigned codes) {
  
  __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t* codes,
                                                               std::uint8_t scale_code) {
@@ -153,7 +153,7 @@ index 10508005d40cf874e206bf265979a3e5eb143840..eb44f1f2a3fb8559c1a4ab3ef6bc1d83
      // Every finite E2M1 value times a legal nonnegative E4M3 cache scale is exactly representable
      // in FP16 (at most four product fraction bits and magnitude <= 2688). Half2 multiplication is
      // therefore the exact FP16 expansion boundary, not an additional approximation.
-@@ -117,6 +141,8 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
+@@ -115,6 +139,8 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
      }
      return make_int4(static_cast<int>(half_bits[0]), static_cast<int>(half_bits[1]),
                       static_cast<int>(half_bits[2]), static_cast<int>(half_bits[3]));
@@ -162,7 +162,7 @@ index 10508005d40cf874e206bf265979a3e5eb143840..eb44f1f2a3fb8559c1a4ab3ef6bc1d83
  }
  
  // BF16 counterpart of kv_cache_nvfp4_dequant_f16x8, for QK MMA operands on hardware with no FP4
-@@ -124,6 +150,28 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
+@@ -122,6 +148,28 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
  // Q's storage) instead of FP16.
  __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_bf16x8(const std::uint8_t* codes,
                                                                std::uint8_t scale_code) {
@@ -191,7 +191,7 @@ index 10508005d40cf874e206bf265979a3e5eb143840..eb44f1f2a3fb8559c1a4ab3ef6bc1d83
      // Same two substitutions as the FP16 form above, and the same reasoning: the E2M1 half2 the
      // sm70 path builds carries the exact value, so widening it to FP32 and multiplying by the
      // table-derived scale reproduces the vendor expression bit for bit.
-@@ -140,6 +188,8 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_bf16x8(const std::uint8_t
+@@ -138,6 +186,8 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_bf16x8(const std::uint8_t
      }
      return make_int4(static_cast<int>(bf16_bits[0]), static_cast<int>(bf16_bits[1]),
                       static_cast<int>(bf16_bits[2]), static_cast<int>(bf16_bits[3]));
@@ -200,7 +200,7 @@ index 10508005d40cf874e206bf265979a3e5eb143840..eb44f1f2a3fb8559c1a4ab3ef6bc1d83
  }
  
  struct KVCacheNvfp4DequantizedF16x16 {
-@@ -149,6 +199,31 @@ struct KVCacheNvfp4DequantizedF16x16 {
+@@ -147,6 +197,31 @@ struct KVCacheNvfp4DequantizedF16x16 {
  
  __device__ __forceinline__ KVCacheNvfp4DequantizedF16x16
  kv_cache_nvfp4_dequant_f16x16(const std::uint8_t* codes, std::uint8_t scale_code) {
@@ -232,7 +232,7 @@ index 10508005d40cf874e206bf265979a3e5eb143840..eb44f1f2a3fb8559c1a4ab3ef6bc1d83
      const float scale_f  = detail::kNvfp4E4M3ScaleA16[scale_code] * 2.0F;
      const __half2 scale2 = __float2half2_rn(scale_f);
      const int2 packed         = load_vec<int2>(codes);
-@@ -165,6 +240,8 @@ kv_cache_nvfp4_dequant_f16x16(const std::uint8_t* codes, std::uint8_t scale_code
+@@ -163,6 +238,8 @@ kv_cache_nvfp4_dequant_f16x16(const std::uint8_t* codes, std::uint8_t scale_code
          make_int4(static_cast<int>(half_bits[4]), static_cast<int>(half_bits[5]),
                    static_cast<int>(half_bits[6]), static_cast<int>(half_bits[7])),
      };
@@ -357,10 +357,10 @@ index 84aa75646ab49ffa6905892fd256a4505d8aca6f..edea4f57387fbeba672d70a568efa7c8
                                                    LinearRouteTable wide = LinearRouteTable::Legacy);
  
 diff --git a/src/ops/linear/nvfp4/nvfp4_dispatch.cpp b/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
-index b3519fafa2e2a135b0e53f5c1347d05f09773b29..51b1f59926f40d0a3c2a8f12d42479145cc46dbf 100644
+index 4ef6ed05744a1986794b1cda605eaae8f846c74c..bff72847c0adfd16e9a2a0b432bf800aab01c660 100644
 --- a/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
 +++ b/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
-@@ -12,6 +12,12 @@ namespace {
+@@ -13,6 +13,12 @@ namespace {
  const std::array kShapes{&kNvfp4N14336K5120, &kNvfp4N16384K5120, &kNvfp4N34816K5120,
                           &kNvfp4N5120K6144, &kNvfp4N5120K17408};
  
@@ -373,7 +373,7 @@ index b3519fafa2e2a135b0e53f5c1347d05f09773b29..51b1f59926f40d0a3c2a8f12d4247914
  const Nvfp4LinearShape& resolve_shape(std::int32_t n, std::int32_t k, LinearPolicy policy) {
      if (!valid_linear_policy(policy))
          throw std::invalid_argument("nvfp4 linear: unsupported policy");
-@@ -27,6 +33,8 @@ static std::size_t nvfp4_linear_workspace_capacity_bytes_own(std::int32_t n, std
+@@ -34,6 +40,8 @@ static std::size_t nvfp4_linear_workspace_capacity_bytes_own(std::int32_t n, std
                                                               std::int32_t max_tokens) {
      if (min_tokens <= 0 || max_tokens < min_tokens)
          throw std::invalid_argument("nvfp4 linear workspace: invalid token interval");
@@ -382,8 +382,8 @@ index b3519fafa2e2a135b0e53f5c1347d05f09773b29..51b1f59926f40d0a3c2a8f12d4247914
      const auto& shape = resolve_shape(n, k, policy);
      return allows_a4(policy) && shape.uses_a4(min_tokens, max_tokens)
                 ? nvfp4_w4a4_workspace_capacity_bytes(max_tokens, k)
-@@ -38,7 +46,7 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k
-                                                   std::int32_t max_tokens) {
+@@ -54,7 +62,7 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k
+     }
      return capacity_by_table(
          min_tokens, max_tokens,
 -        [](std::int32_t width) { return linear_route_table(LinearRouteFamily::Nvfp4, width); },
@@ -391,9 +391,9 @@ index b3519fafa2e2a135b0e53f5c1347d05f09773b29..51b1f59926f40d0a3c2a8f12d4247914
          [&](LinearRouteTable table, std::int32_t first, std::int32_t last) {
              return table == LinearRouteTable::Unified
                         ? unified::nvfp4_linear_workspace_capacity_bytes(n, k, policy, first, last)
-@@ -49,22 +57,18 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k
- void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
-                     WorkspaceArena* workspace, cudaStream_t stream) {
+@@ -78,22 +86,18 @@ void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPo
+         return nvfp4_general_a16(x, weight, out, stream);
+     }
      if (x.ne[1] > 0 &&
 -        linear_route_table(LinearRouteFamily::Nvfp4, x.ne[1]) == LinearRouteTable::Unified) {
 +        route_table(policy, x.ne[1]) == LinearRouteTable::Unified) {
@@ -420,10 +420,10 @@ index b3519fafa2e2a135b0e53f5c1347d05f09773b29..51b1f59926f40d0a3c2a8f12d4247914
      if (x.ne[1] <= 0) throw std::invalid_argument("nvfp4 linear: T must be positive");
      const auto& shape = resolve_shape(weight.n, weight.k, policy);
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 3d9cd3c12fd51eabcf56d6707f2b50bf6d93c302..803012e3b0c830e15ecd13c6571dea5f251048c4 100644
+index 7b0ae96967d377da59bb267f06128bf3e74d83a4..b4b6868e051bedbcc05f5d93c163ae301d0294e4 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -190,6 +190,33 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_kvmem_nvfp4_tests_PROGRAMS
+@@ -191,6 +191,33 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_kvmem_nvfp4_tests_PROGRAMS
  ninfer_finalize_bundle(ninfer_kvmem_nvfp4_tests)
  ninfer_stage_runtime_dlls(ninfer_kvmem_nvfp4_tests)
  

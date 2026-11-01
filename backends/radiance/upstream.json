@@ -1,0 +1,59 @@
+{
+  "repository": "https://codeberg.org/StillDeadcode/radiance.git",
+  "revision": "d5b65cddc6c763861377c77692fb7ee5375222ec",
+  "license": "Apache-2.0",
+  "abi": 15,
+  "native_patch": "../patches/radiance-abi15-kvmem-windows.patch",
+  "native_patch_sha256": "fb7d276de6ba2a68a4b458b2aea1c3b3ecc98fad7df23f7be79f63d9e9700f7c",
+  "additional_native_patches": [
+    {
+      "path": "../patches/radiance-attention-observer.patch",
+      "sha256": "10f45663347043f3b4be94061cecbf6386406a20d67392e4287ef6ed37468f4f"
+    },
+    {
+      "path": "../patches/radiance-scheduler-test-fakes.patch",
+      "sha256": "31709492229b3b611c85fd872b0afd3127a9f4428a599018cd30deb80d651f9d"
+    },
+    {
+      "path": "../patches/radiance-session-state.patch",
+      "sha256": "7b7602e61c1bef47204331c9f5902ccb0cfda43bbd1d704cff9c44d4b498cb93"
+    },
+    {
+      "path": "../patches/radiance-batched-observer.patch",
+      "sha256": "0fdf8531b1e03f05148c394554847e4f1e443f7824f73e6649e549fcf70efeba"
+    },
+    {
+      "path": "../patches/radiance-monitor.patch",
+      "sha256": "5b3559cc6c8b0e395242a654de5ddbfd98a925adb957b5da43629ce9f08b9adc"
+    },
+    {
+      "path": "../patches/radiance-storage-lifecycle.patch",
+      "sha256": "8f157a4f0c4a6772de83a67d2940019a76df53aecdd5ea75b3cdd81d53f83a1c"
+    },
+    {
+      "path": "../patches/radiance-async-observer.patch",
+      "sha256": "78d482aa79ef9a49ec49954db7291b55df59a93fde02950e53d0638ecf70c341"
+    },
+    {
+      "path": "../patches/radiance-media-build.patch",
+      "sha256": "9c06d8ca2bc2c018b7f8717a93d15f441c352d5e9936bf78ec5ff8d793d8fa42"
+    },
+    {
+      "path": "../patches/radiance-media-query.patch",
+      "sha256": "5491724e8ca02239480198d2c0b3ed9813112f091264c5a23e20df2a5c53c360"
+    },
+    {
+      "path": "../patches/radiance-aql-cpu-access.patch",
+      "sha256": "25757d69827a93ee68f6d4834a990b65d5a501933bc2ab780b104a248bc86d59"
+    },
+    {
+      "path": "../patches/radiance-rank-metadata.patch",
+      "sha256": "7f16ce1aa1f75f0b31c7c7c4a798265d8b24cd13961a5d3e81b296e5558887f7"
+    }
+  ],
+  "integration_base": "73e42e988882486035d7ad9d922a776b6e5669db",
+  "qualification": "Master 73e42e9 integration qualified on Linux, single/dual R9700 gfx1201, Qwen3.8-27B MXFP4 and FP8 KV. TP2 executor MTP0/7 and final shared-launcher TP1/TP2 MTP7 passed eight-way image branches, two-turn long context, Pressure/replay and RAM/SSD checks; final TP2 real read-EIO isolation passed. The approved CPU-inaccessible VRAM AQL argument fallback passed native TP1/TP2 x MTP0/7 including recorded passes. Other hardware/models and native Windows remain unqualified.",
+  "algorithm": "Common bounded Query/replay, PageSoftmax/MeanQCosine, graph/LRFU and native accepted-attention Prefill/DecodePressure; rank-local KV/state with combined accepted head statistics, coordinated working-set publication and retained-prefix branches. TP1/TP2 use exact native collectives. Configurable n-gram, DFlash, CPU vision, video/audio and restart persistence are not enabled by this candidate.",
+  "tested_historical_device": "RX9060XT 16GiB gfx1200; RDNA3 is not qualified",
+  "native_windows_qualified": false
+}

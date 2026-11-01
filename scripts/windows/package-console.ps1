@@ -9,7 +9,7 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$PsutilSha256,
     [string]$SourceDir,
     [string]$ChatUiDir,
-    [ValidateSet('all','ninfer')][string]$Backend='all'
+    [ValidateSet('all','ninfer','radiance')][string]$Backend='all'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -41,7 +41,8 @@ $files = @('START-HERE-CN.bat', 'START-HERE-EN.bat', 'scripts/local-console.py',
            'scripts/windows/native-process.ps1', 'scripts/windows/query-scoring.ps1', 'scripts/windows/token-settings.ps1', 'scripts/windows/select-model.ps1', 'scripts/speculative-capabilities.json')
 $files += 'scripts/model_health.py', 'scripts/console_hardware.py', 'scripts/console_memory.py', 'scripts/requirements-console.txt'
 $files += 'scripts/launcher-capabilities.json'
-foreach ($name in '__init__.py', 'config.py', 'plan.py', 'export.py', 'systemd.py', 'worker.py') {
+$files += 'backends/radiance/tools/inspect_rad.py'
+foreach ($name in '__init__.py', 'config.py', 'plan.py', 'radiance.py', 'export.py', 'systemd.py', 'worker.py') {
     $files += 'scripts/launcher/' + $name
 }
 foreach ($name in '__init__.py', 'reader.py', 'schema.py', 'layouts.py', 'formats.py', 'framing.py', 'file_io.py', 'LICENSE', 'PROVENANCE.json') {
@@ -183,6 +184,21 @@ GPU and model qualification: provenance/validation.json.
 '@
 }
 $utf8 = [Text.UTF8Encoding]::new($false)
+if ($Backend -eq 'radiance') {
+$readme = @'
+KVMem - Radiance console integration preview
+
+Double-click START-HERE-EN.bat (English) or START-HERE-CN.bat (Chinese).
+Select radiance-kvmem-server.exe, a .rad model, an AMD GPU, RadianceHome and ROCm path.
+The runtime and model are supplied separately. Native model validation currently covers
+Linux gfx1201 only; Windows AMD inference is not yet hardware-qualified.
+Keep the startup window open. Closing it stops only services it started.
+Diagnostics: START-HERE-EN.bat -Check
+
+双击 START-HERE-CN.bat，选择 Radiance 引擎、.rad 模型、AMD 显卡及运行库路径。
+模型和原生运行库另行提供。目前实机验证仅覆盖 Linux gfx1201；Windows AMD 推理尚未验证。
+'@
+}
 [IO.File]::WriteAllText((Join-Path $output 'START-HERE.txt'), $readme, $utf8)
 $hashes = @{}
 foreach ($relative in $files) { $hashes[$relative] = (Get-FileHash -LiteralPath (Join-Path $output $relative)).Hash.ToLowerInvariant() }
@@ -190,6 +206,6 @@ $manifest = @{ schema_version=1; launch_contract_version=3; python_version=[stri
     console_chat_protocol=1; chat_manifest_sha256=(Get-FileHash -LiteralPath $chatManifest).Hash.ToLowerInvariant();
     python_archive_sha256=$PythonSha256.ToLowerInvariant(); psutil_wheel_sha256=$PsutilSha256.ToLowerInvariant(); offline_console=$true;
     models_included=$false; controller_files=$hashes;
-    supported_backends=[string[]]$(if($Backend -eq 'ninfer'){@('ninfer')}else{@('llamacpp','ninfer','polystrata')}) }
+    supported_backends=[string[]]$(if($Backend -ne 'all'){@($Backend)}else{@('llamacpp','ninfer','polystrata','radiance')}) }
 [IO.File]::WriteAllText((Join-Path $output 'console-build.json'), ($manifest | ConvertTo-Json -Depth 5), $utf8)
 Write-Output "One-click console added: $output"

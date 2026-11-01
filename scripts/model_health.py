@@ -33,7 +33,7 @@ def request_parameters(data):
     if not isinstance(data, dict) or data.get('schema_version') != 1 or not isinstance(data.get('parameters'), dict):
         raise ValueError('Expected configuration schema 1')
     p = {k: v for k, v in data['parameters'].items() if k in FIELDS}
-    if p.get('Backend') not in {'llamacpp', 'ninfer', 'polystrata'}:
+    if p.get('Backend') not in {'llamacpp', 'ninfer', 'polystrata', 'radiance'}:
         raise ValueError('Unsupported inspection backend')
     for k, v in p.items():
         if k == 'Vision':
@@ -402,6 +402,26 @@ class Inspection:
                 raise Incomplete(str(e)) from e
             raise Invalid(str(e)) from e
 
+    def inspect_radiance(self, path):
+        import importlib.util
+        source=Path(__file__).resolve().parents[1]/'backends/radiance/tools/inspect_rad.py'
+        if not source.is_file():raise Incomplete('Radiance container inspector is not installed')
+        size=self.track(path)
+        spec=importlib.util.spec_from_file_location('model_health_rad_reader',source)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        try:info=module.inspect(path,max_directory_bytes=MAX_DIRECTORY)
+        except ValueError as error:raise Invalid(str(error)) from error
+        self.tick()
+        self.report['model']=dict(format='rad',architecture=info['arch_id'],files=1,bytes=size,
+                                  name=info['model'],quantization=info['quant'])
+        self.report['features']=dict(text='present',vision='unknown',mtp='unknown',dflash2='unknown',tokenizer='unknown',template='unknown')
+        vision=bool(info['entries_by_name_prefix'].get('v') and info.get('vision_metadata'))
+        self.report['features']['vision']='present' if vision else 'absent'
+        if self.p.get('Vision') and not vision:
+            raise Invalid('Image input is enabled but this RAD container has no native vision tower/geometry')
+        self.check('rad_directory','pass','RAD 目录与文件范围检查通过','RAD directory and file ranges checked',
+                   str(info['entries'])+' entries; not a weight checksum or runtime compatibility check')
+
     def run(self):
         try:
             if not self.p.get('Model', '').strip():
@@ -409,6 +429,8 @@ class Inspection:
             path = self.path(self.p['Model'])
             if self.p['Backend'] == 'ninfer':
                 self.inspect_ninfer(path)
+            elif self.p['Backend']=='radiance':
+                self.inspect_radiance(path)
             else:
                 self.inspect_gguf(path)
             if self.p.get('ChatTemplateFile'):

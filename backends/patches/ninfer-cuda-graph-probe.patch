@@ -15,10 +15,10 @@ index 1a9ca3dbc97a6634dc6d71ce5e671a3eff6202f3..df355b8595b77b507621a9c21273eab9
 +Changes here: automatic calibration for dense single-device MTP/DFlash2/ordinary execution, typed
 +recoverable allocation fallback, fatal CUDA execution errors preserved, and regression tests.
 diff --git a/src/models/qwen3_5/program/planning/startup.cpp b/src/models/qwen3_5/program/planning/startup.cpp
-index ef17a9eae3a39dad3b61426793bf2c39e5cf1e3e..714db8cc6b6f0ab22acb82cae60bbe48e7f38d84 100644
+index 0dd511f207d6561c2698c466d23d2d58577f5d88..3004fb8d481c6c662ee56d356b433beb703d9296 100644
 --- a/src/models/qwen3_5/program/planning/startup.cpp
 +++ b/src/models/qwen3_5/program/planning/startup.cpp
-@@ -1597,6 +1597,20 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
+@@ -1673,6 +1673,20 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
      return planner;
  }
  
@@ -40,10 +40,10 @@ index ef17a9eae3a39dad3b61426793bf2c39e5cf1e3e..714db8cc6b6f0ab22acb82cae60bbe48
  finalize_sequence_plan_impl(std::unique_ptr<qwen3_5::detail::SequencePlannerImpl> planner,
                              std::uint32_t main_page_groups) {
 diff --git a/src/models/qwen3_5/program/planning/startup.h b/src/models/qwen3_5/program/planning/startup.h
-index d36e2a59a6a51d609809311c4e01765fddb2a60d..30292c4b7f9a4b80ad70667b96cb60f3b2d28cbc 100644
+index db8f3b3c80b3edc58cd420e26ec48d88abf1a97a..91078661f3def2643d15cc6b26e8fd69810a3e17 100644
 --- a/src/models/qwen3_5/program/planning/startup.h
 +++ b/src/models/qwen3_5/program/planning/startup.h
-@@ -224,6 +224,9 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
+@@ -227,6 +227,9 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
  finalize_sequence_plan_impl(std::unique_ptr<qwen3_5::detail::SequencePlannerImpl> planner,
                              std::uint32_t main_page_groups);
  
@@ -54,7 +54,7 @@ index d36e2a59a6a51d609809311c4e01765fddb2a60d..30292c4b7f9a4b80ad70667b96cb60f3
  // position it retains and Host KV for everything else. StateImages are the fixed per-position cost
  // of a checkpoint and Host KV the per-token cost, so the budget first covers the inventory the
 diff --git a/src/models/qwen3_5/program/program.cpp b/src/models/qwen3_5/program/program.cpp
-index 5021b5d7fe962fc2bddd2288cdba2669a07b784a..20fda7a344d04fffb45e873cecf737d7a7b31caa 100644
+index 1e792f544b502f3880709a54fe7565d4cfa3703e..740c6ecc0a1dd165ca9651ef938b7e8edb284e45 100644
 --- a/src/models/qwen3_5/program/program.cpp
 +++ b/src/models/qwen3_5/program/program.cpp
 @@ -3,6 +3,8 @@
@@ -66,7 +66,7 @@ index 5021b5d7fe962fc2bddd2288cdba2669a07b784a..20fda7a344d04fffb45e873cecf737d7
  #include <stdexcept>
  #include <string>
  #include <utility>
-@@ -834,6 +836,34 @@ std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
+@@ -835,6 +837,34 @@ std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
      return std::unique_ptr<Program>(new Program(std::move(impl)));
  }
  
@@ -156,10 +156,10 @@ index 0000000000000000000000000000000000000000..3a31582825392e09e6ef98e2c16393b9
 +}
 +} // namespace ninfer::detail
 diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
-index 9fa87b4e529d0aac4356fd0382a936b6db338fc6..1e527a1388574931cb08ff97fea55968cb085c14 100644
+index 83540fbd58cf517fbe4a29df84c4c97358317419..0a0ceb8dd9b194bd9c0198c2eb79c95aa1ffe023 100644
 --- a/src/runtime/engine/model_instance.cpp
 +++ b/src/runtime/engine/model_instance.cpp
-@@ -21,6 +21,7 @@
+@@ -22,6 +22,7 @@
  #include "models/qwen3_5/expert_admission.h"
  #include "models/qwen3_5/measurement.h"
  #include "runtime/engine/host_memory.h"
@@ -167,7 +167,7 @@ index 9fa87b4e529d0aac4356fd0382a936b6db338fc6..1e527a1388574931cb08ff97fea55968
  #include "runtime/contract/rope_scaling.h"
  
  #include <algorithm>
-@@ -923,8 +924,43 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
+@@ -939,8 +940,43 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
              graft_main_pages += (graft.n_slots + page_tokens - 1U) / page_tokens;
          }
      }

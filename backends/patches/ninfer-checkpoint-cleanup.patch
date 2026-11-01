@@ -1,0 +1,677 @@
+diff --git a/apps/serve/main.cpp b/apps/serve/main.cpp
+index 0e8f197a01bedc74b02815a71afc29c3a7e08a1d..e16333b9b51c312697f3733d7d563e4c6f3e1286 100644
+--- a/apps/serve/main.cpp
++++ b/apps/serve/main.cpp
+@@ -222,6 +222,7 @@ int main(int argc, char** argv) {
+         auto capabilities = nlohmann::json::parse(kvmem::launch_capabilities("ninfer"));
+         capabilities["budget_planning_version"] = 1;
+         capabilities["heads_tensor_parallel_revision"] = 1;
++        capabilities["checkpoint_recompute_revision"] = 1;
+         std::cout << capabilities.dump() << '\n';
+         return 0;
+     }
+diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
+index 65da64f1b1de307f427f846dcd2ec8443e017af4..768eeabccb31bb6488ec9aae0d3fc19acf76338c 100644
+--- a/src/models/qwen3_5/program/prefill.cpp
++++ b/src/models/qwen3_5/program/prefill.cpp
+@@ -1569,8 +1569,15 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+                 }
+                 const bool drafter     = drafter_at(staged.cursor);
+                 schedule_state.drafter = drafter;
+-                const auto memory_frontier = memory_checkpoint_frontier(
+-                    sequence, staged.prompt_tokens, request.allow_memory_reuse);
++                const bool query_checkpoint = memory_query_probe(sequence, staged.prompt_tokens);
++                const auto checkpoint_purpose = query_checkpoint ? kvmem::CheckpointPurpose::QueryReplay
++                                                                 : kvmem::CheckpointPurpose::PromptTail;
++                // Decide before splitting the chunk or allocating a StateImage.
++                // Only an already captured, complete earlier state can substitute
++                // for the ordinary prompt tail; a real Query rewind remains exact.
++                const auto memory_frontier = request.allow_memory_reuse && !query_checkpoint &&
++                    skip_memory_tail_checkpoint(sequence, staged.prompt_tokens) ? 0U :
++                    memory_checkpoint_frontier(sequence, staged.prompt_tokens, request.allow_memory_reuse);
+                 if (memory_frontier > staged.cursor &&
+                     (!split_frontier || memory_frontier < *split_frontier)) {
+                     split_frontier = memory_frontier;
+@@ -1636,15 +1643,17 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+                 // an immutable source, close the Fork before potentially freezing a new rewrite.
+                 settle_state_fork(sequence);
+                 if (memory_frontier && staged.cursor == memory_frontier &&
+-                    (!sequence.window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data ||
+-                     sequence.window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data->prefix.size() != memory_frontier)) {
+-                    capture_memory_prefix(sequence, result.processed_tokens);
++                    (!sequence.window.checkpoints.slot(checkpoint_purpose).data ||
++                     sequence.window.checkpoints.slot(checkpoint_purpose).data->prefix.size() != memory_frontier)) {
++                    capture_memory_prefix(sequence, result.processed_tokens, query_checkpoint);
+                 }
+                 if (memory_rewrite_frontier && staged.cursor == memory_rewrite_frontier &&
+                     (!sequence.window.checkpoints.slot(kvmem::CheckpointPurpose::InputFallback).data ||
+                      sequence.window.checkpoints.slot(kvmem::CheckpointPurpose::InputFallback).data->prefix.size() != memory_rewrite_frontier) &&
+                     (!sequence.window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data ||
+-                     sequence.window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data->prefix.size() != memory_rewrite_frontier)) {
++                     sequence.window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data->prefix.size() != memory_rewrite_frontier) &&
++                    (!sequence.window.checkpoints.slot(kvmem::CheckpointPurpose::PromptTail).data ||
++                     sequence.window.checkpoints.slot(kvmem::CheckpointPurpose::PromptTail).data->prefix.size() != memory_rewrite_frontier)) {
+                     copy_tail(sequence, prefill_hidden.slice(1,
+                         static_cast<std::int32_t>(result.processed_tokens) - 1, 1));
+                     capture_memory_rewrite(sequence, KvmemCheckpointKind::InputFallback);
+diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
+index 18f138518db2afaddea58957f71fcd741ea683b8..fbae7e1d76b310771ce4edacba57c56216a95816 100644
+--- a/src/models/qwen3_5/program/program_impl.cpp
++++ b/src/models/qwen3_5/program/program_impl.cpp
+@@ -515,6 +515,8 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
+     }
+     if (kvmem_window_tokens) {
+         const auto policy=kvmem::CheckpointPolicy::environment();
++        if (policy.extra_recompute_tokens && policy.min_gap)
++            throw std::invalid_argument("NInfer checkpoint extra recompute tokens require KVMEM_CHECKPOINT_MIN_GAP=0");
+         if(policy.enabled) {
+             const auto budget=policy.host_bytes*max_concurrency;
+             const auto staging=kvmem_options.disk_bytes ? state_images->host_layout().image_bytes : 0;
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index 9f3eb8ec7397511bf992e123a1863662337a04f0..5643ab576c1d0983112c692d72b7cf5f26cdcf48 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -555,11 +555,12 @@ struct KvmemCheckpointRecord {
+                 data ? data->state_bytes() + data->metadata_bytes() : 0};
+     }
+ };
+-enum class KvmemCheckpointKind : std::uint16_t { Base, Endpoint, InputFallback, Reconstruction, ReuseAnchor, CoverageBegin = 16 };
++enum class KvmemCheckpointKind : std::uint16_t { Base, Endpoint, InputFallback, Reconstruction, ReuseAnchor, PromptTail, CoverageBegin = 16 };
+ // Lookup priority for equal frontiers.
+ inline constexpr std::array kKvmemCheckpointKinds{
+     KvmemCheckpointKind::Endpoint, KvmemCheckpointKind::Reconstruction,
+-    KvmemCheckpointKind::InputFallback, KvmemCheckpointKind::Base, KvmemCheckpointKind::ReuseAnchor};
++    KvmemCheckpointKind::InputFallback, KvmemCheckpointKind::Base, KvmemCheckpointKind::ReuseAnchor,
++    KvmemCheckpointKind::PromptTail};
+ struct KvmemHistoryMatch {
+     std::size_t history;
+     KvmemCheckpointKind kind;
+@@ -664,9 +665,9 @@ struct KvmemWindowState {
+     std::uint32_t statistics_frontier = 0;
+     std::uint32_t query_tokens = 0;
+     std::uint32_t query_begin = 0, query_end = 0;
+-    // Long prompts retain the pre-query boundary for selection/replay; short prompts
+-    // retain the input prefix before its final token for request-to-request reuse.
+-    kvmem::CheckpointCatalog<KvmemCheckpointRecord> checkpoints{kvmem::CheckpointLimits{5}};
++    // QueryReplay owns the exact pre-Query execution state. PromptTail is a
++    // separate optional reuse point, or an alias leasing its earlier substitute.
++    kvmem::CheckpointCatalog<KvmemCheckpointRecord> checkpoints{kvmem::CheckpointLimits{6}};
+     kvmem::CheckpointArchive<KvmemCheckpointRecord> coverage;
+     kvmem::CheckpointCapturePlan capture_plan;
+     std::uint32_t reuse_anchor = 0;
+@@ -2131,7 +2132,10 @@ private:
+     bool memory_query_probe(const SequenceState& sequence, std::uint32_t prompt_tokens) const;
+     [[nodiscard]] std::uint32_t memory_checkpoint_frontier(const SequenceState& sequence,
+         std::uint32_t prompt_tokens, bool allow_reuse) const;
+-    void capture_memory_prefix(SequenceState& sequence, std::uint32_t chunk_tokens);
++    void capture_memory_prefix(SequenceState& sequence, std::uint32_t chunk_tokens, bool query_checkpoint);
++    bool skip_memory_tail_checkpoint(SequenceState& sequence, std::uint32_t prompt_tokens);
++    bool complete_memory_checkpoint(const SequenceState& sequence, const KvmemPrefixCheckpoint& checkpoint) const;
++    void prune_completed_memory_checkpoints(SequenceState& sequence);
+     std::unique_ptr<KvmemPrefixCheckpoint> capture_memory_checkpoint(SequenceState& sequence, bool optional = false);
+     void capture_memory_coverage(SequenceState& sequence, uint32_t chunk_tokens) noexcept;
+     bool skip_memory_coverage(const SequenceState& sequence) const;
+@@ -2163,7 +2167,8 @@ private:
+     void reserve_memory_history(SequenceState& sequence, RequestControl& request,
+                                 const PreparedPromptData& prompt);
+     bool restore_memory_history(SequenceState& sequence, RequestControl::Prefill& staged);
+-    void retain_memory_history(SequenceState& sequence, const RequestControl& request) noexcept;
++    void retain_memory_history(SequenceState& sequence, const RequestControl& request,
++                               bool completed = false) noexcept;
+     void prepare_memory_statistics(SequenceState& sequence, std::uint32_t query_begin,
+                                    std::uint32_t query_end, std::uint32_t prompt_tokens);
+     void commit_memory_statistics(SequenceState& sequence, std::uint32_t begin,
+diff --git a/src/models/qwen3_5/program/storage/checkpoint_recompute_policy.h b/src/models/qwen3_5/program/storage/checkpoint_recompute_policy.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..634934618b7d48b9d81fc39356b026dee489ca90
+--- /dev/null
++++ b/src/models/qwen3_5/program/storage/checkpoint_recompute_policy.h
+@@ -0,0 +1,103 @@
++#pragma once
++
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++#include <memory>
++#include <numeric>
++#include <span>
++#include <vector>
++
++namespace ninfer::models::qwen3_5::detail {
++
++// Publish only after capture/restore succeeded. The two roles replace the old
++// single Base role across requests, so splitting their names must not retain
++// an obsolete extra image. During a real replay its exact Query source remains
++// protected even if a separate ordinary tail is captured by the second pass.
++template<class State>
++void publish_checkpoint_execution_source(std::shared_ptr<State>& query,
++                                         std::shared_ptr<State>& tail,
++                                         std::shared_ptr<State> source,
++                                         bool query_source, bool query_active) {
++    if (query_source) {
++        query = std::move(source);
++        tail.reset();
++    } else {
++        tail = std::move(source);
++        if (!query_active) query.reset();
++    }
++}
++
++struct CheckpointReplayCompletion {
++    bool prefill_committed = false;
++    bool replay_active = false;
++    bool tail_complete = false;
++    std::uint64_t tail_frontier = 0;
++    std::uint64_t query_end = 0;
++};
++
++// Retire a consumed execution role at accepted Begin, not at final reply. A
++// subsequent decode cancellation then keeps the same single-Base footprint as
++// T=0 previously did. An unfinished replay or incomplete recovery tail cannot
++// release it; T>0 retention remains the separate successful-finish policy.
++template<class State>
++bool retire_query_checkpoint_after_prefill(std::shared_ptr<State>& query,
++                                           const std::shared_ptr<State>& tail,
++                                           std::uint64_t limit,
++                                           const CheckpointReplayCompletion& completion) {
++    if (limit || !query || !tail || !completion.prefill_committed || completion.replay_active ||
++        !completion.tail_complete || completion.tail_frontier < completion.query_end) return false;
++    query.reset();
++    return true;
++}
++
++// This is an extra-token budget, not a time, I/O or StateImage-copy budget.
++inline bool checkpoint_recompute_allowed(std::uint64_t earlier, std::uint64_t frontier,
++                                         std::uint64_t limit, std::uint64_t minimum) {
++    return limit && earlier && earlier < frontier && earlier >= minimum &&
++           frontier - earlier <= limit;
++}
++
++struct CheckpointRecomputePoint {
++    std::uint64_t frontier = 0;
++    // A post-Query input point must retain an alternative that also contains the
++    // whole Query. A consumed pre-Query execution point has no such requirement.
++    std::uint64_t minimum_surrogate = 0;
++    bool complete = false;
++    bool protected_point = false;
++};
++
++inline constexpr auto no_checkpoint_surrogate = std::numeric_limits<std::size_t>::max();
++
++// The caller proves native identity/KV completeness and removes payload aliases.
++// A result entry names a retained earlier point, or no_checkpoint_surrogate when
++// this point stays. Removed neighbours never become representatives: 100/110/120
++// with a budget of 16 retains 100 and 120, rather than silently accumulating 20.
++inline std::vector<std::size_t> checkpoint_recompute_plan(
++        std::span<const CheckpointRecomputePoint> points, std::uint64_t limit) {
++    std::vector<std::size_t> result(points.size(), no_checkpoint_surrogate);
++    if (!limit) return result;
++    std::vector<std::size_t> order(points.size()), retained;
++    std::iota(order.begin(), order.end(), 0);
++    std::stable_sort(order.begin(), order.end(), [&](auto a, auto b) {
++        return points[a].frontier < points[b].frontier;
++    });
++    for (auto index : order) {
++        const auto& point = points[index];
++        if (point.complete && !point.protected_point) {
++            for (auto it = retained.rbegin(); it != retained.rend(); ++it) {
++                const auto& earlier = points[*it];
++                if (earlier.complete && checkpoint_recompute_allowed(
++                        earlier.frontier, point.frontier, limit, point.minimum_surrogate)) {
++                    result[index] = *it;
++                    break;
++                }
++            }
++        }
++        if (result[index] == no_checkpoint_surrogate) retained.push_back(index);
++    }
++    return result;
++}
++
++} // namespace ninfer::models::qwen3_5::detail
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 2ff2940e5c1e9373090d4614685a9e80dc38331c..77f418c61aa467a24e99f1b49e6bc1f9b44525f0 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -2,6 +2,7 @@
+ #include "models/qwen3_5/program/context.h"
+ #include "models/qwen3_5/program/context_work.h"
+ #include "models/qwen3_5/program/storage/kvmem_transfer_trace.h"
++#include "models/qwen3_5/program/storage/checkpoint_recompute_policy.h"
+ 
+ #include <atomic>
+ #include <cstdio>
+@@ -18,6 +19,19 @@ std::atomic<std::uint64_t> next_window_session{1};
+ std::uint32_t valid_columns(std::uint32_t logical_page, std::uint32_t frontier) {
+     return std::min(page_tokens, frontier - logical_page * page_tokens);
+ }
++
++void publish_memory_checkpoint_source(KvmemWindowState& window,
++                                     std::shared_ptr<KvmemPrefixCheckpoint> checkpoint,
++                                     bool query_source) {
++    // Create both entries before borrowing their vector-backed references. A
++    // forked catalog's capacity can be smaller than its configured slot limit.
++    (void)window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay);
++    (void)window.checkpoints.slot(kvmem::CheckpointPurpose::PromptTail);
++    publish_checkpoint_execution_source(
++        window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data,
++        window.checkpoints.slot(kvmem::CheckpointPurpose::PromptTail).data,
++        std::move(checkpoint), query_source, window.query_replay_active);
++}
+ } // namespace
+ 
+ // This bridge borrows Program's existing native pool, address space, stream and
+@@ -1021,15 +1035,108 @@ std::uint32_t ProgramImpl::memory_checkpoint_frontier(const SequenceState& seque
+     return 0;
+ }
+ 
+-void ProgramImpl::capture_memory_prefix(SequenceState& sequence, std::uint32_t chunk_tokens) {
++bool ProgramImpl::complete_memory_checkpoint(const SequenceState& sequence,
++                                             const KvmemPrefixCheckpoint& checkpoint) const {
++    const auto& window = sequence.window;
++    const auto frontier = checkpoint.prefix.size();
++    // These records were captured by, or natively admitted into, this Program's
++    // window. The session binds their backend/layout; restore still verifies the
++    // full descriptor before mutation. This lookup performs no I/O or allocation.
++    if (!window.stamp.valid || !frontier || frontier > sequence.text_kv_valid ||
++        frontier > sequence.ledger.size() || !window.statistics || !window.selector ||
++        frontier > window.statistics_frontier || frontier != checkpoint.identity.stamp.frontier ||
++        !(checkpoint.identity.stamp.session == window.stamp.session) ||
++        checkpoint.state_bytes() != state_images->host_layout().image_bytes ||
++        checkpoint.graph.accepted_through != frontier || checkpoint.graph.block_tokens != page_tokens ||
++        !std::equal(checkpoint.prefix.begin(), checkpoint.prefix.end(), sequence.ledger.begin()) ||
++        !checkpoint.prefix_identity.prefix_equals(sequence.prefix_identity, frontier)) return false;
++    const auto pages = kv_pages_for_tokens(static_cast<std::uint32_t>(frontier));
++    if (window.archive.size() < pages || window.host_versions.size() < pages) return false;
++    for (std::uint32_t page = 0; page < pages; ++page)
++        if (!window.archive[page] || window.host_versions[page] < valid_columns(page, frontier)) return false;
++    return std::all_of(checkpoint.resident_pages.begin(), checkpoint.resident_pages.end(),
++                       [pages](auto page) { return page < pages; });
++}
++
++bool ProgramImpl::skip_memory_tail_checkpoint(SequenceState& sequence, std::uint32_t prompt_tokens) {
++    auto& window = sequence.window;
++    const auto limit = window.coverage.policy().extra_recompute_tokens;
++    if (!limit || !kvmem_window_tokens || prompt_tokens <= 1 ||
++        prompt_tokens > kvmem_window_tokens || memory_query_probe(sequence, prompt_tokens)) return false;
++    const auto frontier = prompt_tokens - 1;
++    if (const auto* existing = memory_checkpoint(window, KvmemCheckpointKind::PromptTail);
++        existing && existing->prefix.size() == frontier) return false;
++    const auto minimum = window.query_end;
++    std::shared_ptr<KvmemPrefixCheckpoint> earlier;
++    for (const auto kind : checkpoint_kinds(window)) {
++        const auto& candidate = memory_checkpoint_slot(window, kind);
++        if (!candidate || !checkpoint_recompute_allowed(candidate->prefix.size(), frontier, limit, minimum) ||
++            (earlier && candidate->prefix.size() <= earlier->prefix.size()) ||
++            !complete_memory_checkpoint(sequence, *candidate)) continue;
++        earlier = candidate;
++    }
++    if (!earlier) return false; // A planned or failed InputFallback is not a saved state.
++    auto& lease = window.checkpoints.slot(kvmem::CheckpointPurpose::PromptTail).data;
++    const bool changed = lease != earlier;
++    lease = std::move(earlier);
++    // A fixed slot keeps both directory identity and payload alive for this
++    // request, including cancellation, without creating another native image.
++    if (changed && kvmem_options.verify_transfers)
++        std::fprintf(stderr, "KVMEM_CHECKPOINT_SKIP purpose=prompt_tail frontier=%u earlier=%zu extra_tokens=%zu limit=%llu source_cold=%d\n",
++            frontier, lease->prefix.size(), frontier - lease->prefix.size(),
++            static_cast<unsigned long long>(limit), int(!lease->state));
++    return true;
++}
++
++void ProgramImpl::prune_completed_memory_checkpoints(SequenceState& sequence) {
+     auto& window = sequence.window;
+-    if (!chunk_tokens || (window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data &&
+-        window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data->prefix.size() >= sequence.text_kv_valid)) {
++    const auto limit = window.coverage.policy().extra_recompute_tokens;
++    if (!limit) return;
++    std::vector<std::shared_ptr<KvmemPrefixCheckpoint>> checkpoints;
++    std::vector<CheckpointRecomputePoint> points;
++    const auto* endpoint = memory_checkpoint(window, KvmemCheckpointKind::Endpoint);
++    for (const auto kind : checkpoint_kinds(window)) {
++        const auto& cp = memory_checkpoint_slot(window, kind);
++        if (!cp || std::find(checkpoints.begin(), checkpoints.end(), cp) != checkpoints.end()) continue;
++        checkpoints.push_back(cp);
++        const auto frontier = cp->prefix.size();
++        // The newest endpoint serves append; an input-side representative serves
++        // repeat/regenerate. Do not replace that latter role by a pre-Query point
++        // or by an endpoint beyond the next prompt's legal restore limit.
++        const auto minimum = window.query_end && frontier >= window.query_end &&
++            frontier < window.output_begin ? window.query_end : 0U;
++        points.push_back({frontier, minimum, complete_memory_checkpoint(sequence, *cp),
++                          cp.get() == endpoint || frontier == sequence.execution_frontier});
++    }
++    const auto replacements = checkpoint_recompute_plan(points, limit);
++    for (std::size_t i = 0; i < checkpoints.size(); ++i) {
++        if (replacements[i] == no_checkpoint_surrogate) continue;
++        const auto& cp = checkpoints[i];
++        const auto& earlier = checkpoints[replacements[i]];
++        const bool query_checkpoint = memory_checkpoint(window, KvmemCheckpointKind::Base) == cp.get();
++        if (kvmem_options.verify_transfers)
++            std::fprintf(stderr, "KVMEM_CHECKPOINT_PRUNE frontier=%zu earlier=%zu extra_tokens=%zu limit=%llu extra_exact_capture_required=%d source_cold=%d\n",
++                cp->prefix.size(), earlier->prefix.size(), cp->prefix.size() - earlier->prefix.size(),
++                static_cast<unsigned long long>(limit), int(query_checkpoint), int(!earlier->state));
++        window.coverage.erase(cp.get());
++        for (auto& slot : window.checkpoints) if (slot.data == cp) slot.data.reset();
++        // Outstanding I/O and foreign owners retain their own shared references.
++        // Removing this owner's aliases never releases their borrowed bytes.
++    }
++}
++
++void ProgramImpl::capture_memory_prefix(SequenceState& sequence, std::uint32_t chunk_tokens, bool query_checkpoint) {
++    auto& window = sequence.window;
++    const auto* previous = memory_checkpoint(window, query_checkpoint ? KvmemCheckpointKind::Base : KvmemCheckpointKind::PromptTail);
++    if (!chunk_tokens || (previous && previous->prefix.size() >= sequence.text_kv_valid)) {
+         throw std::logic_error("KVMem prefix checkpoint is not at an uncaptured evaluated boundary");
+     }
+     copy_tail(sequence, prefill_hidden.slice(1, static_cast<std::int32_t>(chunk_tokens) - 1, 1));
+-    window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data = capture_memory_checkpoint(sequence);
+-    window.query_probe_swaps = window.swaps;
++    publish_memory_checkpoint_source(window, capture_memory_checkpoint(sequence), query_checkpoint);
++    if (query_checkpoint) window.query_probe_swaps = window.swaps;
++    if (kvmem_options.verify_transfers)
++        std::fprintf(stderr, "KVMEM_CHECKPOINT_CAPTURE purpose=%s frontier=%u\n",
++            query_checkpoint ? "query_replay" : "prompt_tail", sequence.text_kv_valid);
+ }
+ 
+ std::unique_ptr<KvmemPrefixCheckpoint> ProgramImpl::capture_memory_checkpoint(SequenceState& sequence, bool optional) {
+@@ -1102,6 +1209,7 @@ std::shared_ptr<KvmemPrefixCheckpoint>& ProgramImpl::memory_checkpoint_slot(Kvme
+     case KvmemCheckpointKind::InputFallback: return window.checkpoints.slot(kvmem::CheckpointPurpose::InputFallback).data;
+     case KvmemCheckpointKind::Reconstruction: return window.checkpoints.slot(kvmem::CheckpointPurpose::Reconstruction).data;
+     case KvmemCheckpointKind::ReuseAnchor: return window.checkpoints.slot(kvmem::CheckpointPurpose::ReuseAnchor).data;
++    case KvmemCheckpointKind::PromptTail: return window.checkpoints.slot(kvmem::CheckpointPurpose::PromptTail).data;
+     }
+     const auto index = unsigned(kind)-unsigned(KvmemCheckpointKind::CoverageBegin);
+     if (auto* entry=window.coverage.at(index)) return entry->record.data;
+@@ -1117,6 +1225,7 @@ const KvmemPrefixCheckpoint* ProgramImpl::memory_checkpoint(const KvmemWindowSta
+     case KvmemCheckpointKind::InputFallback: purpose = kvmem::CheckpointPurpose::InputFallback; break;
+     case KvmemCheckpointKind::Reconstruction: purpose = kvmem::CheckpointPurpose::Reconstruction; break;
+     case KvmemCheckpointKind::ReuseAnchor: purpose = kvmem::CheckpointPurpose::ReuseAnchor; break;
++    case KvmemCheckpointKind::PromptTail: purpose = kvmem::CheckpointPurpose::PromptTail; break;
+     default: {
+         const auto* entry=window.coverage.at(unsigned(kind)-unsigned(KvmemCheckpointKind::CoverageBegin));
+         return entry ? entry->record.data.get() : nullptr;
+@@ -1205,6 +1314,14 @@ void ProgramImpl::capture_memory_endpoint(SequenceState& sequence, const Request
+     const auto frontier = sequence.execution_frontier;
+     if (sequence.text_kv_valid != frontier || !sequence.tail_hidden_valid ||
+         sequence.state.fork_pending || (backend_kv_pages && sequence.mtp_kv_valid != frontier)) return;
++    if (!sequence.window.coverage.policy().extra_recompute_tokens &&
++        !sequence.window.query_replay_active &&
++        memory_checkpoint(sequence.window, KvmemCheckpointKind::PromptTail)) {
++        // Normal finish has accepted the replay. Retire its superseded T=0
++        // execution role before allocating the endpoint, preserving the original
++        // single-Base peak rather than holding Query + tail + a new endpoint.
++        memory_checkpoint_slot(sequence.window, KvmemCheckpointKind::Base).reset();
++    }
+     for (const auto kind : kKvmemCheckpointKinds)
+         if (const auto* checkpoint = memory_checkpoint(sequence.window, kind);
+             checkpoint && checkpoint->prefix.size() == frontier) return;
+@@ -1236,7 +1353,10 @@ void ProgramImpl::capture_memory_rewrite(SequenceState& sequence, KvmemCheckpoin
+     try {
+         if (kind != KvmemCheckpointKind::InputFallback && kind != KvmemCheckpointKind::Reconstruction)
+             throw std::logic_error("invalid KVMem rewrite checkpoint purpose");
+-        if (!window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data || window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data->prefix.size() != sequence.text_kv_valid)
++        if ((!window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data ||
++             window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data->prefix.size() != sequence.text_kv_valid) &&
++            (!window.checkpoints.slot(kvmem::CheckpointPurpose::PromptTail).data ||
++             window.checkpoints.slot(kvmem::CheckpointPurpose::PromptTail).data->prefix.size() != sequence.text_kv_valid))
+             memory_checkpoint_slot(window, kind) = capture_memory_checkpoint(sequence);
+         if (kvmem_options.verify_transfers)
+             std::fprintf(stderr, "KVMEM_REWRITE purpose=%s frontier=%u canonical=1\n",
+@@ -1808,7 +1928,7 @@ bool ProgramImpl::restore_memory_history(SequenceState& sequence, RequestControl
+     }
+     window.query_probe_swaps=window.swaps;
+     if (*frontier == memory_checkpoint_frontier(sequence, staged.prompt_tokens, true))
+-        window.checkpoints.slot(kvmem::CheckpointPurpose::QueryReplay).data = std::move(checkpoint);
++        publish_memory_checkpoint_source(window, std::move(checkpoint), memory_query_probe(sequence, staged.prompt_tokens));
+     else
+         // An exact replay can start at the input capture boundary, so prefill
+         // will not cross it again. Keep the restored complete state for repeats
+@@ -1895,7 +2015,8 @@ void ProgramImpl::reserve_memory_history(SequenceState& sequence, RequestControl
+     }
+ }
+ 
+-void ProgramImpl::retain_memory_history(SequenceState& sequence, const RequestControl& request) noexcept {
++void ProgramImpl::retain_memory_history(SequenceState& sequence, const RequestControl& request,
++                                       bool completed) noexcept {
+     // A cancelled request can retain an earlier complete checkpoint, but cannot
+     // move a transaction whose backend still addresses the active sequence.
+     sequence.window.pending_window.reset();
+@@ -1913,14 +2034,45 @@ void ProgramImpl::retain_memory_history(SequenceState& sequence, const RequestCo
+             if (publication.key == window.session_key && publication.order > window.publication_order) return;
+         }
+     }
++    // Only the successful finish caller releases execution protection. Neither
++    // query_replayed (set at rewind start) nor a late cancellation of a Finishable
++    // request is proof that this is the successful publication path.
++    if (completed && request.lifecycle == Lifecycle::Finishable &&
++        !window.coverage.policy().extra_recompute_tokens &&
++        memory_checkpoint(window, KvmemCheckpointKind::PromptTail)) {
++        // T=0 preserves the previous single-Base retention footprint after the
++        // temporary overlap needed to protect a currently executing replay.
++        memory_checkpoint_slot(window, KvmemCheckpointKind::Base).reset();
++    }
++    if (completed && request.lifecycle == Lifecycle::Finishable && window.coverage.policy().extra_recompute_tokens) {
++        try { prune_completed_memory_checkpoints(sequence); }
++        catch (const std::exception& error) {
++            std::fprintf(stderr, "KVMEM_CHECKPOINT_PRUNE skipped: %s\n", error.what());
++        }
++    }
+     if(window.coverage.policy().enabled) {
+       try {
++        std::shared_ptr<KvmemPrefixCheckpoint> input;
++        if (window.coverage.policy().extra_recompute_tokens) {
++            for (const auto kind : checkpoint_kinds(window)) {
++                const auto& cp = memory_checkpoint_slot(window, kind);
++                if (!cp || cp->prefix.size() >= window.output_begin ||
++                    (input && cp->prefix.size() <= input->prefix.size()) ||
++                    (cp->prefix.size() > window.query_begin && cp->prefix.size() < window.query_end) ||
++                    !complete_memory_checkpoint(sequence, *cp)) continue;
++                input = cp;
++            }
++            // Input-side reuse and append endpoints have distinct legal restore
++            // limits. Prefer both under ordinary budgets; tiny budgets may evict.
++            if (input) window.coverage.remember({kvmem::CheckpointPurpose::None, input}, kvmem::CoveragePurpose::Input);
++        }
+         // Reverse equal-frontier priority: the native Endpoint is published last.
+         for(auto it=kKvmemCheckpointKinds.rbegin();it!=kKvmemCheckpointKinds.rend();++it) {
+             const auto& cp=memory_checkpoint_slot(window,*it);
+             if(cp) window.coverage.remember({kvmem::CheckpointPurpose::None,cp},
+                 *it==KvmemCheckpointKind::Endpoint ? kvmem::CoveragePurpose::Endpoint :
+-                *it==KvmemCheckpointKind::ReuseAnchor ? kvmem::CoveragePurpose::Anchor : kvmem::CoveragePurpose::Periodic);
++                *it==KvmemCheckpointKind::ReuseAnchor ? kvmem::CoveragePurpose::Anchor :
++                cp==input ? kvmem::CoveragePurpose::Input : kvmem::CoveragePurpose::Periodic);
+         }
+         window.checkpoints.clear();
+         window.coverage.prune();
+diff --git a/src/models/qwen3_5/program/transactions/commit.cpp b/src/models/qwen3_5/program/transactions/commit.cpp
+index e4029a1ae59ecd9804f49583fdbae495ff8d2416..077025c3e193c23d21b5c2705e5cb8392feb372c 100644
+--- a/src/models/qwen3_5/program/transactions/commit.cpp
++++ b/src/models/qwen3_5/program/transactions/commit.cpp
+@@ -1,4 +1,5 @@
+ #include "models/qwen3_5/program/program_impl.h"
++#include "models/qwen3_5/program/storage/checkpoint_recompute_policy.h"
+ #include "models/qwen3_5/program/context_work.h"
+ #include "models/qwen3_5/program/context.h"
+ #include "models/qwen3_5/program/planning/rebuild_work.h"
+@@ -606,6 +607,23 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
+ 
+             if (pending_kinds[row] != PendingKind::Begin || decisions[row].cancelled) { continue; }
+             RequestControl& request = requests[lanes[row]];
++            if (kvmem_window_tokens) {
++                auto& state = active_sequence(lanes[row]);
++                const auto* tail = memory_checkpoint(state.window, KvmemCheckpointKind::PromptTail);
++                if (memory_checkpoint(state.window, KvmemCheckpointKind::Base) && tail &&
++                    !state.window.coverage.policy().extra_recompute_tokens) {
++                    // resolve_pending_raw has accepted the complete prefill. Drop
++                    // its consumed Query execution role now, so a later decode
++                    // cancellation does not park an obsolete extra StateImage.
++                    const CheckpointReplayCompletion completion{
++                        true, state.window.query_replay_active,
++                        complete_memory_checkpoint(state, *tail), tail->prefix.size(), state.window.query_end};
++                    retire_query_checkpoint_after_prefill(
++                        memory_checkpoint_slot(state.window, KvmemCheckpointKind::Base),
++                        memory_checkpoint_slot(state.window, KvmemCheckpointKind::PromptTail),
++                        state.window.coverage.policy().extra_recompute_tokens, completion);
++                }
++            }
+             if (decisions[row].terminal) {
+                 request.prefill.reset();
+                 continue;
+@@ -680,7 +698,7 @@ FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
+     }
+     if (!request.publish_continuation) {
+         capture_memory_endpoint(state, request);
+-        retain_memory_history(state, request);
++        retain_memory_history(state, request, true);
+         if (!clear_lane_strict(state, request)) { return out; }
+         out.disposition = runtime::FinishDisposition::Released;
+         out.timings     = request.timings;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 7bbeedb8371082c5b4cf7f22d1111e2875b18641..3cb1d6dc55fed9e4ffd8bf06a2aed112e9cd561a 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -49,6 +49,9 @@ set_tests_properties(ninfer_hybrid_prefix_admission_test PROPERTIES
+   ENVIRONMENT "NINFER_HYBRID_REAL_SCENARIO=restore-admission" SKIP_RETURN_CODE 77)
+ 
+ # Focused Query/Pressure frontend and replay-budget option contracts.
++ninfer_add_test(ninfer_kvmem_checkpoint_recompute_test STANDALONE
++  SOURCES models/qwen3_5/test_checkpoint_recompute_policy.cpp)
++target_compile_features(ninfer_kvmem_checkpoint_recompute_test PRIVATE cxx_std_20)
+ ninfer_add_test(ninfer_kvmem_checkpoint_pool_test
+   SOURCES models/qwen3_5/test_checkpoint_buffer_pool.cpp LIBRARIES ninfer_core ninfer_model_runtime)
+ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_query_policy_tests_PROGRAMS
+diff --git a/tests/models/qwen3_5/test_checkpoint_recompute_policy.cpp b/tests/models/qwen3_5/test_checkpoint_recompute_policy.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e1c4e462777211ebefd9e0f5f8f495fc09766ae
+--- /dev/null
++++ b/tests/models/qwen3_5/test_checkpoint_recompute_policy.cpp
+@@ -0,0 +1,127 @@
++#include "models/qwen3_5/program/storage/checkpoint_recompute_policy.h"
++
++#include <array>
++#include <iostream>
++#include <stdexcept>
++
++#define CHECK(x) do { if (!(x)) throw std::runtime_error(#x); } while (false)
++
++int main() {
++    using namespace ninfer::models::qwen3_5::detail;
++    constexpr auto keep = no_checkpoint_surrogate;
++    {
++        // Short -> long: the successfully captured Query replaces the old tail
++        // without retaining a second unreferenced native image at T=0.
++        std::shared_ptr<int> query;
++        auto tail = std::make_shared<int>(498);
++        std::weak_ptr<int> old_tail = tail;
++        auto captured = std::make_shared<int>(4096);
++        CHECK(!old_tail.expired()); // New capture does not consume the old one.
++        publish_checkpoint_execution_source(query, tail, std::move(captured), true, false);
++        CHECK(query && *query == 4096 && !tail && old_tail.expired());
++
++        // A source still serving InputFallback is not destroyed by role retirement.
++        auto fallback = query;
++        auto next_tail = std::make_shared<int>(8000);
++        publish_checkpoint_execution_source(query, tail, std::move(next_tail), false, false);
++        CHECK(!query && *tail == 8000 && *fallback == 4096);
++
++        // A failed capture never reaches publication; its previous recovery
++        // source remains live. Restoring that source can change its role safely.
++        auto old = tail;
++        try { throw std::runtime_error("capture failed before publication"); }
++        catch (const std::runtime_error&) {}
++        CHECK(tail == old && !query);
++        publish_checkpoint_execution_source(query, tail, tail, true, false);
++        CHECK(query == old && !tail);
++
++        // The replay's second pass must not drop the mandatory Query source.
++        publish_checkpoint_execution_source(query, tail, std::make_shared<int>(8010), false, true);
++        CHECK(query == old && *tail == 8010);
++        // After successful completion the same publication rule retires its
++        // execution role, while any independent recovery alias remains valid.
++        publish_checkpoint_execution_source(query, tail, tail, false, false);
++        CHECK(!query && *tail == 8010 && *old == 8000);
++    }
++    CHECK(!checkpoint_recompute_allowed(492, 498, 0, 490));
++    CHECK(!checkpoint_recompute_allowed(492, 498, 5, 490));
++    CHECK(checkpoint_recompute_allowed(492, 498, 6, 490));
++    CHECK(!checkpoint_recompute_allowed(498, 498, 16, 490));
++    CHECK(!checkpoint_recompute_allowed(499, 498, 16, 490));
++    CHECK(!checkpoint_recompute_allowed(0, 6, 16, 0));
++    CHECK(!checkpoint_recompute_allowed(489, 498, 16, 490));
++    {
++        // Near-window MTP replay can produce both Query and PromptTail images.
++        // Follow the lifecycle through probe/replay, accepted Begin and a later
++        // decode cancellation. Only accepted Begin may retire the old role.
++        auto query = std::make_shared<int>(1600);
++        auto tail = std::make_shared<int>(1789);
++        std::weak_ptr<int> old_query = query;
++        CheckpointReplayCompletion state{false, true, true, 1789, 1783};
++        CHECK(!retire_query_checkpoint_after_prefill(query, tail, 0, state));
++        state.replay_active = false; // complete_prefill_step alone is not commit.
++        CHECK(!retire_query_checkpoint_after_prefill(query, tail, 0, state));
++        state.prefill_committed = true;
++        state.tail_complete = false;
++        CHECK(!retire_query_checkpoint_after_prefill(query, tail, 0, state));
++        state.tail_complete = true;
++        state.query_end = 1790; // A tail inside the Query is not an alternative.
++        CHECK(!retire_query_checkpoint_after_prefill(query, tail, 0, state));
++        state.query_end = 1783;
++        CHECK(!retire_query_checkpoint_after_prefill(query, tail, 16, state));
++        CHECK(retire_query_checkpoint_after_prefill(query, tail, 0, state));
++        CHECK(old_query.expired() && tail && *tail == 1789);
++        // Cancellation after this transition has only the valid tail to retain.
++        const auto cancelled_history = tail;
++        CHECK(!query && cancelled_history == tail);
++    }
++    {
++        // A repeat cannot restore the endpoint beyond the 499-token prompt.
++        // Keep a complete post-Query input representative, independently of it.
++        const std::array points{
++            CheckpointRecomputePoint{492, 490, true, false},
++            CheckpointRecomputePoint{498, 490, true, false},
++            CheckpointRecomputePoint{626, 0, true, true}};
++        CHECK(checkpoint_recompute_plan(points, 16) == std::vector<std::size_t>({keep, 0, keep}));
++        CHECK(checkpoint_recompute_plan(points, 0) == std::vector<std::size_t>({keep, keep, keep}));
++    }
++    {
++        // Missing/failed native capture cannot stand in for the requested tail.
++        const std::array points{CheckpointRecomputePoint{492, 490, false, false},
++                                CheckpointRecomputePoint{498, 490, true, false}};
++        CHECK(checkpoint_recompute_plan(points, 16) == std::vector<std::size_t>({keep, keep}));
++    }
++    {
++        // Even a short Query must not become unevaluated merely because the
++        // only remaining input checkpoint moved to its preceding prefix.
++        const std::array points{CheckpointRecomputePoint{489, 0, true, false},
++                                CheckpointRecomputePoint{498, 490, true, false},
++                                CheckpointRecomputePoint{506, 0, true, true}};
++        CHECK(checkpoint_recompute_plan(points, 16) == std::vector<std::size_t>({keep, keep, keep}));
++    }
++    {
++        // An executing Query snapshot is protected. Once consumed it may go;
++        // the long Query's completed input checkpoint remains independently.
++        std::array points{CheckpointRecomputePoint{4090, 0, true, false},
++                          CheckpointRecomputePoint{4096, 0, true, true},
++                          CheckpointRecomputePoint{8000, 7990, true, false}};
++        CHECK(checkpoint_recompute_plan(points, 16) == std::vector<std::size_t>({keep, keep, keep}));
++        points[1].protected_point = false;
++        CHECK(checkpoint_recompute_plan(points, 16) == std::vector<std::size_t>({keep, 0, keep}));
++    }
++    {
++        // Evaluate against the final representatives, including unsorted input.
++        const std::array points{CheckpointRecomputePoint{120, 0, true, false},
++                                CheckpointRecomputePoint{100, 0, true, false},
++                                CheckpointRecomputePoint{110, 0, true, false},
++                                CheckpointRecomputePoint{126, 0, true, false}};
++        CHECK(checkpoint_recompute_plan(points, 16) == std::vector<std::size_t>({keep, keep, 1, 0}));
++    }
++    {
++        // Equal position alone never aliases different native states.
++        const std::array points{CheckpointRecomputePoint{100, 0, true, false},
++                                CheckpointRecomputePoint{100, 0, true, false}};
++        CHECK(checkpoint_recompute_plan(points, 16) == std::vector<std::size_t>({keep, keep}));
++    }
++    std::cout << "PASS checkpoint recompute boundary, lifecycle and coverage contracts\n";
++}

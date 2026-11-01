@@ -21,7 +21,16 @@
     const title=root.querySelector('.l-intro h1');if(title)title.textContent=locked?tr('当前启动参数','Current launch parameters'):tr('启动配置','Launch configuration');
     const healthBox=root.querySelector('[data-model-health]');if(healthBox)healthBox.hidden=locked;
     const key=root.querySelector('[data-param=ApiKey]');
-    if(locked&&key){key.value='';key.placeholder=runtime?.api_key_configured?tr('已设置 · 密钥不回显','Configured · Key not displayed'):tr('未设置','Not configured');}
+    if(key){
+      if(locked){
+        key.value='';key.dataset.launchKeyHidden='true';
+        const configured=startPending?!!pendingParameters?.ApiKey:runtime?.api_key_configured;
+        key.placeholder=configured?tr('已设置 · 密钥不回显','Configured · Key not displayed'):tr('未设置','Not configured');
+      }else if(key.dataset.launchKeyHidden==='true'){
+        key.value=launchKeys[root.querySelector('[data-param=Backend]')?.value]||'';
+        key.placeholder='';delete key.dataset.launchKeyHidden;
+      }
+    }
     draftStatus();renderBudgetAdjustment();
   }
   function syncRunningConfiguration(status){
@@ -74,6 +83,7 @@
     QueryScorer:'page-softmax',GraphAlpha:0.2,Lrfu:false,ScoreAggregation:'mean',QueryMaxTokens:512,QueryReplayMaxTokens:2048};
   const ninferDefaultPreset={...commonPreset,Backend:'ninfer',ThinkingMode:'default',ThinkingBudget:0,KvType:'int8',Prefill:256,DraftTokens:4,DraftPolicy:'adaptive',NgramDrafts:31,NgramMinMatch:12,FastPrefill:true,DeviceProfile:'auto',Vision:true};
   const presets = [
+    {id:'radiance',title:['Radiance AMD','Radiance AMD'],note:['单卡或双卡张量并行、图像、跨轮历史和并发解码。','One or two GPUs with tensor parallelism, images, conversation history and batched decode.'],parameters:{"Backend":"radiance","Context":65536,"Budget":4096,"Reserve":1024,"HostMiB":8192,"SinkTokens":128,"RecentTokens":512,"Concurrency":1,"RetainedSessions":8,"QueryScorer":"page-softmax","ScoreAggregation":"mean","GraphAlpha":0.2,"Lrfu":false,"QueryMaxTokens":512,"QueryReplayMaxTokens":2048,"KvType":"fp8","Prefill":512,"SpeculativeMode":"none","DraftTokens":0,"DraftPolicy":"fixed","Vision":false,"MaxTokens":0,"ThinkingMode":"default","ThinkingBudget":0,"VramReserveMiB":1024}},
     {id:'ninfer-speed',title:['NInfer · 极速档','NInfer · Speed'],
       parameters:{...ninferDefaultPreset,SpeculativeMode:'dflash2',DraftTokens:5,DraftPolicy:'fixed',Budget:36*1024,Reserve:4*1024,NgramDrafts:0},
       note:['启用 DFlash2，历史 KV 预算较少，侧重响应速度。','Uses DFlash2 with a smaller history KV budget, prioritizing response speed.']},
@@ -89,7 +99,8 @@
   const defaults={Backend:'ninfer',Model:'',Worker:'',Gpu:'',Context:262144,Budget:32768,HostMiB:16384,Reserve:1024,Prefill:128,MaxTokens:1024,Port:18200,ListenHost:'127.0.0.1',SinkTokens:12288,RecentTokens:1024};
   // Resource and feature edits belong to each engine; placement and listener stay explicit.
   const sharedSettings=['Gpu','Port','ListenHost'];
-  const names={llamacpp:'llama.cpp · Dense',ninfer:'NInfer · Dense',polystrata:'PolyStrata · MoE'};
+  const names={llamacpp:'llama.cpp · Dense',ninfer:'NInfer · Dense',polystrata:'PolyStrata · MoE',radiance:'Radiance · AMD'};
+  const modelFormat=b=>info?.backend_capabilities?.[b]?.model_format||(b==='radiance'?'.rad':b==='ninfer'?'.ninfer':'.gguf');
   const groups=[['缓存与历史','Cache & history'],['硬件与加速','Hardware & acceleration'],['思考设置','Thinking settings'],['模板与图像','Templates & vision'],['服务与并发','Service & concurrency'],['召回策略','Recall policy']];
   const make=(tag,attrs={},text)=>{const el=document.createElement(tag);Object.entries(attrs).forEach(([k,v])=>el.setAttribute(k,v));if(text!==undefined)el.textContent=text;return el;};
   function healthParameters(){
@@ -218,12 +229,13 @@
       const value=el.dataset.booleanSelect==='true'?el.value==='true':el.type==='checkbox'?(el.dataset.inverted==='true'?!el.checked:el.checked):el.multiple?Array.from(el.selectedOptions).map(x=>x.value).join(','):(el.type==='number'||el.dataset.valueType==='number')&&el.value!==''?Number(el.value):el.value;
       parameters[el.dataset.param]=el.dataset.idleSessions==='true'&&value!==''?Number(value)+1:value;
     });
-    const raw={StageLayers:String(parameters.StageLayers||''),WorkerArgs:root.querySelector('[data-native]')?.value||'[]'};
+    const raw={StageLayers:String(parameters.StageLayers||''),TensorSplit:String(parameters.TensorSplit||''),WorkerArgs:root.querySelector('[data-native]')?.value||'[]'};
     parameters.StageLayers=raw.StageLayers.trim()?raw.StageLayers.split(',').map(x=>Number(x.trim())).filter(Number.isFinite):[];
+    parameters.TensorSplit=raw.TensorSplit.trim()?raw.TensorSplit.split(',').map(x=>Number(x.trim())).filter(Number.isFinite):[];
     try{parameters.WorkerArgs=JSON.parse(raw.WorkerArgs);}catch{parameters.WorkerArgs=[];}
     return {version:2,parameters,raw};
   }
-  function usableDraft(value){return value&&value.version===2&&value.parameters&&typeof value.parameters==='object'&&info.backends.includes(value.parameters.Backend)&&Array.isArray(value.parameters.StageLayers||[])&&(!value.raw||typeof value.raw==='object');}
+  function usableDraft(value){return value&&value.version===2&&value.parameters&&typeof value.parameters==='object'&&info.backends.includes(value.parameters.Backend)&&Array.isArray(value.parameters.StageLayers||[])&&Array.isArray(value.parameters.TensorSplit||[])&&(!value.raw||typeof value.raw==='object');}
   function preferBundledWorker(draft){
     const worker=info?.prefer_bundled_worker&&info.workers?.[draft.parameters.Backend];
     if(!worker?.available||draft.parameters.Worker===worker.path)return draft;
@@ -246,7 +258,7 @@
     draft=preferBundledWorker(draft);
     if(configurationLocked()){render(runningParameters||pendingParameters||draft.parameters);return;}
     render(draft.parameters);
-    if(draft.raw){const layers=root.querySelector('[data-param=StageLayers]');if(layers&&typeof draft.raw.StageLayers==='string'){layers.value=draft.raw.StageLayers;layers.dispatchEvent(new Event('input'));}const native=root.querySelector('[data-native]');if(native&&typeof draft.raw.WorkerArgs==='string'){native.value=draft.raw.WorkerArgs;native.dispatchEvent(new Event('input'));}}
+    if(draft.raw){const weights=root.querySelector('[data-param=TensorSplit]');if(weights&&typeof draft.raw.TensorSplit==='string'){weights.value=draft.raw.TensorSplit;weights.dispatchEvent(new Event('input'));}const layers=root.querySelector('[data-param=StageLayers]');if(layers&&typeof draft.raw.StageLayers==='string'){layers.value=draft.raw.StageLayers;layers.dispatchEvent(new Event('input'));}const native=root.querySelector('[data-native]');if(native&&typeof draft.raw.WorkerArgs==='string'){native.value=draft.raw.WorkerArgs;native.dispatchEvent(new Event('input'));}}
     draftStatus();
   }
   root.addEventListener('input',event=>{if(!configurationLocked()&&event.target.matches('[data-param], [data-native]')){if(!budgetPending)budgetAdjustment=null;syncDependencies();scheduleSave();scheduleHealth();renderBudgetAdjustment();}});
@@ -349,7 +361,7 @@
   }
   function message(text,error=false){const el=root.querySelector('[data-launch-message]');if(el){el.textContent=text;el.classList.toggle('l-error',error);el.setAttribute('role',error?'alert':'status');}}
   async function api(path,data,timeout=60000){const response=await fetch('/api/launcher/'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-KVMem-Token':info.token},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(timeout)});const value=await response.json();if(!response.ok)throw Error(value.error||'HTTP '+response.status);return value;}
-  function collect(){const params={};root.querySelectorAll('[data-param]').forEach(el=>{if(el.disabled||el.dataset.uiOnly==='true')return;const k=el.dataset.param;if(el.type==='checkbox'){const checked=el.dataset.inverted==='true'?!el.checked:el.checked;if(checked||el.dataset.explicitBoolean==='true'||k==='PreserveThinking')params[k]=checked;}else if(el.multiple){params[k]=Array.from(el.selectedOptions).map(x=>x.value).join(',');}else if(el.value!==''){params[k]=el.dataset.booleanSelect==='true'?el.value==='true':(el.type==='number'||el.dataset.valueType==='number')?Number(el.value)+(el.dataset.idleSessions==='true'?1:0):el.value;}});const layers=params.StageLayers;if(layers)params.StageLayers=layers.split(',').map(x=>Number(x.trim()));const raw=root.querySelector('[data-native]');if(raw&&!raw.checkValidity())throw Error(raw.validationMessage);if(raw?.value.trim()){const args=JSON.parse(raw.value);if(!Array.isArray(args))throw Error(tr('原生参数必须为 JSON 数组','Native arguments must be a JSON array'));params.WorkerArgs=args;}return {schema_version:1,parameters:params};}
+  function collect(){const params={};root.querySelectorAll('[data-param]').forEach(el=>{if(el.disabled||el.dataset.uiOnly==='true')return;const k=el.dataset.param;if(el.type==='checkbox'){const checked=el.dataset.inverted==='true'?!el.checked:el.checked;if(checked||el.dataset.explicitBoolean==='true'||k==='PreserveThinking')params[k]=checked;}else if(el.multiple){params[k]=Array.from(el.selectedOptions).map(x=>x.value).join(',');}else if(el.value!==''){params[k]=el.dataset.booleanSelect==='true'?el.value==='true':(el.type==='number'||el.dataset.valueType==='number')?Number(el.value)+(el.dataset.idleSessions==='true'?1:0):el.value;}});for(const key of ['StageLayers','TensorSplit'])if(params[key])params[key]=params[key].split(',').map(x=>Number(x.trim()));const raw=root.querySelector('[data-native]');if(raw&&!raw.checkValidity())throw Error(raw.validationMessage);if(raw?.value.trim()){const args=JSON.parse(raw.value);if(!Array.isArray(args))throw Error(tr('原生参数必须为 JSON 数组','Native arguments must be a JSON array'));params.WorkerArgs=args;}return {schema_version:1,parameters:params};}
   function elasticControls(parent,p,raw){
     const section=make('section',{class:'l-elastic l-wide','data-elastic-controls':''});
     section.append(make('h3',{class:'s-title'},tr('专家缓存','Expert cache')));
@@ -483,7 +495,13 @@
     for(const option of get('SpeculativeMode')?.options||[]){const c=profiles[option.value];option.disabled=!c||(option.value!=='none'&&(Number(get('Concurrency')?.value||1)>c.max_concurrency||selectedCount>c.max_devices));}
     dependency('FastPrefill',['int8','rk8v4','rk4v4','rk4v4-e8','rk2v4-e8'].includes(get('KvType')?.value),tr('当前 KV 格式不支持快速预填充。','The current KV format does not support fast prefill.'));
     const gpu=get('Gpu'),gpuCount=gpu?.multiple?gpu.selectedOptions.length:(gpu?.value||'').split(',').filter(Boolean).length;
-    dependency('StageLayers',gpuCount>1,tr('至少选择两张显卡后才能设置层数分配。','Select at least two GPUs to assign layers.'));
+    const tensor=get('TensorParallel');
+    dependency('TensorParallel',backend==='ninfer'&&gpuCount>1,tr('至少选择两张显卡后才能启用张量并行。','Select at least two GPUs to enable tensor parallelism.'));
+    const heads=!!tensor?.checked&&!tensor.disabled;
+    dependency('StageLayers',gpuCount>1&&!heads,tr('层数分配用于非 TP 多卡模式。','Layer allocation applies to multiple GPUs without TP.'));
+    dependency('TensorSplit',heads,tr('先启用张量并行。','Enable tensor parallelism first.'));
+    const weights=get('TensorSplit');
+    if(weights){const parts=weights.value.split(',');weights.setCustomValidity(heads&&weights.value.trim()&&(parts.length!==gpuCount||parts.some(x=>!x.trim()||!Number.isFinite(Number(x))||Number(x)<=0)||!Number.isFinite(parts.reduce((total,x)=>total+Number(x),0)))?tr('请按显卡顺序填写等量的正数权重，或留空自动分配。','Enter one positive weight per GPU in order, or leave empty for automatic allocation.'):'');}
     const keyType=get('KvTypeK'),valueType=get('KvTypeV'),pairStatus=root.querySelector('[data-kv-pair-status]');
     if(keyType&&valueType){
       const quantized=['q8_0','q5_0','q4_0'],mixed=keyType.value&&valueType.value&&quantized.includes(keyType.value)!==quantized.includes(valueType.value);
@@ -542,11 +560,11 @@
     box.append(recent);
     const scan = make('button',{type:'button',class:'s-button l-scan-trigger','data-scan-models':''},tr('查找模型…','Find models…'));
     const modelTools=make('div',{class:'l-model-tools'});
-    modelTools.append(make('small',{},(p.Backend==='ninfer'?'.ninfer':'.gguf')+tr(' · 本机文件',' · Local file')),scan);
+    modelTools.append(make('small',{},(modelFormat(p.Backend))+tr(' · 本机文件',' · Local file')),scan);
     const dialog = make('dialog',{class:'l-model-dialog','aria-labelledby':'model-scan-title'});
     const head = make('div',{class:'l-heading'});
     const close = make('button',{type:'button',class:'s-button'},tr('关闭','Close'));
-    head.append(make('h2',{id:'model-scan-title',class:'s-title'},tr('查找模型','Find models')+' · '+(p.Backend==='ninfer'?'.ninfer':'.gguf')),close);
+    head.append(make('h2',{id:'model-scan-title',class:'s-title'},tr('查找模型','Find models')+' · '+(modelFormat(p.Backend))),close);
     const folderLabel=make('label',{class:'l-field'},tr('模型所在文件夹','Model folder'));
     const directory=make('input',{type:'text','data-scan-directory':'',placeholder:tr('粘贴文件夹路径，或点击浏览文件夹','Paste a folder path, or browse for a folder')});
     folderLabel.append(directory);
@@ -600,7 +618,7 @@
       const reasons={time:['扫描时间已达上限','Time limit reached'],entries:['检查的文件数量已达上限','Entry limit reached'],results:['候选数量已达上限','Result limit reached'],depth:['部分目录层级较深','Some folders are too deeply nested']};
       if(latest.limited)progress.textContent+=tr(' · 仅显示部分结果：',' · Partial results: ')+(latest.limit_reasons?.length?latest.limit_reasons.map(key=>tr(...(reasons[key]||['已达扫描限制','Scan limit reached']))).join('；'):tr('已达扫描限制','Scan limit reached'))+tr('，可选择更具体的文件夹。','; choose a more specific folder.');
       if(latest.skipped)progress.textContent+=tr(' · 部分文件或目录无法读取。',' · Some files or folders could not be read.');
-      if(!models.length)results.append(make('p',{class:'l-scan-empty'},query?tr('没有符合筛选条件的模型。','No models match this filter.'):tr(`扫描范围内未找到 ${p.Backend==='ninfer'?'.ninfer':'.gguf'} 模型。请在上方添加实际存放模型的文件夹，或直接使用“选择模型”。`,`No ${p.Backend==='ninfer'?'.ninfer':'.gguf'} models were found in these locations. Add the folder containing your models above, or use Choose model.`)));
+      if(!models.length)results.append(make('p',{class:'l-scan-empty'},query?tr('没有符合筛选条件的模型。','No models match this filter.'):tr(`扫描范围内未找到 ${modelFormat(p.Backend)} 模型。请在上方添加实际存放模型的文件夹，或直接使用“选择模型”。`,`No ${modelFormat(p.Backend)} models were found in these locations. Add the folder containing your models above, or use Choose model.`)));
       for(const model of models){
         const pick=make('button',{type:'button',class:'l-model-candidate','data-model-candidate':model.path});
         const empty=model.bytes===0||model.warnings?.includes('empty');
@@ -612,7 +630,7 @@
         results.append(pick);
       }
       const different=p.Backend==='ninfer'?'gguf':'ninfer',count=latest.other_formats?.[different]||0;
-      formatHint.hidden=!count;formatHint.textContent=count?tr(`扫描范围还发现 ${count} 个 .${different} 文件；当前后端需要 ${p.Backend==='ninfer'?'.ninfer':'.gguf'} 模型。`,`The scanned locations also contain ${count} .${different} files; this backend needs ${p.Backend==='ninfer'?'.ninfer':'.gguf'} models.`):'';
+      formatHint.hidden=!count;formatHint.textContent=count?tr(`扫描范围还发现 ${count} 个 .${different} 文件；当前后端需要 ${modelFormat(p.Backend)} 模型。`,`The scanned locations also contain ${count} .${different} files; this backend needs ${modelFormat(p.Backend)} models.`):'';
     }
     dialog.addEventListener('close',()=>{scanGeneration++;scanTask?.abort();scanning=false;});
     filter.oninput=renderResults;
@@ -685,7 +703,7 @@
       next.Port = before.Port ?? defaults.Port;
       next.ListenHost = before.ListenHost ?? defaults.ListenHost;
       next.Gpu = before.Gpu || '';
-      next.StageLayers=before.Backend===next.Backend?before.StageLayers||[]:[];
+      next.StageLayers=before.Backend===next.Backend?before.StageLayers||[]:[];next.TensorParallel=before.Backend===next.Backend?!!before.TensorParallel:false;next.TensorSplit=before.Backend===next.Backend?before.TensorSplit||[]:[];
       selectedPreset = preset.id;
       activeTab = 0;
       render(next);
@@ -752,19 +770,21 @@
       GraphAlpha:p.GraphAlpha??(scorer==='meanq-cosine'?0:0.2),Lrfu:p.Lrfu??('NoLrfu' in p?!p.NoLrfu:scorer==='meanq-cosine'),
       QueryMaxTokens:p.QueryMaxTokens??512,QueryReplayMaxTokens:p.QueryReplayMaxTokens??2048};
     let refreshGpuOrder=()=>{};
-    const b=p.Backend,n=b==='ninfer',l=b==='llamacpp',poly=b==='polystrata';
+    const b=p.Backend,n=b==='ninfer',l=b==='llamacpp',poly=b==='polystrata',rad=b==='radiance';
+    if(n)p.CheckpointExtraRecomputeTokens??=0;
     // Resolve the launcher's omitted values before rendering; keep explicit 0/false.
     const concreteDefaults={Prefill:poly?512:defaults.Prefill,ThinkingBudget:0,Concurrency:1,VisionTokens:1024,NgramDrafts:0,NgramMinMatch:12,
       DeviceProfile:'off',LogLevel:'info',QueryMaxTokens:512,ReplayMaxTokens:2048};
     for(const [key,value] of Object.entries(concreteDefaults))if(p[key]===undefined||p[key]===null||p[key]==='')p[key]=value;
     if(p.RetainedSessions===undefined||p.RetainedSessions===null||p.RetainedSessions==='')p.RetainedSessions=poly?Math.max(4,Number(p.Concurrency)+1):4;
-    if(!p.ThinkingMode||p.ThinkingMode==='default')p.ThinkingMode=n?'default':poly?(p.ReasoningEffort==='none'?'off':'on'):'off';
+    if(!p.ThinkingMode||p.ThinkingMode==='default')p.ThinkingMode=(n||rad)?'default':poly?(p.ReasoningEffort==='none'?'off':'on'):'off';
     if(poly&&!p.ReasoningEffort)p.ReasoningEffort='medium';
     if(poly&&p.ReasoningEffort==='high')p.ReasoningEffort='xhigh';
     if(poly&&p.SpeculativeMode==='mtp')p.DraftPolicy='adaptive';
     if(poly&&p.PreserveThinking===undefined)p.PreserveThinking=true;
     if(poly&&p.BlockTokens===undefined)p.BlockTokens=32;
     if(poly&&p.VramReserveMiB===undefined)p.VramReserveMiB=256;
+    if(rad&&p.VramReserveMiB===undefined)p.VramReserveMiB=1024;
     closeHelp();root.replaceChildren();
     const heading=make('div',{class:'l-heading l-page-heading'}),intro=make('div',{class:'l-intro'}),savedState=make('button',{type:'button',class:'l-save-state l-muted','data-draft-state':'','aria-live':'polite'});savedState.onclick=saveEditing;intro.append(make('h1',{},tr('启动配置','Launch configuration')),savedState);heading.append(intro);root.append(heading);
     const layout=make('div',{class:'l-layout'}),main=make('div',{class:'l-main'}),side=make('aside',{class:'l-side'});layout.append(main,side);root.append(layout);
@@ -777,7 +797,7 @@
     gpu.closest('label').classList.add('l-gpu-field');
     gpu.multiple=true;gpu.size=2;Array.from(gpu.options).forEach(o=>o.selected=(p.Gpu||'').split(',').includes(o.value));
     gpu.required=true;
-    if(!info.gpus.length){gpu.replaceChildren(make('option',{value:''},tr('未检测到 NVIDIA 显卡','No NVIDIA GPU detected')));}
+    if(!info.gpus.length){gpu.replaceChildren(make('option',{value:''},tr('未检测到显卡','No GPU detected')));}
     if(info.gpus.length){
       const old=gpu.closest('label'),box=make('div',{class:old.className});
       box.append(...old.childNodes);old.replaceWith(box);
@@ -788,8 +808,9 @@
       const ordered=make('div',{class:'l-gpu-order','data-gpu-order':'','aria-label':tr('显卡执行顺序','GPU execution order')});
       const gpuLimit=make('p',{class:'l-muted l-gpu-limit','data-gpu-limit':'',hidden:''});
       function clearLayers(){
-        const input=root.querySelector('[data-param=StageLayers]');
-        if(input?.value.trim()){input.value='';message(tr('显卡数量已改变，原层数分配已清空，请重新设置。','GPU count changed. Previous layer allocation cleared; configure it again.'));}
+        let cleared=false;
+        for(const key of ['StageLayers','TensorSplit']){const input=root.querySelector(`[data-param=${key}]`);if(input?.value.trim()){input.value='';cleared=true;}}
+        if(cleared)message(tr('显卡选择已改变，原分配已清空，请重新设置。','GPU selection changed. Previous allocation cleared; configure it again.'));
       }
       for(const device of info.gpus){
         const option=Array.from(gpu.options).find(x=>x.value===device.uuid);
@@ -805,9 +826,13 @@
         ordered.append(make('span',{class:'l-muted'},tr('执行顺序 · 从前到后','Execution order · first to last')));
         const input=root.querySelector('[data-param=StageLayers]'),layers=(input?.value||'').split(',').map(x=>x.trim());
         const valid=layers.length===order.length&&layers.every(x=>/^[1-9]\d*$/.test(x));
+        const tensor=root.querySelector('[data-param=TensorParallel]'),split=root.querySelector('[data-param=TensorSplit]');
+        const heads=!!tensor?.checked&&!tensor.disabled,weights=(split?.value||'').split(',').map(x=>x.trim());
+        const validWeights=weights.length===order.length&&weights.every(x=>x&&Number.isFinite(Number(x))&&Number(x)>0)&&Number.isFinite(weights.reduce((total,x)=>total+Number(x),0));
         order.forEach((id,i)=>{
           const device=info.gpus.find(g=>g.uuid===id),row=make('div',{class:'l-gpu-order-row','data-ordered-gpu':id,tabindex:'-1'});
-          row.append(make('span',{class:'l-gpu-position'},String(i+1)),make('span',{class:'l-gpu-order-name'},device.name.replace(/^NVIDIA GeForce /,'')+' · '+id.slice(-8)),make('small',{'data-gpu-layers':''},valid?tr(layers[i]+' 层',layers[i]+' layers'):input?.value.trim()?tr('待校验','Needs validation'):tr('自动分配','Automatic')));
+          const allocation=rad?tr('张量并行','Tensor parallel'):heads?(validWeights?tr('权重 '+weights[i],'Weight '+weights[i]):split?.value.trim()?tr('待校验','Needs validation'):tr('自动分配','Automatic')):(valid?tr(layers[i]+' 层',layers[i]+' layers'):input?.value.trim()?tr('待校验','Needs validation'):tr('自动分配','Automatic'));
+          row.append(make('span',{class:'l-gpu-position'},String(i+1)),make('span',{class:'l-gpu-order-name'},device.name.replace(/^NVIDIA GeForce /,'')+' · '+id.slice(-8)),make('small',{'data-gpu-layers':''},allocation));
           for(const [delta,zh,en] of [[-1,'前移','Move earlier'],[1,'后移','Move later']]){
             const move=make('button',{type:'button',class:'s-button','data-gpu-move':String(delta),'aria-label':tr(zh,en)+' · '+device.name+' · '+id.slice(-8)},tr(zh,en));
             move.disabled=i+delta<0||i+delta>=order.length;
@@ -817,6 +842,8 @@
                 if(valid){[layers[i],layers[target]]=[layers[target],layers[i]];input.value=layers.join(',');}
                 else{input.value='';message(tr('原层数分配不完整，已清空；请按新的显卡顺序重新设置。','Incomplete layer allocation cleared; configure it for the new GPU order.'));}
               }
+              const split=root.querySelector('[data-param=TensorSplit]');
+              if(split?.value.trim()){const weights=split.value.split(',').map(x=>x.trim());if(weights.length===order.length&&weights.every(x=>x&&Number.isFinite(Number(x))&&Number(x)>0)){[weights[i],weights[target]]=[weights[target],weights[i]];split.value=weights.join(',');}else{split.value='';message(tr('原 TP 权重不完整，已清空，请重新设置。','Incomplete TP weights cleared; configure them again.'));}}
               [order[i],order[target]]=[order[target],order[i]];sync();gpu.dispatchEvent(new Event('input',{bubbles:true}));
               Array.from(ordered.querySelectorAll('[data-ordered-gpu]')).find(el=>el.dataset.orderedGpu===id)?.focus();
             };
@@ -828,9 +855,11 @@
       function sync(){
         for(const id of [...order,...info.gpus.map(g=>g.uuid).filter(id=>!order.includes(id))]){const option=options.get(id);gpu.append(option);option.selected=order.includes(id);}
         checks.forEach(check=>{check.checked=order.includes(check.dataset.gpuChoice);check.closest('label').classList.toggle('is-selected',check.checked);});
-        const singleOnly=(l||poly)&&order.length>1;
-        const reason=singleOnly?tr('当前后端仅接入单卡。已保留原选择，请只勾选一张显卡后再启动。','This backend currently exposes one GPU. Your selection is retained; select just one GPU before starting.'):!order.length?tr('请至少选择一张显卡','Select at least one GPU'):'';
-        gpuLimit.textContent=reason;gpuLimit.hidden=!reason;gpuLimit.classList.toggle('l-error',singleOnly);
+        const maxDevices=rad?(info.backend_capabilities?.[b]?.supported_combinations?.text?.max_devices||1):(l||poly)?1:8;
+        const tooMany=order.length>maxDevices;
+        const foreignGpu=rad&&order.some(id=>{const vendor=info.gpus.find(g=>g.uuid===id)?.vendor;return vendor&&vendor.toLowerCase()!=='amd';});
+        const reason=tooMany?(rad?tr(`当前后端最多支持 ${maxDevices} 张显卡。请调整选择后启动。`,`This backend supports up to ${maxDevices} GPUs. Adjust the selection before starting.`):tr('当前后端仅接入单卡。已保留原选择，请只勾选一张显卡后再启动。','This backend currently exposes one GPU. Your selection is retained; select just one GPU before starting.')):foreignGpu?tr('Radiance 需要 AMD 显卡，请更改当前选择。','Radiance requires an AMD GPU; change the selected device.'):!order.length?tr('请至少选择一张显卡','Select at least one GPU'):'';
+        gpuLimit.textContent=reason;gpuLimit.hidden=!reason;gpuLimit.classList.toggle('l-error',tooMany||foreignGpu);
         checks[0].setCustomValidity(reason);choices.setAttribute('aria-invalid',String(!!reason));drawOrder();
       }
       gpu.addEventListener('change',()=>{order=Array.from(gpu.selectedOptions).map(option=>option.value);sync();});sync();gpu.after(choices);box.append(ordered,gpuLimit);
@@ -878,7 +907,7 @@
       help(kvTitle,tr('KV 格式','KV format'),tr('K 和 V 可分别选择：q8_0、q5_0、q4_0 可互配；f16、f32 可互配。浮点与量化不能混搭。','Choose K and V independently: q8_0, q5_0 and q4_0 can be combined; f16 and f32 can be combined. Floating-point and quantized types cannot be mixed.'));
       kvField.append(kvTitle,pair,make('p',{class:'l-muted l-error l-kv-status','data-kv-pair-status':'','aria-live':'polite',hidden:''}));panels[0].append(kvField);
     }else{
-      const kv=poly?['f16','q8_0']:['int8','bf16','fp8','nvfp4','k8v4','rk8v4','rk4v4','rk4v4-e8','rk2v4-e8'];
+      const kv=rad?['fp8','bf16']:poly?['f16','q8_0']:['int8','bf16','fp8','nvfp4','k8v4','rk8v4','rk4v4','rk4v4-e8','rk2v4-e8'];
       field(panels[0],{...p,KvType:p.KvType||kv[0]},'KvType','KV 格式','KV format','text',kv.map(v=>[v,v]));
     }
     // UI state only: the worker still receives the existing path/budget pair.
@@ -905,6 +934,7 @@
       '空间不足时，按累计注意力保留驻留内容；开头与最近内容按下方预算保护。空闲会话保留还受共享内存预算限制。',
       'Under memory pressure, retain resident content by accumulated attention. Protect the prefix and recent tokens using the budgets below. Idle sessions also share the memory budget.');
     ['SinkTokens','RecentTokens','RetainedSessions'].forEach(k=>{const el=panels[0].querySelector(`[data-param="${k}"]`);if(el)retention.append(el.closest('label'));});
+    if(n){const extra=field(retention,p,'CheckpointExtraRecomputeTokens','快照额外重算上限 · tokens','Checkpoint extra recompute limit · tokens','number',null,['0 关闭。允许用附近较早点替代低收益快照；执行中的 Query 回放点仍受保护。重试可能需要重新保存快照或读取 SSD，因此该值不是耗时上限。','0 disables this optimization. Nearby earlier states can replace low-value checkpoints; active Query replay points remain protected. Retries may rebuild checkpoints or read SSD, so this is not a latency limit.']);extra.min='0';extra.max='2147483647';extra.required=true;}
     if(legacyScoring)scoring.before(make('p',{class:'l-muted','data-scoring-migration':''},tr('已将旧检索设置转换为明确参数；请检查下方评分器和历史累计选项。','Legacy retrieval settings were converted to explicit controls. Review the scorer and LRFU settings below.')));
     field(scoring,p,'QueryScorer','召回评分算法','Recall scoring algorithm','text',[['page-softmax','Page softmax'],['meanq-cosine','Mean-Q cosine']],['评分器、图传播与历史累计可以独立组合。','Scorer, graph propagation and LRFU can be combined independently.']);
     field(scoring,p,'ScoreAggregation','分组查询聚合','GQA score aggregation','text',[['mean',tr('平均','Mean')],['max',tr('最大','Max')]]);
@@ -914,7 +944,12 @@
     const fraction=field(scoring,{LrfuTopFraction:0.9,...p},'LrfuTopFraction','正向奖励候选比例','Positive reward fraction','number');fraction.min='0';fraction.max='1';fraction.step='any';fraction.required=true;
     for(const [key,zh,en,note] of [['QueryMaxTokens','问题评分上限 · tokens','Query score limit · tokens',['仅使用当前问题末尾的这些 tokens 评分。','Score with at most this many trailing tokens of the current question.']],['QueryReplayMaxTokens','完整回放上限 · tokens','Causal replay limit · tokens',['超过上限时保持驻留视图并使用 Pressure；不会截断因果回放。','Above this limit, retain the resident view with Pressure; causal replay is not truncated.']]]){const limit=field(scoring,p,key,zh,en,'number',null,note);limit.min='1';limit.required=true;}
     field(panels[1],p,'Prefill','预填充块大小 · tokens','Prefill chunk · tokens','number');
-    if(poly){const vram=field(panels[1],p,'VramReserveMiB','显存预留 · MiB','VRAM reserve · MiB','number',null,['原生引擎最低为 256 MiB；与生成追加空间的 token 预算分别设置。','Worker minimum: 256 MiB. Separate from the generation workspace measured in tokens.']);vram.min='256';vram.max='65536';}
+    if(poly||rad){const vram=field(panels[1],p,'VramReserveMiB','显存预留 · MiB','VRAM reserve · MiB','number',null,['原生引擎最低为 256 MiB；与生成追加空间的 token 预算分别设置。','Worker minimum: 256 MiB. Separate from the generation workspace measured in tokens.']);vram.min='256';vram.max='65536';}
+    const tensor=field(panels[1],p,'TensorParallel','张量并行 · heads','Tensor parallelism · heads','checkbox',null,
+      ['将每层计算分配到多张显卡。默认关闭；启用后只使用 heads 注意力。','Distribute each layer across GPUs. Off by default; uses heads attention.'],!n);
+    const tensorSplit=field(panels[1],{...p,TensorSplit:(p.TensorSplit||[]).join(',')},'TensorSplit','TP 权重（可选）','TP weights (optional)','text',null,
+      ['依次对应上方显卡，例如 3,1；留空由后端根据可用显存和连接情况分配。实际比例受 head 和量化分块约束。','In GPU order, e.g. 3,1. Empty lets the backend allocate using available memory and links. Heads and quantization constrain the actual split.'],!n);
+    tensor.addEventListener('change',refreshGpuOrder);tensorSplit.addEventListener('input',refreshGpuOrder);
     const layerSplit=field(panels[1],{...p,StageLayers:(p.StageLayers||[]).join(',')},'StageLayers','多卡层数分配（可选）','Layer split (optional)','text',null,[n?'依次对应上方第 1、2…张显卡，用逗号分隔；留空由后端分配':'当前接入暂不支持设置多卡层数',n?'Comma-separated counts for GPU 1, 2, … above; empty uses backend allocation':'Layer assignment is unavailable in this integration'],!n);
     layerSplit.addEventListener('input',refreshGpuOrder);refreshGpuOrder();
     const specModes=info.speculative_capabilities?.[b]||{none:{},...(n?{mtp:{max_draft_tokens:15,adaptive:true,ngram:true,max_concurrency:8,max_devices:8,draft_asset:'embedded'}}:{})};
@@ -925,15 +960,15 @@
     const draftTokens=field(panels[1],p,'DraftTokens','草稿长度 · tokens','Draft length · tokens','number',null,
       ['主模型会验证草稿；实际长度还受草稿模型限制。DFlash2 首次选择使用 5。','The target verifies the drafts. The draft model can impose a smaller limit. DFlash2 starts at 5.']);
     draftTokens.min='1';
-    specMode.addEventListener('change',()=>{if(specMode.value==='dflash2')draftTokens.value='5';else if(specMode.value!=='none'&&Number(draftTokens.value)<=0)draftTokens.value=String(poly?2:4);});
+    specMode.addEventListener('change',()=>{if(specMode.value==='dflash2')draftTokens.value='5';else if(specMode.value!=='none'&&Number(draftTokens.value)<=0)draftTokens.value=String(rad?3:poly?2:4);});
     field(panels[1],p,'DraftPolicy','草稿长度策略','Draft length policy','text',[
       ['fixed',tr('固定','Fixed')],['adaptive',tr('自动调整','Adaptive')]
     ],['自动调整仅在后端和所选草稿方式支持时生效。','Adaptive mode applies only when supported by the backend and draft method.']);
     const draftModel=field(panels[1],p,'DraftModel','草稿模型 GGUF','Draft model GGUF','text',null,
-      ['llama.cpp 的 DFlash2 需要与主模型匹配的独立草稿文件；NInfer 使用模型内置草稿组件。','DFlash2 on llama.cpp requires a separate draft matching the target. NInfer uses an embedded draft component.'],n||poly);
-    if(!n&&!poly&&info.native_picker!==false){const row=inputActions(draftModel),choose=make('button',{type:'button',class:'s-button l-secondary'},tr('选择文件','Choose file'));row.append(choose);choose.onclick=async()=>{try{const result=await api('browse-model',{backend:'llamacpp',current_path:draftModel.value});if(result.path){draftModel.value=result.path;draftModel.dispatchEvent(new Event('change',{bubbles:true}));}}catch(e){message(e.message,true);}};}
+      ['llama.cpp 的 DFlash2 需要与主模型匹配的独立草稿文件；NInfer 使用模型内置草稿组件。','DFlash2 on llama.cpp requires a separate draft matching the target. NInfer uses an embedded draft component.'],n||poly||rad);
+    if(!n&&!poly&&!rad&&info.native_picker!==false){const row=inputActions(draftModel),choose=make('button',{type:'button',class:'s-button l-secondary'},tr('选择文件','Choose file'));row.append(choose);choose.onclick=async()=>{try{const result=await api('browse-model',{backend:'llamacpp',current_path:draftModel.value});if(result.path){draftModel.value=result.path;draftModel.dispatchEvent(new Event('change',{bubbles:true}));}}catch(e){message(e.message,true);}};}
     if(n)field(panels[1],p,'FastPrefill','启用快速预填充','Enable fast prefill','checkbox',null,['支持 int8、rk8v4、rk4v4、rk4v4-e8、rk2v4-e8；还需模型支持。与 MTP、普通预填充块大小分别设置。','Supports int8, rk8v4, rk4v4, rk4v4-e8 and rk2v4-e8; model support is also required. Independent of MTP and the standard prefill chunk size.'],!n);
-    const thinking=field(panels[2],p,'ThinkingMode','默认思考模式','Default thinking mode','text',[[n?'default':'on',n?tr('跟随模型','Model default'):tr('开启','On')],['off',tr('关闭','Off')]],['需要模型与模板支持。聊天请求中的显式设置优先。','Requires model/template support. Explicit chat settings take priority.']);
+    const thinking=field(panels[2],p,'ThinkingMode','默认思考模式','Default thinking mode','text',[[(n||rad)?'default':'on',(n||rad)?tr('跟随模型','Model default'):tr('开启','On')],['off',tr('关闭','Off')]],['需要模型与模板支持。聊天请求中的显式设置优先。','Requires model/template support. Explicit chat settings take priority.']);
     const thinkingBudget=field(panels[2],p,'ThinkingBudget','默认思考预算 · tokens','Default thinking budget · tokens','number',null,poly?['0：根据输出上限自动给答案留空间；正数：思考 token 上限，也受总输出预算约束。','0: automatically reserve answer space within the output limit. Positive values cap reasoning tokens, subject to the total output budget.']:['0：不设置单独的思考限额，仍受总输出预算约束。正数：思考 token 上限。','0: no separate reasoning cap; the total output budget still applies. Positive values cap reasoning tokens.']);
     thinkingBudget.required=true;
     field(panels[2],p,'ReasoningEffort','默认思考强度（可选）','Default reasoning effort (optional)','text',[
@@ -948,7 +983,7 @@
     field(panels[3],p,'VisionTokens','图像 token 上限（可选）','Image token limit (optional)','number',null,['开启图像输入时生效。','Applies when vision input is enabled.']);field(panels[3],{VisionResidency:'resident',...p},'VisionResidency','图像编码器存放位置','Vision encoder placement','text',[['resident','GPU'],['cpu','CPU']],['开启图像输入时生效；关闭后保留原选择。','Applies when vision input is enabled; the selection is retained when off.']);
     templateFileField(panels[3],p);
     field(panels[4],{ListenHost:'127.0.0.1',...p},'ListenHost','监听地址','Listen address','text',[['127.0.0.1',tr('127.0.0.1 · 仅本机','127.0.0.1 · This computer')],['0.0.0.0',tr('0.0.0.0 · 所有网卡','0.0.0.0 · All interfaces')]],['选择所有网卡后，其他设备可通过本机 IP 和端口访问推理服务','All interfaces allows other devices to access inference through this computer’s IP and port']);field(panels[4],p,'Port','服务端口','Service port','number');
-    const concurrency=field(panels[4],p,'Concurrency','同时处理的请求数（可选）','Simultaneous requests (optional)','number',null,n?['范围 1–8；留空为 1。并发增加会提高 KV 和显存需求。','Range 1–8; empty uses 1. More concurrent requests require more KV and VRAM.']:['范围 1–8；留空为 1。当前控制台使用单卡；并发增加会提高 KV 和显存需求。','Range 1–8; empty uses 1. This console uses one GPU; more concurrent requests require more KV and VRAM.']);concurrency.min='1';concurrency.max='8';
+    const concurrency=field(panels[4],p,'Concurrency','同时处理的请求数（可选）','Simultaneous requests (optional)','number',null,(n||rad)?['范围 1–8；留空为 1。并发增加会提高 KV 和显存需求。','Range 1–8; empty uses 1. More concurrent requests require more KV and VRAM.']:['范围 1–8；留空为 1。当前控制台使用单卡；并发增加会提高 KV 和显存需求。','Range 1–8; empty uses 1. This console uses one GPU; more concurrent requests require more KV and VRAM.']);concurrency.min='1';concurrency.max='8';
     credentialField(panels[4],p);
     const serviceAdvanced=make('details',{class:'l-advanced l-wide'});serviceAdvanced.append(make('summary',{},tr('高级 · 服务标识与日志','Advanced · Service identity & logs')));const serviceFields=make('div',{class:'l-fields l-service-fields'});serviceAdvanced.append(serviceFields);panels[4].append(serviceAdvanced);
     field(serviceFields,p,'ModelAlias','对外模型名（可选）','Served model name (optional)','text',null,poly?['供 API 客户端使用；留空使用 kvmem-polystrata-qwen35。','API model name; empty uses kvmem-polystrata-qwen35.']:['供 API 客户端使用的稳定名称；留空沿用模型名称。','A stable name for API clients; leave empty to inherit the model name.']);
@@ -981,6 +1016,7 @@
     const worker=field(ng,p,'Worker','后端程序','Backend executable','text',null,
       detected?.available?['留空使用已检测到的程序：'+detected.path,'Leave empty to use the detected executable: '+detected.path]:['未检测到后端程序，请填写已安装程序的完整路径。','No backend executable detected. Enter the full path to an installed executable.']);
     worker.placeholder=tr('自动检测','Auto-detect');worker.closest('label').classList.add('l-wide');
+    if(rad){for(const [key,zh,en] of [['RadianceHome','Radiance 资源目录','Radiance resource directory'],['RocmPath','ROCm 运行库目录','ROCm runtime directory']])field(ng,p,key,zh,en);}
     if(poly){
       for(const [key,zh,en,placeholderZh,placeholderEn] of [
         ['Python','Python 程序','Python executable','使用内置环境','Use bundled runtime'],
@@ -1041,12 +1077,22 @@
             draft.parameters.StageLayers=[];if(draft.raw)draft.raw.StageLayers='';
           }
         }
+        if(oldOrder.join(',')!==newOrder.join(',')){
+          const weights=typeof draft.raw?.TensorSplit==='string'&&draft.raw.TensorSplit.trim()?draft.raw.TensorSplit.split(',').map(x=>x.trim()?Number(x):NaN):draft.parameters.TensorSplit||[];
+          if(weights.length===oldOrder.length&&weights.every(x=>Number.isFinite(x)&&x>0)&&Number.isFinite(weights.reduce((total,x)=>total+x,0))&&oldOrder.length===newOrder.length&&newOrder.every(id=>oldOrder.includes(id))){draft.parameters.TensorSplit=newOrder.map(id=>weights[oldOrder.indexOf(id)]);if(draft.raw)draft.raw.TensorSplit=draft.parameters.TensorSplit.join(',');}
+          else{draft.parameters.TensorSplit=[];if(draft.raw)draft.raw.TensorSplit='';}
+        }
         selectedPreset=perBackend[target]?'':presets.find(p=>p.parameters.Backend===target).id;restoreDraft(draft);scheduleSave();
         if(layersCleared)message(tr('显卡选择已改变，原层数分配已清空，请重新设置。','GPU selection changed. Previous layer allocation cleared; configure it again.'));
       }catch(e){backend.value=b;message(e.message,true);}
     };
     [save,preview,start,stop].forEach(button=>button.onclick=()=>act(button.dataset.action));
     if(info.script_export_version){start.textContent=tr('生成并启动','Generate and start');root.querySelectorAll('[data-browse-template],[data-browse-model],[data-scan-folder]').forEach(button=>button.hidden=true);}
+    if(rad){
+      const residency=root.querySelector('[data-param=VisionResidency]');
+      if(residency){residency.value='resident';residency.disabled=true;residency.dataset.backendSupported='false';}
+      for(const option of root.querySelector('[data-param=LogLevel]').options)option.disabled=!['info','debug','trace'].includes(option.value);
+    }
     if(poly){
       for(const key of ['LogLevel']){const input=root.querySelector(`[data-param=${key}]`);if(input){input.disabled=true;input.dataset.backendSupported='false';}}
     }
@@ -1059,7 +1105,8 @@
   function renderBudgetAdjustment(){
     const button=root.querySelector('[data-budget-auto]'),status=root.querySelector('[data-budget-status]');if(!button||!status)return;
     const gpu=root.querySelector('[data-param=Gpu]'),selection=gpu?.multiple?Array.from(gpu.selectedOptions).map(x=>x.value):(gpu?.value||'').split(',').filter(Boolean);
-    const unavailable=selection.length!==1||root.querySelector('[data-param=TensorParallel]')?.checked;
+    const tensor=root.querySelector('[data-param=TensorParallel]');
+    const unavailable=selection.length!==1||(tensor?.checked&&!tensor.disabled);
     button.disabled=busy||configurationLocked()||runtime?.budget_planning||unavailable;
     button.dataset.disabledReason=unavailable?tr('请选择一张显卡；自动调整暂支持 NInfer 单卡。','Select one GPU; automatic adjustment currently supports single-GPU NInfer.'):'';
     button.textContent=budgetPending?tr('测算中…','Planning…'):tr('自动调整','Auto adjust');

@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 75583ddf503c91e25fa1c4594ac9b2197b579937..1a9dd050755a6bbd5dd9b6391c5d0b8a7c1c9224 100644
+index 11c60057455f41ac6ff8a858bc123e9e71cfd33b..9f893f06f22a05bfec046b526935cf23fd094225 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -333,9 +333,22 @@ if(NOT EXISTS "${NINFER_KVMEM_SOURCE_DIR}/include/kvmem/memory_contract.hpp")
@@ -26,10 +26,10 @@ index 75583ddf503c91e25fa1c4594ac9b2197b579937..1a9dd050755a6bbd5dd9b6391c5d0b8a
    add_subdirectory(apps)
    add_subdirectory(tools)
 diff --git a/docs/serving.md b/docs/serving.md
-index b4f66a9b95e573bb9a3dffb6a57b46b408ab13d9..94f795abd0f7a3a237076bac0cc41f1783a5c7b5 100644
+index a71ea7ea6a328bb1c47de3dbd92aad5adb320bf0..4085814a760ec013c936975bbc00514a81979745 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
-@@ -1229,9 +1229,15 @@ last JSON chunk before `[DONE]`: the empty `choices` usage chunk when
+@@ -1264,9 +1264,15 @@ last JSON chunk before `[DONE]`: the empty `choices` usage chunk when
  }
  ```
  
@@ -105,7 +105,7 @@ index c657bec75808f67fa5d5563f17947d84bba7e128..d7478db81fad8591473a14e7ffefbc46
      PrefixReusePath prefix_reuse_path  = PrefixReusePath::Root;
      MaterializationDiagnostics materialization;
 diff --git a/src/models/qwen3_5/execution/attention.cpp b/src/models/qwen3_5/execution/attention.cpp
-index a6ba5e7d2f631bbef9fc07e69947ef99cb820fc8..979b34748d607893c8bc93c24534ad63e7de7adb 100644
+index ec7a7fd87472252155d6d456aaf7598c30dad359..afff8cf8571ee10a52da2d3d9568344fb500fda9 100644
 --- a/src/models/qwen3_5/execution/attention.cpp
 +++ b/src/models/qwen3_5/execution/attention.cpp
 @@ -133,10 +133,15 @@ void text_qk_norm_rope(const Tensor& positions, const RopeConfig& rope,
@@ -171,10 +171,10 @@ index 30b1bb0f297c7af4d572fb270c0cef2b10dfab20..8292e8aa0d0d22b5af61df13749f2395
  };
  } // namespace ninfer::models::qwen3_5::execution
 diff --git a/src/models/qwen3_5/program/planning/startup.cpp b/src/models/qwen3_5/program/planning/startup.cpp
-index a42162a6c0bb8fc0bbac2d105d0219b0996690dc..02a8bacd954bc3f8b4a0f8be4c9161234c443363 100644
+index 5e40695c8458ea319c888a27d1f780d385185611..5b8de3f1bc5d65570d36e775629819c7bd9acea0 100644
 --- a/src/models/qwen3_5/program/planning/startup.cpp
 +++ b/src/models/qwen3_5/program/planning/startup.cpp
-@@ -363,8 +363,11 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
+@@ -386,8 +386,11 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                   dimension((widest_verify_window(plan) + 1) * plan.max_concurrency), layers},
                   "memory candidate keys");
              stats.candidate_origin = add_tensor(local, DType::I32, {1}, "memory candidate origin");
@@ -188,7 +188,7 @@ index a42162a6c0bb8fc0bbac2d105d0219b0996690dc..02a8bacd954bc3f8b4a0f8be4c916123
              const auto capture_columns=std::max<std::size_t>(effective_prefill_chunk,
                  (widest_verify_window(plan)+1U)*plan.max_concurrency);
              stats.attention_queries=add_tensor(local,DType::BF16,
-@@ -385,9 +388,11 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
+@@ -408,9 +411,11 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
          out.memory_statistics.front().attention_tokens=add_tensor(builder,DType::I32,
              {dimension(std::max<std::size_t>(effective_prefill_chunk,(widest_verify_window(plan)+1U)*plan.max_concurrency))},
              "memory consumed token capture");
@@ -204,7 +204,7 @@ index a42162a6c0bb8fc0bbac2d105d0219b0996690dc..02a8bacd954bc3f8b4a0f8be4c916123
      if (plan.causal_scoring) {
          out.score_hidden =
 diff --git a/src/models/qwen3_5/program/planning/startup.h b/src/models/qwen3_5/program/planning/startup.h
-index f6fccb09d911bcafdc2fa769372017ed5d7747ce..d36e2a59a6a51d609809311c4e01765fddb2a60d 100644
+index 2550cfa96ddfd4cc0d745ea09dd0b545dbb613ea..db8f3b3c80b3edc58cd420e26ec48d88abf1a97a 100644
 --- a/src/models/qwen3_5/program/planning/startup.h
 +++ b/src/models/qwen3_5/program/planning/startup.h
 @@ -42,7 +42,7 @@ struct MemoryStatisticsLayout {
@@ -304,10 +304,10 @@ index 9b0e197bd5059ebef25d8fe6931f48c301f71a09..b3f46c31c0920bd72530c0047749cea1
      if (staged.vision) { staged.vision->retire_handoff(); }
  
 diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
-index 5e421ded9a647a0410fcf2bc20850864466d4aa9..c488999d46d22e2ab727779834bb917e2bc3950a 100644
+index 436ef8bf2d3f8a9d25911e4b027e0e96b9d3a688..86b9747c0adc61ccb93d4f3c947071a69f18ae27 100644
 --- a/src/models/qwen3_5/program/program_impl.cpp
 +++ b/src/models/qwen3_5/program/program_impl.cpp
-@@ -651,15 +651,19 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
+@@ -664,15 +664,19 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
      prefill_hidden = plan.persistent.prefill_hidden.bind(backing);
      if (!plan.persistent.memory_statistics.empty()) {
          const auto& config = parameters.model.config().text;
@@ -332,7 +332,7 @@ index 5e421ded9a647a0410fcf2bc20850864466d4aa9..c488999d46d22e2ab727779834bb917e
          memory_statistics->columns = (std::min(plan.prefill_chunk, plan.capacity) + 126U) / 64U;
          memory_statistics->ranks.resize(device.size());
          memory_candidate_statistics = *memory_statistics;
-@@ -679,7 +683,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
+@@ -692,7 +696,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
              candidates.attention_tokens=stats.attention_tokens;
              if (!layout.layers) { continue; }
              stats.key_sums = layout.key_sums.bind(backings[rank]);
@@ -341,7 +341,7 @@ index 5e421ded9a647a0410fcf2bc20850864466d4aa9..c488999d46d22e2ab727779834bb917e
              stats.attention_queries = layout.attention_queries.bind(backings[rank]);
              stats.attention_rows=layout.attention_rows.bind(backings[rank]);
              stats.attention_positions=layout.attention_positions.bind(backings[rank]);
-@@ -688,7 +692,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
+@@ -701,7 +705,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
              stats.attention_output=layout.attention_output.bind(backings[rank]);
              stats.ranges = layout.ranges.bind(backings[rank]);
              candidates.key_sums = layout.candidate_keys.bind(backings[rank]);
@@ -809,10 +809,10 @@ index 366a3b9783ad186f5a9cb8ce98d4ecc133f68c2c..0b218d10c0f118960e4b514f9e7b650f
          result.timings                 = request->generation_timings;
          result.timings.prepare_seconds = request->prepare_seconds;
 diff --git a/src/runtime/engine/gemma4_core.cpp b/src/runtime/engine/gemma4_core.cpp
-index 39720c9f01f6cb8dbe4ac4558176ca0c92380a71..ec707451d3f1f868d37c677651bf122211f1b0e2 100644
+index 7fb465011b4db28ff55a79f2b2145cb748862567..b184744079976fe1a1635a23db78ac238cd87d4d 100644
 --- a/src/runtime/engine/gemma4_core.cpp
 +++ b/src/runtime/engine/gemma4_core.cpp
-@@ -1495,6 +1495,7 @@ struct Gemma4Core::Impl {
+@@ -1523,6 +1523,7 @@ struct Gemma4Core::Impl {
          result.matched_stop_string             = r.output.matched_stop_string();
          result.thinking                        = r.output.thinking_stats();
          result.thinking.post_thinking_sampling = r.post_thinking;
@@ -821,10 +821,10 @@ index 39720c9f01f6cb8dbe4ac4558176ca0c92380a71..ec707451d3f1f868d37c677651bf1222
          result.prefix_reuse_path               = r.reuse_path;
          result.branches                        = std::move(r.branch_results);
 diff --git a/src/runtime/engine/qwen4_exp_core.cpp b/src/runtime/engine/qwen4_exp_core.cpp
-index a1f964d9df16cba007e97bfc220200ed50a6f856..66f0d40e6106a573ee36e4d6a8cd3625ebe585b2 100644
+index 5dd35b40024d0c1a7c300d7fe3471596543c0cf1..58c5ceb9abf110bc44a4321a3da5220adb04dc6a 100644
 --- a/src/runtime/engine/qwen4_exp_core.cpp
 +++ b/src/runtime/engine/qwen4_exp_core.cpp
-@@ -1721,6 +1721,7 @@ struct Qwen4ExpCore::Impl {
+@@ -1763,6 +1763,7 @@ struct Qwen4ExpCore::Impl {
          result.matched_stop_string             = r.output.matched_stop_string();
          result.thinking                        = r.output.thinking_stats();
          result.thinking.post_thinking_sampling = r.post_thinking;
@@ -846,10 +846,10 @@ index 6d050aef4aee146e54e40148db1cbcb3b40dcb40..6931be115505adc424c8d8a93a5bcd43
          // The first output token comes from prefill; the decode rate covers the rest, as the
          // request-done record does.
 diff --git a/src/serve/generation_service.cpp b/src/serve/generation_service.cpp
-index 5f5d0ed3e48527169bb67906f1131fedbb496e3e..a855e057da000b776a40d602f341f6d7cbc48ed8 100644
+index 51c713a6ca14f7a7ccab3aa39901dc705d5017f6..a5c30ff8c1ac3005ba0127adb3ab269aa0069f61 100644
 --- a/src/serve/generation_service.cpp
 +++ b/src/serve/generation_service.cpp
-@@ -870,6 +870,7 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
+@@ -875,6 +875,7 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
          prepared.prepare_seconds +
          std::max(0.0, result.timings.total_seconds - result.timings.prepare_seconds);
      outcome.metrics.engine_timing                = result.engine_timing;
@@ -928,7 +928,7 @@ index dc9ce7c2f890bca9b3d002e89e25c289aec1ab60..5209b6859e8023121435dac21be415e8
          outcome.completion_tokens > 0 ? static_cast<double>(outcome.completion_tokens - 1) : 0.0;
      std::ostringstream out;
 diff --git a/src/serve/request_log.cpp b/src/serve/request_log.cpp
-index f81f7eb19fce5bcf41991a1bc0458a9c55712890..76244fc4ab947a32cb78dae382776cbf71689593 100644
+index 6df28c6865737517fc3e9fff61e8b40163e2e54f..f82ab5cdb6cb7bacc40dadb4f363b3216be3f4ac 100644
 --- a/src/serve/request_log.cpp
 +++ b/src/serve/request_log.cpp
 @@ -614,8 +614,7 @@ std::string format_request_done(const RequestLogContext& context,
@@ -941,7 +941,7 @@ index f81f7eb19fce5bcf41991a1bc0458a9c55712890..76244fc4ab947a32cb78dae382776cbf
  
      std::ostringstream out;
      out << "[req " << context.id << "] done finish="
-@@ -976,9 +975,7 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
+@@ -978,9 +977,7 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
          Json{{"finish_reason", finish_reason_name(outcome.finish_reason)},
               {"prompt_tokens", outcome.prompt_tokens},
               {"completion_tokens", outcome.completion_tokens},
@@ -953,10 +953,10 @@ index f81f7eb19fce5bcf41991a1bc0458a9c55712890..76244fc4ab947a32cb78dae382776cbf
               {"prefix_reuse_path", prefix_reuse_path_name(outcome.metrics.prefix_reuse_path)},
               {"thinking_budget", outcome.thinking.requested_budget
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 999daaf3ec78d62502fa2fc221492f333f4ca14e..3d9cd3c12fd51eabcf56d6707f2b50bf6d93c302 100644
+index 4d84c8235d67deb321ec300c46858594f6050f80..7b0ae96967d377da59bb267f06128bf3e74d83a4 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -49,6 +49,13 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_query_policy_tests_PROGRAMS
+@@ -50,6 +50,13 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_query_policy_tests_PROGRAMS
  ninfer_finalize_bundle(ninfer_query_policy_tests)
  ninfer_stage_runtime_dlls(ninfer_query_policy_tests)
  

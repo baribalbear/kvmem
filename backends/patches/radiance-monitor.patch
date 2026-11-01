@@ -1,0 +1,145 @@
+--- a/core/runtime/step_observer.h
++++ b/core/runtime/step_observer.h
+@@ -25,6 +25,11 @@
+     // Expected capacity refusals are per request. The engine drains this list
+     // outside the scheduler lock before commit, preserving other batch entries.
+     virtual uint64_t take_capacity_refusal() noexcept { return 0; }
++    // Metadata only, under the scheduler lock; may run on an HTTP thread.
++    // No device work, retained Request pointers or prompt/output text copies.
++    virtual void request_metadata(const Request&, int64_t age_us, int64_t first_us) noexcept {}
++    // HTTP readers must use an independently synchronized metadata snapshot.
++    virtual std::string monitor_snapshot() const { return {}; }
+ 
+     // Optional bounded-residency contract, after declare and before allocation.
+     // Zero preserves ordinary full-context sizing. A positive value promises
+--- a/core/sched/scheduler.h
++++ b/core/sched/scheduler.h
+@@ -210,6 +210,8 @@
+     void set_serial_prefill(bool value) { serial_prefill_=value; }
+     int fail_capacity(uint64_t id);
+     int reject_unsampled(uint64_t id);
++    using RequestObserver=std::function<void(const Request&,int64_t,int64_t)>;
++    void set_request_observer(RequestObserver fn) { request_observer_=std::move(fn); }
+     Request* find(uint64_t id);
+ 
+     /* Requests that reached a terminal state since the last call, oldest first, SWAPPED OUT under
+@@ -697,6 +699,8 @@
+     double  tps_win_prefill_ = 0.0, tps_win_decode_ = 0.0, tps_win_time_ = 0.0;
+     bool    step_open_ = false;
+     bool    serial_prefill_ = false, next_prefill_ = true;
++    RequestObserver request_observer_;
++    void observe_request(const SchedReq&);
+ 
+     /* arrival; mu_ held */
+     int  add_locked(std::unique_ptr<Request> r);
+--- a/core/sched/scheduler.cpp
++++ b/core/sched/scheduler.cpp
+@@ -240,6 +240,7 @@
+     if (waiting_.capacity() < waiting_.size() + (size_t)cfg_.max_seqs + 1)
+         waiting_.reserve(waiting_.size() + (size_t)cfg_.max_seqs + 1);
+     queue_insert(waiting_, slot);
++    observe_request(s);
+     return RAD_OK;
+ }
+ 
+@@ -368,6 +369,12 @@
+     if (short_by > 0) (void)pc_->trim(short_by);
+ }
+ 
++void Scheduler::observe_request(const SchedReq& s) {
++    if(!request_observer_ || !s.req)return;
++    try { request_observer_(*s.req,mono_us()-s.arrived_us,s.first_tok_us ? s.first_tok_us-s.arrived_us : -1); }
++    catch(...) { RAD_ERR("request metadata observer failed"); }
++}
++
+ void Scheduler::close_request(SchedReq& s, ReqState st, const char* reason, bool defer_free,
+                               bool publish, int status, const char* why) {
+     /* PUBLISH BEFORE FREEING. This is the only moment the sequence's whole prefix is both
+@@ -424,6 +431,7 @@
+     /* Terminal, and idempotent on the sink's side: the first call wins, so a cancel racing a
+      * natural stop does not produce two finish reasons. This is the last thing the producer does
+      * to the sink, and the HTTP thread is waiting on exactly it. */
++    observe_request(s);
+     if (st == ReqState::Failed && status < 0) server::sink_fail(s.req->sink, status, why);
+     else server::sink_finish(s.req->sink, finish_of(st, s.req->finish_reason));
+ }
+@@ -2088,6 +2096,10 @@
+         }
+     }
+ 
++    for(const auto& entry:plan_.e) {
++        const auto& request=*reqs_[(size_t)entry.slot];
++        if(request.req && request.req->state==ReqState::Running)observe_request(request);
++    }
+     m_.prefill_tokens += step_prefill_tok_;
+     m_.decode_tokens += step_decode_tok_;
+     ++m_.steps;
+--- a/core/engine.cpp
++++ b/core/engine.cpp
+@@ -1828,6 +1828,9 @@
+         rio.push_back({ rk->device, rk->ctx.stream(), &rk->program });
+     RAD_TRY(sched_.init(ranks_[0]->program, cfg_, kv_iface_.get(), pc_iface_.get(), rio, &geo_));
+     sched_.set_serial_prefill(observer_ && observer_->serial_prefill());
++    if(observer_)sched_.set_request_observer([this](const Request& request,int64_t age,int64_t first) {
++        observer_->request_metadata(request,age,first);
++    });
+     /* THE SMALLEST STEP THE PREFILL STAGER OVERLAPS. A prefill chunk the scheduler holds back for
+      * other work in the step (--busy-prefill-chunk) is kept at or above it: under it every routed
+      * layer reads its pooled experts synchronously, which costs a long prefill far more than the
+@@ -2320,6 +2323,7 @@
+     d.tok   = &tok_bridge;
+     d.grammar = &grammar_bridge;
+     d.live  = snap;
++    if(observer_)d.integration_monitor=[this] { return observer_->monitor_snapshot(); };
+ 
+     /* load_from_vocab warns on its own when the template is missing or will not compile; all we
+      * decide here is whether the endpoint exists. The reply format is the architecture plugin's
+--- a/core/server/server.h
++++ b/core/server/server.h
+@@ -49,6 +49,7 @@
+      * The SAME function the live view is built with (liveview.h), so the terminal view and the
+      * web page cannot drift into disagreeing about what the engine is doing. */
+     LiveView::Source  live;
++    std::function<std::string()> integration_monitor;
+ };
+ 
+ struct ServerOptions {
+--- a/core/server/server.cpp
++++ b/core/server/server.cpp
+@@ -135,6 +135,11 @@
+  * and /ping answers both GET and POST because different load balancers send different ones and
+  * neither is worth a 405 on a health probe. */
+ void Server::register_routes() {
++    if(deps_.integration_monitor)router_.get("/api/monitor/snapshot",[this](const HttpRequest&) {
++        auto value=deps_.integration_monitor();
++        if(value.empty())return HttpResponse::json_body(503,"{\"error\":\"monitor unavailable\"}");
++        return HttpResponse::json_body(200,std::move(value));
++    });
+     router_.post("/v1/chat/completions", [this](const HttpRequest& q) { return handle_chat(q); });
+     router_.post("/v1/completions",      [this](const HttpRequest& q) { return handle_completion(q); });
+     router_.post("/v1/embeddings",       [this](const HttpRequest& q) { return handle_embeddings(q); });
+--- a/tests/sched_test.cpp
++++ b/tests/sched_test.cpp
+@@ -3443,4 +3443,22 @@
+     CHECK_OK(f.sch.reject_unsampled(next));CHECK(!f.kv.has_sequence(next));
+ }
+ 
++TEST(request_metadata_covers_admission_cancel_and_terminal) {
++    Fixture f;f.build();CHECK_OK(f.start());
++    int waiting=0,closed=0,running=0;
++    f.sch.set_request_observer([&](const Request& r,int64_t age,int64_t first) {
++        CHECK(age>=0);CHECK(first>=-1);
++        if(r.state==ReqState::Waiting)++waiting;
++        else if(r.state==ReqState::Running)++running;
++        else if(r.state==ReqState::Finished || r.state==ReqState::Cancelled)++closed;
++    });
++    const auto a=f.submit(8,2),b=f.submit(8,2);CHECK(a!=0);CHECK(b!=0);
++    CHECK_EQ(waiting,2);CHECK_OK(f.sch.cancel(b));CHECK_EQ(closed,1);
++    int32_t accepted[1]={},tokens[1]={5};uint8_t eos[1]={};
++    Scheduler::StepResult result{};result.n_seq=1;result.n_accepted=accepted;result.token=tokens;result.eos=eos;
++    CHECK(f.sch.step()!=nullptr);CHECK_OK(f.sch.commit(result));
++    CHECK(f.sch.step()!=nullptr);CHECK_OK(f.sch.commit(result));
++    CHECK_EQ(closed,2);CHECK(running>0);
++}
++
+ RAD_TEST_MAIN()

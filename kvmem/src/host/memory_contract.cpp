@@ -41,8 +41,8 @@ bool SessionIdentity::operator==(const SessionIdentity & b) const {
     return id == b.id && incarnation == b.incarnation;
 }
 bool PayloadPlane::operator==(const PayloadPlane & b) const {
-    return std::tie(layer, kind, offset, bytes, alignment, token_stride) ==
-           std::tie(b.layer, b.kind, b.offset, b.bytes, b.alignment, b.token_stride);
+    return std::tie(layer, kind, offset, bytes, alignment, token_stride, rank, head_begin, head_count) ==
+           std::tie(b.layer, b.kind, b.offset, b.bytes, b.alignment, b.token_stride, b.rank, b.head_begin, b.head_count);
 }
 bool PayloadLayout::operator==(const PayloadLayout & b) const {
     return std::tie(format, version, block_tokens, record_bytes, alignment, planes) ==
@@ -53,15 +53,28 @@ void PayloadLayout::validate() const {
         !power_of_two(alignment) || record_bytes % alignment)
         fail(MemoryErrorCode::InvalidPlan, "invalid native payload layout");
     uint64_t end = 0;
-    std::map<uint32_t, std::set<PayloadPlaneKind>> layers;
+    using Shard = std::pair<uint32_t, uint32_t>; // model layer, rank
+    std::map<Shard, std::set<PayloadPlaneKind>> layers;
+    std::map<Shard, std::pair<uint32_t, uint32_t>> heads;
     for (const auto & p : planes) {
         if (!p.bytes || !power_of_two(p.alignment) || p.alignment > alignment ||
             p.offset % p.alignment || p.offset < end ||
-            !layers[p.layer].insert(p.kind).second)
+            !layers[{p.layer, p.rank}].insert(p.kind).second)
             fail(MemoryErrorCode::InvalidPlan, "overlapping/duplicate/misaligned payload plane");
+        if ((!p.head_count && p.head_begin) ||
+            uint64_t(p.head_begin) + p.head_count > std::numeric_limits<uint32_t>::max())
+            fail(MemoryErrorCode::InvalidPlan, "invalid payload head range");
+        const auto range = std::make_pair(p.head_begin, p.head_count);
+        const auto inserted = heads.emplace(Shard{p.layer, p.rank}, range);
+        if (!inserted.second && inserted.first->second != range)
+            fail(MemoryErrorCode::InvalidPlan, "a payload shard has inconsistent head ranges");
         switch (p.kind) {
         case PayloadPlaneKind::Key: case PayloadPlaneKind::Value:
         case PayloadPlaneKind::KeyScale: case PayloadPlaneKind::ValueScale: break;
+        case PayloadPlaneKind::PackedKeyValue:
+            if (p.token_stride)
+                fail(MemoryErrorCode::InvalidPlan, "packed KV pages require opaque token addressing");
+            break;
         default: fail(MemoryErrorCode::InvalidPlan, "unknown payload plane kind");
         }
         end = add(p.offset, p.bytes);
@@ -69,8 +82,27 @@ void PayloadLayout::validate() const {
             fail(MemoryErrorCode::InvalidPlan, "payload plane exceeds its record");
     }
     for (const auto & layer : layers) {
-        if (!layer.second.count(PayloadPlaneKind::Key) || !layer.second.count(PayloadPlaneKind::Value))
+        const bool packed = layer.second.count(PayloadPlaneKind::PackedKeyValue) != 0;
+        const bool key = layer.second.count(PayloadPlaneKind::Key) != 0;
+        const bool value = layer.second.count(PayloadPlaneKind::Value) != 0;
+        if (packed ? layer.second.size() != 1 : (!key || !value))
             fail(MemoryErrorCode::InvalidPlan, "every attention layer requires key and value planes");
+    }
+    std::optional<uint32_t> previous_layer;
+    uint64_t next_head = 0;
+    bool unsharded = false;
+    for (const auto & item : heads) {
+        const auto layer = item.first.first;
+        const auto begin = item.second.first, count = item.second.second;
+        if (!previous_layer || *previous_layer != layer) {
+            previous_layer = layer; next_head = 0; unsharded = false;
+        } else if (unsharded || !count) {
+            fail(MemoryErrorCode::InvalidPlan, "multiple payload shards need explicit head ranges");
+        }
+        if (begin != next_head)
+            fail(MemoryErrorCode::InvalidPlan, "payload heads must cover a contiguous model-order range");
+        next_head += count;
+        unsharded = !count;
     }
 }
 void MemoryDescriptor::validate() const {

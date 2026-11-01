@@ -17,10 +17,10 @@ index 0000000000000000000000000000000000000000..e999b2be964e903698792075971c1ea1
 +workspace planning format-aware; fused inverse-rotated PTQ1 embedding with a single BF16 output
 +rounding; added an artifact-owned codec, conversion recipe and independent numerical tests.
 diff --git a/docs/maintainer/artifact-container.md b/docs/maintainer/artifact-container.md
-index 5fc5dbe97706b67ac242fbba7fa4cc0fc1e8ed10..f432e11bd2e37e46b5f126cba469741d0f8b2518 100644
+index 85a4ec92363bf20af73a3ba917d14f4060cc96b1..77c37be5d6b5630488b4dc70271da436158157a8 100644
 --- a/docs/maintainer/artifact-container.md
 +++ b/docs/maintainer/artifact-container.md
-@@ -323,6 +323,7 @@ group size、scale 类型和解码规则直接由该 codec 定义。
+@@ -325,6 +325,7 @@ group size、scale 类型和解码规则直接由该 codec 定义。
  | q6_g64_fp16 | Signed 6-bit codes，G64，FP16 multiplier |
  | q8_g32_fp16 | Codes `[-127,127]`，G32，FP16 multiplier |
  | t2_g128_fp16 | Ternary codes `[-1,1]`，2-bit two's complement，G128，FP16 multiplier |
@@ -28,29 +28,29 @@ index 5fc5dbe97706b67ac242fbba7fa4cc0fc1e8ed10..f432e11bd2e37e46b5f126cba469741d
  | nvfp4 | E2M1 codes、G16 E4M3FN block scale、FP32 weight divisor |
  | fp8_e4m3fn_row_bf16 | E4M3FN codes，每行一个 BF16 multiplier |
  
-@@ -338,7 +339,7 @@ Code 范围、特殊浮点值、舍入与精确重建按[数值合同](tensor-fo
+@@ -340,7 +341,7 @@ Code 范围、特殊浮点值、舍入与精确重建按[数值合同](tensor-fo
  | 名称 | 当前允许的 format / shape | 对象对齐 |
  |---|---|---:|
- | contiguous_le_v1 | bf16/fp32/int32，rank 0..16 | 256 |
+ | contiguous_le_v1 | bf16/fp32/int32/fp16/uint16，rank 0..16 | 256 |
 -| row_split_k128_v1 | q2_g64_fp16、q4_g64_fp16、q5_g64_fp16、q6_g64_fp16、q8_g32_fp16、t2_g128_fp16，正 rank-2 `[N,K]` | 256 |
 +| row_split_k128_v1 | q2_g64_fp16、q4_g64_fp16、q5_g64_fp16、q6_g64_fp16、q8_g32_fp16、t2_g128_fp16、ptq1_g128_fp16，正 rank-2 `[N,K]` | 256 |
  | block_scale_k16_m128x4_v1 | nvfp4，`N%128=0`、`K%64=0` | 256 |
  | row_scale_v1 | fp8_e4m3fn_row_bf16，正 rank-2 `[N,K]` | 256 |
  | raw_bytes_v1 | Resource，非空字节串 | 1 |
 diff --git a/docs/maintainer/storage-layouts.md b/docs/maintainer/storage-layouts.md
-index 43377d9ae6dba8a94bb27d4961f8c93f6ea32806..6d20a920e6a1859d9af4d2081e2791b6d919865f 100644
+index c1cde3948700c3f391802548ec71526a35af248a..9b2551d977448cc221898edffe822a96a0402495 100644
 --- a/docs/maintainer/storage-layouts.md
 +++ b/docs/maintainer/storage-layouts.md
 @@ -12,7 +12,7 @@ The storage registry contains exactly these identities:
  | Identity | Kind | Compatible numeric formats | Logical shape | Object alignment |
  |---|---|---|---|---:|
- | `contiguous_le_v1` | tensor layout | `bf16`, `fp32`, `int32` | rank `0..16` | 256 bytes |
+ | `contiguous_le_v1` | tensor layout | `bf16`, `fp32`, `int32`, `fp16`, `uint16` | rank `0..16` | 256 bytes |
 -| `row_split_k128_v1` | tensor layout | `q2_g64_fp16`, `q4_g64_fp16`, `q5_g64_fp16`, `q6_g64_fp16`, `q8_g32_fp16`, `t2_g128_fp16` | rank 2 `[N,K]` | 256 bytes |
 +| `row_split_k128_v1` | tensor layout | `q2_g64_fp16`, `q4_g64_fp16`, `q5_g64_fp16`, `q6_g64_fp16`, `q8_g32_fp16`, `t2_g128_fp16`, `ptq1_g128_fp16` | rank 2 `[N,K]` | 256 bytes |
  | `block_scale_k16_m128x4_v1` | tensor layout | `nvfp4` | rank 2 `[N,K]`, `N % 128 == 0`, `K % 64 == 0` | 256 bytes |
  | `row_scale_v1` | tensor layout | `fp8_e4m3fn_row_bf16` | rank 2 `[N,K]` | 256 bytes |
  | `row_interleaved_v1` | tensor layout | `fp8_e4m3fn_row_fp16` | rank 2 `[N,K]` | 256 bytes |
-@@ -93,6 +93,7 @@ group size `G`:
+@@ -95,6 +95,7 @@ group size `G`:
  | `q6_g64_fp16` | 6 | 64 | 32 | 16 |
  | `q8_g32_fp16` | 8 | 32 | 32 | 0 |
  | `t2_g128_fp16` | 2 | 128 | 32 | 0 |
@@ -59,10 +59,10 @@ index 43377d9ae6dba8a94bb27d4961f8c93f6ea32806..6d20a920e6a1859d9af4d2081e2791b6
  The layout extends the last axis to a multiple of 128:
  
 diff --git a/docs/maintainer/tensor-formats.md b/docs/maintainer/tensor-formats.md
-index 03a57e830764dbc629ebeb093d99ca61ccd2ca28..3e35c818e961ab909c686f9626f34d9f98ffb334 100644
+index 9306331bd82718d954ecba4f75ed20cd4e14ffa6..6528aba1df0b010f2a659e17b961b69ce2905d67 100644
 --- a/docs/maintainer/tensor-formats.md
 +++ b/docs/maintainer/tensor-formats.md
-@@ -28,6 +28,7 @@ Grouped quantized-weight formats preserve signed codes plus one scale per logica
+@@ -30,6 +30,7 @@ Grouped quantized-weight formats preserve signed codes plus one scale per logica
  | `q6_g64_fp16` | 6 | 64 | `[-32, 31]` | one binary16 scale/group | 6.25 |
  | `q8_g32_fp16` | 8 | 32 | `[-127, 127]` | one binary16 scale/group | 8.50 |
  | `t2_g128_fp16` | 2 | 128 | `[-1, 1]` | one binary16 scale/group | 2.125 |
@@ -70,7 +70,7 @@ index 03a57e830764dbc629ebeb093d99ca61ccd2ca28..3e35c818e961ab909c686f9626f34d9f
  
  The block-scaled floating-point weight format is:
  
-@@ -449,6 +450,21 @@ columns. It is the native representation of ternary checkpoints, whose values ar
+@@ -467,6 +468,21 @@ columns. It is the native representation of ternary checkpoints, whose values ar
  `scale * {-1, 0, +1}`; a converter repacks them without rounding. The format is defined only in
  the row-split layout.
  
@@ -93,10 +93,10 @@ index 03a57e830764dbc629ebeb093d99ca61ccd2ca28..3e35c818e961ab909c686f9626f34d9f
  
  `q8_g32_fp16` uses an 8-bit two's-complement signed code with the deliberately restricted interval
 diff --git a/docs/weight-conversion.md b/docs/weight-conversion.md
-index 88bfc4d97d9946407faf8f63fae1e8421a7ebc4a..163e48f1ed51de99e113523209171bebd0e8795b 100644
+index 5fa33651d1745d1a53f59b9e96ab105b5ba2f7c0..cd20e20471dc5d57fe753199aead7a09ff1009ee 100644
 --- a/docs/weight-conversion.md
 +++ b/docs/weight-conversion.md
-@@ -167,7 +167,13 @@ backend. Component availability and startup selection are independent.
+@@ -168,7 +168,13 @@ backend. Component availability and startup selection are independent.
  `bonsai2_27b_ternary` ([`ternary.py`](../tools/convert/ternary.py)) builds a Qwen3.8-27B artifact
  whose text tower comes from PrismML's `Ternary-Bonsai-2-27B-PQ2_0.gguf`. Every text projection
  except the GDN A/B controls, the output head and the token-embedding table are stored as
@@ -112,7 +112,7 @@ index 88bfc4d97d9946407faf8f63fae1e8421a7ebc4a..163e48f1ed51de99e113523209171beb
  `hadamard_signs` auxiliary of its input width (three shared vectors in total), and the runtime
  rotates the matching activations. The token table has no Use of its own: the runtime restores each
 diff --git a/include/ninfer/ops/attn_input_proj.h b/include/ninfer/ops/attn_input_proj.h
-index 765bf62617e327486ba4e714429798ca23e22d54..ea57395745c1276e87463197653bd491f5debf2b 100644
+index f47286d2c52928526f3a4d3c87347cc57e00d37b..350dee96eed119def6a16226ca33ff8e86f9d2c2 100644
 --- a/include/ninfer/ops/attn_input_proj.h
 +++ b/include/ninfer/ops/attn_input_proj.h
 @@ -12,6 +12,11 @@
@@ -128,7 +128,7 @@ index 765bf62617e327486ba4e714429798ca23e22d54..ea57395745c1276e87463197653bd491
   * Computes four independent linear projections for each token:
   *
 diff --git a/include/ninfer/ops/gdn_input_proj.h b/include/ninfer/ops/gdn_input_proj.h
-index 4cca794657f85a1d72e5813a35f6fbab39260766..5062e599ad9d9d5fc85121f1ddba4dfdfc1d2aac 100644
+index 03f1e08deb9db37a48f6f71776131ad9ba81220b..87d78e36da87c67378393e3f6e5005e974bef52b 100644
 --- a/include/ninfer/ops/gdn_input_proj.h
 +++ b/include/ninfer/ops/gdn_input_proj.h
 @@ -110,7 +110,7 @@ void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Ten
@@ -158,7 +158,7 @@ index a61dfbb39425f22f3ed3f2b355882fa47a1e085e..64ac5f5fcdfa45bf18018f9cc8fdbac5
   * dequantised values enter the transform unrounded, so out carries one BF16 rounding. No workspace
   * or persistent state.
 diff --git a/include/ninfer/ops/linear.h b/include/ninfer/ops/linear.h
-index 56066bfc6f8cb1e8ade31fd92529bdb82fea952e..9d24e2371681c75c65b7fa9bca3860141ff8081f 100644
+index c7ea73556c2dca8a57524749e4d5e81603972e04..526de16e89ab6ee383f2cdd9c83c436c6fa6a08c 100644
 --- a/include/ninfer/ops/linear.h
 +++ b/include/ninfer/ops/linear.h
 @@ -11,6 +11,11 @@
@@ -190,7 +190,7 @@ index 54fd36a70b4f339f71e70cbac2e20d3b90abfc0c..63ed624f1571ea050090a59430d9f94d
   * Returns the A16-only transient capacity required by LinearAdd for every T in the inclusive
   * [min_tokens,max_tokens] interval. The QType and dimensions are the fixed implementation profile.
 diff --git a/include/ninfer/ops/linear_swiglu.h b/include/ninfer/ops/linear_swiglu.h
-index 8de0c4be06ca1f90b4fa21932560c9f9830d5d3a..6d091dcba4ea6617de817a07b4d42ea1461bb4a2 100644
+index 5989e103256b75d971b3df0fb216c66291c2a72c..3b04f4677ede3d93db40860bc6c0ef93164cb1b4 100644
 --- a/include/ninfer/ops/linear_swiglu.h
 +++ b/include/ninfer/ops/linear_swiglu.h
 @@ -14,6 +14,11 @@
@@ -228,7 +228,7 @@ index 7a639f0e9c6f6af185d1539a4c4d07e105ffe67a..b50de085e5265ff685208c378d47db0f
   * maps each local head row to the id used for output and tie-breaking. Artifact binding establishes
   * the map's range and uniqueness.
 diff --git a/src/artifact/formats.cpp b/src/artifact/formats.cpp
-index 7182cbc4d850047e57799f82067777543f0d8d19..809734f041e76960b765c3d421f2be9b6d63077b 100644
+index 1879b4f503e91154eb3b88ca8468e709dd6eb6d7..27436038b653f7ff298535b7e713bb8a64bf15bb 100644
 --- a/src/artifact/formats.cpp
 +++ b/src/artifact/formats.cpp
 @@ -17,6 +17,7 @@ constexpr std::array kFormats = {
@@ -240,19 +240,19 @@ index 7182cbc4d850047e57799f82067777543f0d8d19..809734f041e76960b765c3d421f2be9b
      std::pair{QType::FP8_E4M3FN_ROW_BF16, std::string_view{"fp8_e4m3fn_row_bf16"}},
      std::pair{QType::FP8_E4M3FN_ROW_FP16, std::string_view{"fp8_e4m3fn_row_fp16"}},
 diff --git a/src/core/weight.h b/src/core/weight.h
-index cd72412450653f94f6b89305b25e548786f93da8..e513bbcdd937a221f64f11273b3dd80388db2adc 100644
+index 96fe6467aff475875e8c8477641f73089b37632f..261868d47cd5fd85b96ed12db46d59e8baceeac3 100644
 --- a/src/core/weight.h
 +++ b/src/core/weight.h
-@@ -45,12 +45,38 @@ enum class QType : std::uint16_t {
-     Q2_G64_FP16 = 28,
-     // E4M3FN row codes followed by one binary16 multiplier (RowInterleaved only).
-     FP8_E4M3FN_ROW_FP16 = 29,
+@@ -52,12 +52,38 @@ enum class QType : std::uint16_t {
+     // itself (an STQ matrix's trellis; its sign vectors are FP16).
+     FP16   = 31,
+     UINT16 = 32,
 +    // Native Prism PTQ1_0: 24 base-3 bytes + 2 tail bytes + FP16 scale per 128 weights.
-+    PTQ1_G128_FP16 = 30,
++    PTQ1_G128_FP16 = 33,
  };
  
  [[nodiscard]] constexpr bool is_gguf(QType format) {
-     return format >= QType::GGUF_Q8_0 && format <= QType::GGUF_Q2_0;
+     return (format >= QType::GGUF_Q8_0 && format <= QType::GGUF_Q2_0) || format == QType::GGUF_MXFP4;
  }
  
 +[[nodiscard]] constexpr bool is_ternary(QType format) {
@@ -283,10 +283,10 @@ index cd72412450653f94f6b89305b25e548786f93da8..e513bbcdd937a221f64f11273b3dd803
      int elements = 0;
      int bytes    = 0;
 diff --git a/src/core/weight_view.cpp b/src/core/weight_view.cpp
-index 63bf41fbaf946eb5972a19887f735a4e22b34196..9b348e341e559b438d2f1882b4db9a44d40619eb 100644
+index 5e8a6144dd10887ce79190b319baa47bcbc4f652..87532a488f979c6827a3f6f6e652207297bd3372 100644
 --- a/src/core/weight_view.cpp
 +++ b/src/core/weight_view.cpp
-@@ -100,38 +100,19 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
+@@ -105,38 +105,19 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
      const auto k       = shape[1];
      out.padded_columns = k;
      if (is_row_split(layout)) {
@@ -335,7 +335,7 @@ index 63bf41fbaf946eb5972a19887f735a4e22b34196..9b348e341e559b438d2f1882b4db9a44
          out.high_offset         = aligned(out.code_bytes, 256);
          out.high_bytes          = mul(n, out.high_bytes_per_row);
 diff --git a/src/models/qwen3_5/execution/parameters.cpp b/src/models/qwen3_5/execution/parameters.cpp
-index f8cef7c6d3405010286f56dca50fd6360f1007ff..22daef1c25ad17232ac1c4fa0bc0a56e2b0ab6fd 100644
+index b3f9daae7c5a8ef6115ccbf3fc95fce10160cbf2..918f78a64d5a7f29c6c46c59d3188170ab9ac697 100644
 --- a/src/models/qwen3_5/execution/parameters.cpp
 +++ b/src/models/qwen3_5/execution/parameters.cpp
 @@ -33,7 +33,7 @@ public:
@@ -358,7 +358,7 @@ index f8cef7c6d3405010286f56dca50fd6360f1007ff..22daef1c25ad17232ac1c4fa0bc0a56e
              pair->second.n == second_rows && pair->second.k == input_rows) {
              // The split projections are the separable half of the trade, so they take the cuBLAS
              // policy only when both settings ask for it.
-@@ -497,7 +497,7 @@ Parameters::Parameters(const Model& source) : model(source) {
+@@ -528,7 +528,7 @@ Parameters::Parameters(const Model& source) : model(source) {
      const auto& w        = model.weights();
      text.token_embedding = native_weight(model.weight(w.text.token_embedding).view);
      text.output_head     = prepare.head(w.text.output_head_use);
@@ -489,10 +489,10 @@ index 32a5969261c42b9d0cdddb45181088742bffea10..d591a479c73f9700366a6e2d541dc48e
  
  } // namespace ninfer::ops::detail
 diff --git a/src/ops/linear/linear.cpp b/src/ops/linear/linear.cpp
-index 4e135f1ade5fdd785ee69514d4f6490d174b78e1..5f62cbb58ec237d2b27657c4a9c6b893296f24b9 100644
+index 4ba49e02e25b6f740e0902af5d092d5c30d9f70b..f89fe4a0f5e6197ebbe421863d80f7c340bab636 100644
 --- a/src/ops/linear/linear.cpp
 +++ b/src/ops/linear/linear.cpp
-@@ -125,6 +125,13 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
+@@ -128,6 +128,13 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
      case QType::Q8_G32_FP16:
          detail::q8_dispatch(x, w, out, policy, stream);
          return;
@@ -504,9 +504,9 @@ index 4e135f1ade5fdd785ee69514d4f6490d174b78e1..5f62cbb58ec237d2b27657c4a9c6b893
 +        detail::t2_dispatch(x, w, out, policy, stream);
 +        return;
      case QType::T2_G128_FP16:
-         if (workspace != nullptr && detail::t2_a8_admits(policy) &&
+         if (workspace != nullptr && out.dtype == DType::BF16 && detail::t2_a8_admits(policy) &&
              detail::t2_a8_supported(w, x.ne[1])) {
-@@ -170,6 +177,10 @@ std::size_t linear_route_workspace_bytes(QType qtype, std::int32_t output_rows,
+@@ -173,6 +180,10 @@ std::size_t linear_route_workspace_bytes(QType qtype, std::int32_t output_rows,
          (void)detail::select_q8_launch(output_rows, input_rows, min_tokens, policy);
          (void)detail::select_q8_launch(output_rows, input_rows, max_tokens, policy);
          return 0;
@@ -732,10 +732,10 @@ index 827077b9b51a63eab763ed91f7860c8afa792a54..bd09c2ab1b5ccf95442e293437d1df8e
  // second[second_offset + row - split, t].
  void t2_a8_project_split(const T2A8Activations& x, const Weight& w, Tensor& first,
 diff --git a/src/ops/linear/t2/t2_dispatch.cpp b/src/ops/linear/t2/t2_dispatch.cpp
-index b3582605ef1f2d42ea54095e1729712f13b35594..48766aabbd8fa98e4c584e3038183b33d91e2e63 100644
+index 4308b9e13b0dff7e8c83218e61400de4bd8b4f83..097c55aae298aad0bfd4fb55213690535c08346e 100644
 --- a/src/ops/linear/t2/t2_dispatch.cpp
 +++ b/src/ops/linear/t2/t2_dispatch.cpp
-@@ -90,6 +90,19 @@ void t2_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy pol
+@@ -107,6 +107,19 @@ void t2_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy pol
      if (w.layout != QuantLayout::RowSplit || w.qdata == nullptr || w.scales == nullptr) {
          throw std::invalid_argument("t2 linear: requires a row-split weight");
      }
@@ -752,9 +752,9 @@ index b3582605ef1f2d42ea54095e1729712f13b35594..48766aabbd8fa98e4c584e3038183b33
 +        }
 +        return;
 +    }
-     const T2Launch launch = select_t2_launch(w.n, w.k, x.ne[1], policy);
-     launch(x, w, out, stream);
- }
+     const T2Launch launch = out.dtype == DType::FP32
+                                 ? select_t2_fp32_launch(w.n, w.k, x.ne[1])
+                                 : select_t2_launch(w.n, w.k, x.ne[1], policy);
 diff --git a/src/ops/linear/t2/t2_launch.h b/src/ops/linear/t2/t2_launch.h
 index 9319c1e7da8b51d210cc2e5731c303a5a928d061..403bc65109ad00446b625e561dd4a4b5fd651b15 100644
 --- a/src/ops/linear/t2/t2_launch.h
@@ -2145,21 +2145,18 @@ index 0000000000000000000000000000000000000000..133fbccc047216ee64552e9c3c5a301d
 +
 +} // namespace ninfer::ops::detail
 diff --git a/src/ops/linear/t2/t2_small_t_v2.cu b/src/ops/linear/t2/t2_small_t_v2.cu
-index cc091ba4acea08575c8031525d046242a1c109f7..e1a555458e661d631e62ea2150d081c66694382c 100644
+index fdfe46a5cefe6cac25328eec4a24e67e2eab2840..6b59987c2b1380aacd67063b21a779cae4b4fbda 100644
 --- a/src/ops/linear/t2/t2_small_t_v2.cu
 +++ b/src/ops/linear/t2/t2_small_t_v2.cu
-@@ -29,26 +29,30 @@ void launch(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream)
-         throw std::invalid_argument("t2 small-T v2: unsupported shape");
-     }
-     const dim3 grid(static_cast<unsigned>(rows / Schedule::kRows), 1u, 1u);
-+    // qhigh is the PTQ1_0 high plane and is null for every T2 weight, which is how the kernel knows
-+    // it has nothing to stitch (see the kPtq1 branch of `issue`).
-     t2_small_t_v2_kernel<Schedule><<<grid, Schedule::kThreads, 0, stream>>>(
-         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
--        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), rows, k,
--        cols);
-+        static_cast<const std::uint8_t*>(w.qhigh), static_cast<const std::uint8_t*>(w.scales),
-+        static_cast<__nv_bfloat16*>(out.data), rows, k, cols);
+@@ -32,6 +32,7 @@ void launch(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream)
+     const auto launch_out = [&]<class Out>() {
+         t2_small_t_v2_kernel<Schedule, Out><<<grid, Schedule::kThreads, 0, stream>>>(
+             static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
++            static_cast<const std::uint8_t*>(w.qhigh),
+             static_cast<const std::uint8_t*>(w.scales), static_cast<Out*>(out.data), rows, k,
+             cols);
+     };
+@@ -43,19 +44,21 @@ void launch(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream)
      CUDA_CHECK(cudaGetLastError());
  }
  
@@ -2187,7 +2184,7 @@ index cc091ba4acea08575c8031525d046242a1c109f7..e1a555458e661d631e62ea2150d081c6
      }
      throw std::invalid_argument("t2 small-T v2: unknown row schedule");
  }
-@@ -107,10 +111,21 @@ V2Rows rows_for(std::int32_t n, std::int32_t cols) {
+@@ -114,10 +117,21 @@ V2Rows rows_for(std::int32_t n, std::int32_t cols) {
  void launch_t2_small_t_v2(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
      const V2Rows rows = rows_for(out.ne[0], x.ne[1]);
      if (x.ne[1] <= 8) {
@@ -2212,7 +2209,7 @@ index cc091ba4acea08575c8031525d046242a1c109f7..e1a555458e661d631e62ea2150d081c6
 +
  } // namespace ninfer::ops::detail
 diff --git a/src/ops/linear/t2/t2_small_t_v2.cuh b/src/ops/linear/t2/t2_small_t_v2.cuh
-index c2e669c79bc280a11200c152b1fdbc1648931fae..cf95c26125fc998adf2b1c2151d59350f49d54df 100644
+index 1a816018ea8850c3c94b6e4a76fc56e9f74c2de4..9c1c7125640028ad465c6ba33e3be777768fa8b6 100644
 --- a/src/ops/linear/t2/t2_small_t_v2.cuh
 +++ b/src/ops/linear/t2/t2_small_t_v2.cuh
 @@ -20,6 +20,7 @@
@@ -2223,11 +2220,7 @@ index c2e669c79bc280a11200c152b1fdbc1648931fae..cf95c26125fc998adf2b1c2151d59350
  #include "ops/linear/t2/t2_rowsplit_storage.cuh"
  
  #include <cuda_bf16.h>
-@@ -27,11 +28,29 @@
- #include <cuda_runtime.h>
- 
- #include <cstdint>
-+#include <type_traits>
+@@ -31,8 +32,25 @@
  
  namespace ninfer::ops::detail {
  
@@ -2254,7 +2247,7 @@ index c2e669c79bc280a11200c152b1fdbc1648931fae..cf95c26125fc998adf2b1c2151d59350
      static constexpr int kWarps               = 8;
      static constexpr int kThreads             = kWarps * 32;
      static constexpr int kKWarps              = KWarps_;
-@@ -50,6 +69,21 @@ struct T2SmallTv2Schedule {
+@@ -51,6 +69,21 @@ struct T2SmallTv2Schedule {
      static constexpr int kStages    = Stages_;
      static constexpr int kMinBlocks = MinBlocks_;
  
@@ -2276,7 +2269,7 @@ index c2e669c79bc280a11200c152b1fdbc1648931fae..cf95c26125fc998adf2b1c2151d59350
      static_assert(kKWarps == 4 || kKWarps == 8, "T2 small-T v2 splits K over four or eight warps");
      static_assert(kTilesPerWarp == 1 || kTilesPerWarp == 2,
                    "T2 small-T v2 gives a warp one or two tiles");
-@@ -58,7 +92,15 @@ struct T2SmallTv2Schedule {
+@@ -59,7 +92,15 @@ struct T2SmallTv2Schedule {
      static_assert(kStages >= 1 && kStages <= 4, "T2 small-T v2 pipeline depth must fit cp_wait");
      static_assert(kMinBlocks >= 1, "T2 small-T v2 launch-bounds occupancy must be positive");
  
@@ -2293,25 +2286,16 @@ index c2e669c79bc280a11200c152b1fdbc1648931fae..cf95c26125fc998adf2b1c2151d59350
          __align__(16) std::uint8_t codes[kRows][kCodeRowStride];
          __align__(16) std::uint8_t scales[kRows][kScaleBytesPerRowSlab];
      };
-@@ -107,13 +149,15 @@ __device__ __forceinline__ void t2_v2_b_fragment(const uint4& xa, const uint4& x
-     b1                      = __byte_perm(source.z, source.w, sel);
- }
- 
-+// `high` is the PTQ1_0 high plane and is null for the T2 packing, whose rows fit entirely in the
-+// code plane.
- template <class Schedule>
- __global__ __launch_bounds__(Schedule::kThreads,
+@@ -123,7 +164,7 @@ __global__ __launch_bounds__(Schedule::kThreads,
                               resident_ctas_bound(Schedule::kThreads, Schedule::kMinBlocks)) void
  t2_small_t_v2_kernel(
      const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
--    const std::uint8_t* __restrict__ scales, __nv_bfloat16* __restrict__ out, std::int32_t rows,
--    std::int32_t k, std::int32_t cols) {
-+    const std::uint8_t* __restrict__ high, const std::uint8_t* __restrict__ scales,
-+    __nv_bfloat16* __restrict__ out, std::int32_t rows, std::int32_t k, std::int32_t cols) {
+-    const std::uint8_t* __restrict__ scales, Out* __restrict__ out, std::int32_t rows,
++    const std::uint8_t* __restrict__ high, const std::uint8_t* __restrict__ scales, Out* __restrict__ out, std::int32_t rows,
+     std::int32_t k, std::int32_t cols) {
      constexpr int kTpw    = Schedule::kTilesPerWarp;
      constexpr int kNt     = Schedule::kColumnTiles;
-     constexpr int kKW     = Schedule::kKWarps;
-@@ -133,8 +177,15 @@ t2_small_t_v2_kernel(
+@@ -144,8 +185,15 @@ t2_small_t_v2_kernel(
  
      const int groups_per_row = k / T2RowSplitStorage::kGroupK;
      const int slabs          = k / Schedule::kSlabK;
@@ -2328,7 +2312,7 @@ index c2e669c79bc280a11200c152b1fdbc1648931fae..cf95c26125fc998adf2b1c2151d59350
      const std::int64_t scale_row_bytes =
          static_cast<std::int64_t>(groups_per_row) * T2RowSplitStorage::kScaleBytesPerGroup;
      const int code_byte     = k_split * 16 + 4 * lid; // the lane's code word inside the row's slab
-@@ -142,20 +193,49 @@ t2_small_t_v2_kernel(
+@@ -153,20 +201,49 @@ t2_small_t_v2_kernel(
      const int slice_k       = k_split * 64 + 16 * lid; // the lane's first k inside the slab
  
      const auto issue = [&](int stage_index, int slab) {
@@ -2391,7 +2375,7 @@ index c2e669c79bc280a11200c152b1fdbc1648931fae..cf95c26125fc998adf2b1c2151d59350
              }
          }
          if (tid < Schedule::kRows) {
-@@ -182,6 +262,50 @@ t2_small_t_v2_kernel(
+@@ -193,6 +270,50 @@ t2_small_t_v2_kernel(
              cp_commit();
          }
          cp_wait<kStages - 1>();
@@ -2568,10 +2552,10 @@ index d1010e8fd44a69384611a3bf3026a5938924afd8..bd597f891fccdffad026861ed81c2b5a
          }
      }
 diff --git a/src/ops/weight_input.cpp b/src/ops/weight_input.cpp
-index f532888947b91e726eec6ab6df0631998e8964d4..ce7004a9ac8c209ece1bfcb77fe51b1d2c267dad 100644
+index 63b81f508103b1dcaced03eb02aa934a178363b3..039f3837170a1615735001174fe9ae91f495f536 100644
 --- a/src/ops/weight_input.cpp
 +++ b/src/ops/weight_input.cpp
-@@ -214,9 +214,10 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool
+@@ -235,9 +235,10 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool
      const auto second = single(inputs.last<2>());
      const bool q4_q5 =
          first.weight.qtype == QType::Q4_G64_FP16 && second.weight.qtype == QType::Q5_G64_FP16;
@@ -2586,10 +2570,10 @@ index f532888947b91e726eec6ab6df0631998e8964d4..ce7004a9ac8c209ece1bfcb77fe51b1d
                                     common_signs(inputs)};
  }
 diff --git a/src/ops/wrapper/attn_input_proj.cpp b/src/ops/wrapper/attn_input_proj.cpp
-index 4be9fc12bccc992cbb322cd79ac41dbad53655a1..2e81c90b43fae1186dce8f0d92bf30e58c4ab665 100644
+index 9b626ddbc813417af1331460abb825f4d42d88a0..e0fb14511644f086f2b75ab81d47339cc24d42a3 100644
 --- a/src/ops/wrapper/attn_input_proj.cpp
 +++ b/src/ops/wrapper/attn_input_proj.cpp
-@@ -50,12 +50,16 @@ void require_matrix(const Tensor& tensor, std::int32_t rows, std::int32_t cols,
+@@ -51,12 +51,16 @@ void require_matrix(const Tensor& tensor, std::int32_t rows, std::int32_t cols,
  void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, const char* label) {
      const bool no_high   = weight.qhigh == nullptr && weight.high_plane_bytes == 0;
      const bool q4_planes = qtype != QType::Q4_G64_FP16 || no_high;
@@ -2609,7 +2593,7 @@ index 4be9fc12bccc992cbb322cd79ac41dbad53655a1..2e81c90b43fae1186dce8f0d92bf30e5
          weight.scale_dtype != DType::FP16 ||
          weight.group_size != static_cast<std::uint32_t>(group) || weight.group != group ||
          !t2_planes || weight.ndim != 2 || weight.n != rows || weight.k != 5120 ||
-@@ -336,9 +340,10 @@ void require_split_profile(const Tensor& x, const Weight& query_key_weight,
+@@ -337,9 +341,10 @@ void require_split_profile(const Tensor& x, const Weight& query_key_weight,
  bool t2_pair_project(const Tensor& x, const Weight& query_key_weight,
                       const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
                       LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream) {
@@ -2623,7 +2607,7 @@ index 4be9fc12bccc992cbb322cd79ac41dbad53655a1..2e81c90b43fae1186dce8f0d92bf30e5
      }
      if (!qk) { return false; }
      constexpr std::int32_t kQRows  = 6144;
-@@ -362,7 +367,7 @@ bool t2_pair_project(const Tensor& x, const Weight& query_key_weight,
+@@ -363,7 +368,7 @@ bool t2_pair_project(const Tensor& x, const Weight& query_key_weight,
          detail::t2_a8_supported(gate_value_weight, cols)) {
          // One quantisation of x and one pass over each parent, split into its two destinations.
          auto scope             = workspace->scope();
@@ -2632,7 +2616,7 @@ index 4be9fc12bccc992cbb322cd79ac41dbad53655a1..2e81c90b43fae1186dce8f0d92bf30e5
          detail::t2_a8_project_split_pair(activations, {query_key_weight, q, 0, kQRows, k, 0},
                                           {gate_value_weight, gate, 0, kQRows, v, 0}, stream);
          return true;
-@@ -432,7 +437,7 @@ std::size_t split_route_bytes(QType query_key_qtype, std::int32_t query_key_rows
+@@ -433,7 +438,7 @@ std::size_t split_route_bytes(QType query_key_qtype, std::int32_t query_key_rows
                                QType gate_value_qtype, std::int32_t gate_value_rows,
                                std::int32_t input_rows, LinearPolicy policy, std::int32_t min_tokens,
                                std::int32_t max_tokens) {
@@ -2641,7 +2625,7 @@ index 4be9fc12bccc992cbb322cd79ac41dbad53655a1..2e81c90b43fae1186dce8f0d92bf30e5
          if (query_key_qtype != gate_value_qtype || query_key_rows != 7168 ||
              gate_value_rows != 7168 || input_rows != 5120) {
              throw std::invalid_argument("attn_input_proj workspace: unregistered T2 pair");
-@@ -440,7 +445,7 @@ std::size_t split_route_bytes(QType query_key_qtype, std::int32_t query_key_rows
+@@ -441,7 +446,7 @@ std::size_t split_route_bytes(QType query_key_qtype, std::int32_t query_key_rows
          std::size_t bytes = 0;
          for (const std::int32_t rows : {6144, 1024}) {
              bytes = std::max(bytes,
@@ -2651,10 +2635,10 @@ index 4be9fc12bccc992cbb322cd79ac41dbad53655a1..2e81c90b43fae1186dce8f0d92bf30e5
          }
          return bytes;
 diff --git a/src/ops/wrapper/gdn_input_proj.cpp b/src/ops/wrapper/gdn_input_proj.cpp
-index 30da179a5ea5d27c93e7d140fb39023ebc040b03..3b2f9b82a1b857385360b2c048fc806bd79fe999 100644
+index 45098026b4b2aee731abccdb4b97cff4de91c35f..0fc718b6015ab021d748c5f5635f870aced1245a 100644
 --- a/src/ops/wrapper/gdn_input_proj.cpp
 +++ b/src/ops/wrapper/gdn_input_proj.cpp
-@@ -267,12 +267,16 @@ void require_record_capacity_domain(std::int32_t batch_size, std::int32_t min_wi
+@@ -268,12 +268,16 @@ void require_record_capacity_domain(std::int32_t batch_size, std::int32_t min_wi
  void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, const char* label) {
      const bool no_high   = weight.qhigh == nullptr && weight.high_plane_bytes == 0;
      const bool q4_planes = qtype != QType::Q4_G64_FP16 || no_high;
@@ -2674,7 +2658,7 @@ index 30da179a5ea5d27c93e7d140fb39023ebc040b03..3b2f9b82a1b857385360b2c048fc806b
          weight.scale_dtype != DType::FP16 ||
          weight.group_size != static_cast<std::uint32_t>(group) || weight.group != group ||
          !t2_planes || weight.ndim != 2 || weight.n != rows || weight.k != 5120 ||
-@@ -852,9 +856,10 @@ void require_split_profile(const Tensor& x, const Weight& qk_weight, const Weigh
+@@ -853,9 +857,10 @@ void require_split_profile(const Tensor& x, const Weight& qk_weight, const Weigh
  }
  
  bool t2_two_parent(const Weight& qk_weight, const Weight& value_z_weight) {
@@ -2688,7 +2672,7 @@ index 30da179a5ea5d27c93e7d140fb39023ebc040b03..3b2f9b82a1b857385360b2c048fc806b
      }
      return qk;
  }
-@@ -885,7 +890,7 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
+@@ -886,7 +891,7 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
      if (detail::t2_a8_admits(policy) && detail::t2_a8_supported(qk_weight, cols) &&
          detail::t2_a8_supported(value_z_weight, cols)) {
          // One quantisation of x; q/k and value land in qkv directly and z in its own plane.
@@ -2697,7 +2681,7 @@ index 30da179a5ea5d27c93e7d140fb39023ebc040b03..3b2f9b82a1b857385360b2c048fc806b
          detail::t2_a8_project_split_pair(activations, {qk_weight, qkv, 0, kQkRows, qkv, 0},
                                           {value_z_weight, qkv, kQkRows, kValueRows, z, 0}, stream);
          return;
-@@ -910,9 +915,10 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
+@@ -911,9 +916,10 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
  // integer route's activation planes where it takes the width, otherwise the q/k and value planes of
  // the A16 route (whose T2 linears take no workspace).
  std::size_t t2_two_parent_projection_bytes(std::int32_t min_columns, std::int32_t max_columns,
@@ -2710,7 +2694,7 @@ index 30da179a5ea5d27c93e7d140fb39023ebc040b03..3b2f9b82a1b857385360b2c048fc806b
          return sm70_projection_bytes(QType::T2_G128_FP16, QType::T2_G128_FP16, 12288, 5120,
                                       min_columns, max_columns, policy);
      }
-@@ -920,7 +926,7 @@ std::size_t t2_two_parent_projection_bytes(std::int32_t min_columns, std::int32_
+@@ -921,7 +927,7 @@ std::size_t t2_two_parent_projection_bytes(std::int32_t min_columns, std::int32_
      for (std::int32_t columns = min_columns; columns <= max_columns; ++columns) {
          WorkspaceLayoutBuilder layout;
          if (!detail::t2_a8_admits(policy) ||
@@ -2719,7 +2703,7 @@ index 30da179a5ea5d27c93e7d140fb39023ebc040b03..3b2f9b82a1b857385360b2c048fc806b
              (void)layout.alloc(DType::BF16, {4096, columns});
              (void)layout.alloc(DType::BF16, {6144, columns});
          }
-@@ -981,12 +987,12 @@ std::size_t gdn_input_proj_split_workspace_capacity_bytes(
+@@ -982,12 +988,12 @@ std::size_t gdn_input_proj_split_workspace_capacity_bytes(
      if (min_tokens <= 0 || max_tokens < min_tokens) {
          throw std::invalid_argument("gdn_input_proj workspace: invalid token interval");
      }
@@ -2734,7 +2718,7 @@ index 30da179a5ea5d27c93e7d140fb39023ebc040b03..3b2f9b82a1b857385360b2c048fc806b
      }
      const bool registered = qk_qtype == QType::Q4_G64_FP16 && qk_rows == 4096 &&
                              value_z_qtype == QType::Q5_G64_FP16 && value_z_rows == 12288 &&
-@@ -1179,12 +1185,12 @@ std::size_t gdn_input_proj_split_conv_snapshot_workspace_capacity_bytes(QType qk
+@@ -1180,12 +1186,12 @@ std::size_t gdn_input_proj_split_conv_snapshot_workspace_capacity_bytes(QType qk
  std::size_t gdn_input_proj_split_conv_snapshot_workspace_capacity_bytes(
      QType qk_qtype, QType value_z_qtype, LinearPolicy policy, std::int32_t batch_size,
      std::int32_t min_width, std::int32_t max_width) {
@@ -2749,7 +2733,7 @@ index 30da179a5ea5d27c93e7d140fb39023ebc040b03..3b2f9b82a1b857385360b2c048fc806b
      }
      if (qk_qtype == QType::Q4_G64_FP16 && value_z_qtype == QType::Q5_G64_FP16) {
          return gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 6144, batch_size,
-@@ -1205,10 +1211,10 @@ std::size_t gdn_input_proj_split_conv_record_workspace_capacity_bytes(QType qk_q
+@@ -1206,10 +1212,10 @@ std::size_t gdn_input_proj_split_conv_record_workspace_capacity_bytes(QType qk_q
  std::size_t gdn_input_proj_split_conv_record_workspace_capacity_bytes(
      QType qk_qtype, QType value_z_qtype, LinearPolicy policy, std::int32_t batch_size,
      std::int32_t min_width, std::int32_t max_width) {
@@ -2819,7 +2803,7 @@ index 8517eb4afee238d35dd0908cbdd7d3e33c4fc409..229d5e89b19d182a558d90fc96f6a1b3
              detail::t2_a8_linear_add(x, w, residual_out, ws, stream);
              return;
 diff --git a/src/ops/wrapper/linear_swiglu.cpp b/src/ops/wrapper/linear_swiglu.cpp
-index 6584a003e86281b1ae2319cbf10395c353237f2f..bb6bc13c3f14c8bb6fb41912b4c478860abcb59b 100644
+index 57c2bc65a9876bcda4c50f306d0c13c89b16d19e..0dadd27394348d6653d46bba86bf7b64f8d27ce7 100644
 --- a/src/ops/wrapper/linear_swiglu.cpp
 +++ b/src/ops/wrapper/linear_swiglu.cpp
 @@ -62,7 +62,7 @@ std::size_t linear_swiglu_route_workspace_bytes(QType qtype, std::int32_t gate_u
@@ -2847,10 +2831,10 @@ index 6584a003e86281b1ae2319cbf10395c353237f2f..bb6bc13c3f14c8bb6fb41912b4c47886
          throw std::invalid_argument("linear_swiglu: unsupported weight");
      }
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 01e721946de40b777d66f47cb87576d18f336d64..999daaf3ec78d62502fa2fc221492f333f4ca14e 100644
+index 5481c856cb075426494a43d9cc762f04689de6ea..4d84c8235d67deb321ec300c46858594f6050f80 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -189,3 +189,12 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_cpu_vision_tests_PROGRAMS
+@@ -190,3 +190,12 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_cpu_vision_tests_PROGRAMS
    ninfer_qwen3_5_loading_test ninfer_request_log_test)
  ninfer_finalize_bundle(ninfer_cpu_vision_tests)
  ninfer_stage_runtime_dlls(ninfer_cpu_vision_tests)
@@ -3175,10 +3159,10 @@ index 0000000000000000000000000000000000000000..1c9eeb9b465bc02aab45a48453a41fff
 +    }
 +}
 diff --git a/tests/ops/linear/tests.cmake b/tests/ops/linear/tests.cmake
-index 3ac0d628ada33b055f48912911744b63b50e6987..c9887d6e2e868e01cfaa42605cea253b6ea3e43e 100644
+index f76e3fd8b5b31dd990e8e1bba2dec7451665b2b2..acb62a6590e05582ff22ca875370b4fc5ed8dd7b 100644
 --- a/tests/ops/linear/tests.cmake
 +++ b/tests/ops/linear/tests.cmake
-@@ -24,6 +24,14 @@ ninfer_add_op_test(ninfer_linear_t2_a16_test
+@@ -29,6 +29,14 @@ ninfer_add_op_test(ninfer_linear_t2_a16_test
    SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_t2_a16.cpp"
    LIBRARIES ninfer_linear_test_support)
  
@@ -3299,7 +3283,7 @@ index 0000000000000000000000000000000000000000..15fdef8e9e29749936e5f25cc30f5d3c
 +    return failures ? 1 : 0;
 +}
 diff --git a/tests/ops/linear_swiglu/tests.cmake b/tests/ops/linear_swiglu/tests.cmake
-index 5972d1688ed1611450b3ed738f184a897383cb03..c4c370111c3e93b17aa9ce5d3901600d0dcb1471 100644
+index b152ee421796e53771d4c606c4eca6f4b670d0a0..f79af6bd3021e535c7b10316b6d3b64167f946fe 100644
 --- a/tests/ops/linear_swiglu/tests.cmake
 +++ b/tests/ops/linear_swiglu/tests.cmake
 @@ -4,6 +4,10 @@ ninfer_test_includes(ninfer_linear_swiglu_test_support)
@@ -3768,10 +3752,10 @@ index b554ffaa90c86ecfea6dd6ae26e1acf99066cb1c..79322ba2bf6ee26b809a602e0291a1fd
              target.type, target.index, spec.bits, spec.group_size
          )
 diff --git a/tools/artifact/formats.py b/tools/artifact/formats.py
-index 0d0c9de91d9f6dfe0a9111277689cbeb27c16370..4008e735ea749b580c34dbbe180bdc135cc56e11 100644
+index fe391474b0fa935b3612014e6765f7adc8ba544e..eb5039ce3e1a211a9a9763bfef5a95287201dffe 100644
 --- a/tools/artifact/formats.py
 +++ b/tools/artifact/formats.py
-@@ -79,6 +79,8 @@ Q8_G32_FP16 = QuantFormat("q8_g32_fp16", 8, 32, -127, 127)
+@@ -83,6 +83,8 @@ Q8_G32_FP16 = QuantFormat("q8_g32_fp16", 8, 32, -127, 127)
  # Ternary: two-bit two's-complement codes over {-1, 0, +1} (0b10 is outside the language),
  # one binary16 multiplier per 128 columns; the native form of ternary checkpoints.
  T2_G128_FP16 = QuantFormat("t2_g128_fp16", 2, 128, -1, 1)
@@ -3780,7 +3764,7 @@ index 0d0c9de91d9f6dfe0a9111277689cbeb27c16370..4008e735ea749b580c34dbbe180bdc13
  NVFP4 = Nvfp4Format("nvfp4", 16)
  FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16")
  FP8_E4M3FN_ROW_FP16 = Fp8RowFormat("fp8_e4m3fn_row_fp16", "fp16")
-@@ -109,7 +111,7 @@ DIRECT_FORMATS = MappingProxyType({item.name: item for item in (BF16, FP32, INT3
+@@ -117,7 +119,7 @@ DIRECT_FORMATS = MappingProxyType(
  QUANT_FORMATS = MappingProxyType(
      {
          item.name: item
@@ -3790,10 +3774,10 @@ index 0d0c9de91d9f6dfe0a9111277689cbeb27c16370..4008e735ea749b580c34dbbe180bdc13
  )
  NVFP4_FORMATS = MappingProxyType({NVFP4.name: NVFP4})
 diff --git a/tools/artifact/layouts.py b/tools/artifact/layouts.py
-index d15a81251b9a2d156c0599fcde3066c2c0a4b14f..21416782795aed8f2a43dc937ab326153353af9b 100644
+index 006918180ece54f08a834347747956d598c5f825..81545ddc9902d73dde07b73854f72511dd012cad 100644
 --- a/tools/artifact/layouts.py
 +++ b/tools/artifact/layouts.py
-@@ -101,7 +101,7 @@ CONTIGUOUS_LE_V1 = Layout("contiguous_le_v1", 256, frozenset(("bf16", "fp32", "i
+@@ -103,7 +103,7 @@ CONTIGUOUS_LE_V1 = Layout(
  ROW_SPLIT_K128_V1 = Layout(
      "row_split_k128_v1",
      256,
@@ -3802,7 +3786,7 @@ index d15a81251b9a2d156c0599fcde3066c2c0a4b14f..21416782795aed8f2a43dc937ab32615
  )
  BLOCK_SCALE_K16_M128X4_V1 = Layout(
      "block_scale_k16_m128x4_v1",
-@@ -191,13 +191,18 @@ def row_split_geometry(
+@@ -193,13 +193,18 @@ def row_split_geometry(
      n, k = _shape(shape, rank=2)
      k_pad = align_up(k, K_ALIGNMENT)
      groups_per_row = k_pad // spec.group_size
@@ -3858,10 +3842,10 @@ index 6b8cea7554b59637104b0e9443f16a73c09cdc90..03d46fac21c1c024fe8c05b7e749dac9
                  if (codes.dtype != torch.uint8 or tuple(codes.shape) != (rows, g.base_row_bytes)
                          or scales.dtype != torch.float16 or
 diff --git a/tools/convert/methods.py b/tools/convert/methods.py
-index 57daf22fba639655d3185d3d59886a61feed78d4..98f3ea69c58e20b6b8a1eb2b09433143431ab559 100644
+index d568d701555482cc23420d55bc9598371f5c6b0c..92877b926b23b88c816b135430d90d5733ccf5ee 100644
 --- a/tools/convert/methods.py
 +++ b/tools/convert/methods.py
-@@ -309,7 +309,7 @@ def fp8_row_maxabs(request: PrepareRequest) -> PreparedMethod:
+@@ -322,7 +322,7 @@ def fp8_row_maxabs(request: PrepareRequest) -> PreparedMethod:
  def import_encoded(request: PrepareRequest) -> PreparedMethod:
      """Preserve compatible FP8/NVFP4/T2/Q2/Q8/GGUF source codes, scales and weight divisor."""
      if (

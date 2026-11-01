@@ -45,6 +45,7 @@ const server = http.createServer((req, res) => {
     }
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Cache-Control", "no-store");
+    if (req.url === '/slots' && fixture.backend === 'radiance') { res.statusCode=404; return res.end('{}'); }
     if (req.url === '/stats') return res.end(JSON.stringify(fixture.nativeStats || {queue:{depth:2}}));
     if (req.url === '/api/launcher/hardware') {
       if (!fixture.sharedDisk || fixture.diskFailure) {
@@ -89,6 +90,7 @@ const server = http.createServer((req, res) => {
               schema_version: 1,
               server_instance: instance,
               backend: fixture.backend || "llamacpp",
+              kvmem: fixture.monitorCache || {},
               sampled_at_ms: Date.now(),
               active: fixture.active ?? (fixture.idle || fixture.empty ? [] : [{...record(), ...(fixture.nativeRequestMetrics || {}), ...(fixture.liveLlama ? {
                 decode_tps_live:23.5, decode_tps_mean:8, decode_tps_window_ms:3000,
@@ -177,6 +179,15 @@ if (process.env.MONITOR_FIXTURE_ONLY) {
     );
     assert.equal(await page.locator("#app").getAttribute("data-theme"), "dark");
     assert.equal(await page.locator('[data-gpu="power"]').textContent(), "—");
+    fixtureScenario={backend:'radiance',monitorCache:{host_payload_bytes:1048576,host_payload_budget_bytes:8388608,
+      retained_sessions:3,history_hits:5,history_evictions:2,disk_payload_bytes:0,disk_payload_budget_bytes:0},
+      active:[{...record(),status:'queued',prefill_tps:null,decode_tps:null}]};
+    await page.waitForFunction(()=>document.querySelector('[data-value="queue"]').textContent==='活动 1 · 排队 1');
+    assert.equal(await page.locator('[data-value="sessions"]').textContent(),'3');
+    assert.equal(await page.locator('[data-value="history"]').textContent(),'5 / 2');
+    assert.equal(await page.locator('[data-bar="host"]').evaluate(e=>e.style.width),'12.5%');
+    assert.notEqual(await page.locator('.s-state').getAttribute('data-stale'),'true');
+    fixtureScenario={};
     for (const backend of ['llamacpp', 'ninfer', 'polystrata']) {
       const media = {has_media:true, status:'processing', generated_tokens:0};
       fixtureScenario = {backend,nativeRequestMetrics:media};
@@ -419,6 +430,27 @@ if (process.env.MONITOR_FIXTURE_ONLY) {
     assert.equal(await value('StageLayers'),'20 / 20');
     assert.equal(await page.locator('[data-runtime-config] img').count(),0);
     assert.match(await value('DiskPath'),/<img/);
+    fixtureScenario={...fixtureScenario,props:{...fixtureScenario.props,execution:{mode:'tensor',tensor_attention:'heads',
+      tensor_split:[3,1],tensor_shares:[{rank:0,kv_heads:[0,6]},{rank:1,kv_heads:[6,8]}],stage_layers:[]}}};
+    const tensorRuntime={state:'ready',instance:'config-ninfer-tensor',active_config:{parameters:{Backend:'ninfer',TensorParallel:true,
+      TensorSplit:[1,1],FastPrefill:false}}};
+    await runtime(tensorRuntime);
+    await page.waitForFunction(()=>document.querySelector('[data-runtime-key="TensorShares"] .s-runtime-value')?.textContent==='1: [0, 6) / 2: [6, 8)');
+    assert.equal(await value('TensorParallel'),'开启');
+    assert.equal(await value('TensorAttention'),'heads');
+    assert.equal(await value('TensorSplit'),'3 / 1','service-reported TP weights override requested weights');
+    assert.equal(await setting('TensorSplit').getAttribute('data-source'),'service');
+    assert.equal(await setting('TensorSplit').getAttribute('data-differs'),'true');
+    assert.equal(await setting('TensorShares').getAttribute('data-source'),'service');
+    assert.equal(await setting('StageLayers').count(),0,'TP does not imply pipeline stage counts');
+    fixtureScenario={...fixtureScenario,props:{...fixtureScenario.props,execution:{mode:'single',stage_layers:[]}}};
+    await page.waitForFunction(()=>document.querySelector('[data-runtime-key="TensorParallel"] .s-runtime-value')?.textContent==='关闭');
+    assert.equal(await setting('TensorShares').count(),0,'a service mode change clears old actual allocation');
+    assert.equal(await setting('TensorAttention').count(),0,'reported single-GPU mode overrides a stale TP draft');
+    fixtureScenario={...fixtureScenario,props:{...fixtureScenario.props,execution:{mode:'tensor',tensor_attention:'heads',tensor_split:[],tensor_shares:[]}}};
+    await page.waitForFunction(()=>document.querySelector('[data-runtime-key="TensorParallel"] .s-runtime-value')?.textContent==='开启');
+    assert.equal(await setting('TensorShares').count(),0,'unknown actual allocation must not be inferred from requested weights');
+    assert.equal(await setting('TensorSplit').getAttribute('data-source'),'launch');
     await page.selectOption('[data-language-select]','en');
     assert.equal(await page.locator('[data-runtime-toggle]').getAttribute('aria-expanded'),'true');
     assert.equal(await value('FastPrefill'),'Off');

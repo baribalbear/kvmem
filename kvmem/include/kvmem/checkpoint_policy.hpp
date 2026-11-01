@@ -11,6 +11,9 @@ namespace kvmem {
 // from optional coverage records; disabling this policy keeps their old behavior.
 struct CheckpointPolicy {
     bool enabled = false;
+    // NInfer's native admission/retention policy also runs in legacy mode.
+    // This bounds additional tokens, not checkpoint reconstruction or I/O time.
+    uint64_t extra_recompute_tokens = 0;
     uint64_t interval = 16384;
     uint64_t min_gap = 0;
     size_t count = 24;
@@ -20,12 +23,12 @@ struct CheckpointPolicy {
     static CheckpointPolicy environment();
 };
 
-enum class CoveragePurpose : uint8_t { Periodic, Tail, Root, Anchor, Endpoint };
+enum class CoveragePurpose : uint8_t { Periodic, Tail, Root, Anchor, Input, Endpoint };
 struct CoverageInfo {
     uint64_t frontier = 0, bytes = 0, used = 0;
     const void * identity = nullptr;
     CoveragePurpose purpose = CoveragePurpose::Periodic;
-    uint8_t protections = 0; // Root and anchor roles can name the same payload.
+    uint8_t protections = 0; // Root, anchor and input roles may share a payload.
 };
 // Stable slot indices; retained indices are a subset, in original slot order.
 std::vector<size_t> retain_checkpoint_coverage(const std::vector<CoverageInfo> &,
@@ -90,7 +93,8 @@ public:
             if (entry.info.frontier != info.frontier) throw std::logic_error("checkpoint identity changed frontier");
             entry.info.used = ++clock_;
             entry.info.bytes = info.bytes;
-            entry.info.protections |= purpose == CoveragePurpose::Root ? 1 : purpose == CoveragePurpose::Anchor ? 2 : 0;
+            entry.info.protections |= purpose == CoveragePurpose::Root ? 1 : purpose == CoveragePurpose::Anchor ? 2 :
+                                      purpose == CoveragePurpose::Input ? 4 : 0;
             if (purpose > entry.info.purpose) entry.info.purpose = purpose;
             return true;
         }
@@ -102,7 +106,8 @@ public:
             if (!entries_[i].info.identity && slot == entries_.size()) slot = i;
         }
         Entry incoming{std::move(record), {info.frontier, info.bytes, ++clock_, info.storage, purpose}};
-        incoming.info.protections = purpose == CoveragePurpose::Root ? 1 : purpose == CoveragePurpose::Anchor ? 2 : 0;
+        incoming.info.protections = purpose == CoveragePurpose::Root ? 1 : purpose == CoveragePurpose::Anchor ? 2 :
+                                    purpose == CoveragePurpose::Input ? 4 : 0;
         if (slot == entries_.size()) entries_.push_back(std::move(incoming));
         else entries_[slot] = std::move(incoming);
         prune();

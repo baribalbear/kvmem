@@ -13,6 +13,8 @@ param(
     [ValidateRange(1,65536)][int]$ReplayMaxTokens=2048,
     [string]$Gpu = $env:CUDA_VISIBLE_DEVICES,
     [uint32[]]$StageLayers = @(),
+    [switch]$TensorParallel,
+    [double[]]$TensorSplit = @(),
     [ValidateRange(1, 65535)][int]$Port = 18200,
     [string]$ListenHost = '127.0.0.1',
     [ValidateLength(1, 512)][ValidatePattern('^[A-Za-z0-9._~+/-]+=*$')][string]$ApiKey,
@@ -55,6 +57,7 @@ param(
     [ValidateRange(0.0, 1.0)][double]$GraphAlpha,
     [ValidateRange(1, 2147483647)][int]$QueryMaxTokens,
     [ValidateRange(1, 2147483647)][int]$QueryReplayMaxTokens,
+    [ValidateRange(0, 2147483647)][int]$CheckpointExtraRecomputeTokens = 0,
     [switch]$Lrfu,
     [switch]$NoLrfu,
     [ValidateRange(0.0, 1.0)][double]$LrfuLambda = 0.5,
@@ -87,6 +90,7 @@ $capabilities = @{
 }
 if ($Backend -eq 'ninfer') {
     $capabilities.disk_restore = $false
+    $capabilities.checkpoint_recompute_min_revision = 1
     $capabilities.supported_combinations = @{
         text = @{ kv = @('bf16', 'int8', 'fp8', 'nvfp4', 'k8v4', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8'); max_concurrency = 8; mtp_drafts = @(0..15) }
         images = @{ kv = @('bf16', 'int8', 'fp8', 'nvfp4', 'k8v4', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8'); max_concurrency = 8; residency = @('resident', 'cpu') }
@@ -97,7 +101,8 @@ if ($Backend -eq 'ninfer') {
         lookup_ngram = @{ enabled = $false; reason = 'legacy_path_disabled'; replacement = '--ngram-draft-tokens --ngram-min-match' }
         adaptive_mtp = @{ max_concurrency = 8; text_only = $false; ngram = $true; ngram_max_concurrency = 8; ngram_concurrent_max_drafts = 15; cold_disk = $false }
         fast_prefill = @{ kv = @('int8', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8'); text_only = $false; max_concurrency = 8; residency = @('resident', 'cpu'); cold_disk = $false }
-        multi_gpu = @{ mode = 'layer'; max_devices = 8; vision_residency = @('resident', 'cpu'); mtp = $true; host_history = 'shared' }
+        multi_gpu = @{ mode = 'layer'; modes = @('layer', 'tensor'); tensor_attention = @('heads'); tensor_split = $true;
+            heads_tensor_parallel_min_revision = 1; max_devices = 8; vision_residency = @('resident', 'cpu'); mtp = $true; host_history = 'shared' }
         video = $false
     }
     if (@($WorkerArgs | Where-Object { $_ -match '^--lookup-ngram(=|$)' }).Count) {
@@ -114,6 +119,13 @@ if ($Backend -eq 'polystrata') {
     }
 }
 if ($Describe) { $capabilities | ConvertTo-Json -Depth 4; return }
+if ($Backend -ne 'ninfer' -and $PSBoundParameters.ContainsKey('CheckpointExtraRecomputeTokens')) {
+    throw '-CheckpointExtraRecomputeTokens configures NInfer only'
+}
+if ($Backend -eq 'ninfer' -and $CheckpointExtraRecomputeTokens -gt 0 -and
+    $env:KVMEM_CHECKPOINT_MIN_GAP -and $env:KVMEM_CHECKPOINT_MIN_GAP.Trim() -notin @('', '0')) {
+    throw 'CheckpointExtraRecomputeTokens requires KVMEM_CHECKPOINT_MIN_GAP=0'
+}
 if ($Backend -ne 'polystrata' -and $PSBoundParameters.ContainsKey('BlockTokens')) {
     throw '-BlockTokens configures PolyStrata in this launcher'
 }
@@ -235,8 +247,18 @@ if ($Backend -eq 'ninfer') {
         @($StageLayers | Where-Object { $_ -eq 0 }).Count)) {
         throw 'StageLayers requires one positive layer count per GPU and at least two GPUs'
     }
-    if (@($WorkerArgs | Where-Object { $_ -match '^--(device|devices|stage-layers)(=|$)' }).Count) {
-        throw 'Use -Gpu and -StageLayers to configure ninfer devices'
+    if ($TensorParallel -and ($gpuIds.Count -lt 2 -or $StageLayers.Count)) {
+        throw 'TensorParallel requires at least two GPUs and cannot be combined with StageLayers'
+    }
+    if ($TensorSplit.Count -and (!$TensorParallel -or $TensorSplit.Count -ne $gpuIds.Count -or
+        @($TensorSplit | Where-Object { [double]::IsNaN($_) -or [double]::IsInfinity($_) -or $_ -le 0 }).Count)) {
+        throw 'TensorSplit requires TensorParallel and one finite positive weight per GPU in UUID order'
+    }
+    $totalTensorWeight = [double]0
+    foreach ($weight in $TensorSplit) { $totalTensorWeight += $weight }
+    if ([double]::IsInfinity($totalTensorWeight)) { throw 'TensorSplit total weight must be finite' }
+    if (@($WorkerArgs | Where-Object { $_ -match '^--(device|devices|stage-layers|tensor-parallel|tensor-split|tensor-attention)(=|$)' }).Count) {
+        throw 'Use -Gpu, -StageLayers, -TensorParallel and -TensorSplit to configure ninfer devices'
     }
     if (@($WorkerArgs | Where-Object { $_ -match '^--default-thinking-budget(=|$)' }).Count) {
         throw 'Use -ThinkingBudget to configure the ninfer thinking budget'
@@ -281,6 +303,13 @@ if ($Backend -eq 'ninfer') {
     if ($gpuIds.Count -gt 1) { $nativeArgs += @('--devices', ((0..($gpuIds.Count - 1)) -join ',')) }
     else { $nativeArgs += @('--device', '0') }
     if ($StageLayers.Count) { $nativeArgs += @('--stage-layers', ($StageLayers -join ',')) }
+    if ($TensorParallel) {
+        $nativeArgs += @('--tensor-parallel', '--tensor-attention', 'heads')
+        if ($TensorSplit.Count) {
+            $weights = @($TensorSplit | ForEach-Object { $_.ToString('G17', [Globalization.CultureInfo]::InvariantCulture) })
+            $nativeArgs += @('--tensor-split', ($weights -join ','))
+        }
+    }
     if ($MtpDrafts) { $nativeArgs += @('--spec', $SpeculativeMode, '--draft-tokens', "$MtpDrafts",
         '--ngram-draft-tokens', "$NgramDrafts", '--ngram-min-match', "$NgramMinMatch") }
     if ($AdaptiveMtp) { $nativeArgs += '--adaptive-mtp' }
@@ -307,7 +336,7 @@ if ($Backend -eq 'ninfer') {
     if (($effectiveK -in $quantized) -ne ($effectiveV -in $quantized)) {
         throw 'llama.cpp cannot mix floating-point and quantized K/V; choose q8_0/q5_0/q4_0 for both, or f16/f32 for both'
     }
-    foreach ($name in @('StageLayers', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'DeviceProfile', 'CpuVisionIdleSeconds')) {
+    foreach ($name in @('StageLayers', 'TensorParallel', 'TensorSplit', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'DeviceProfile', 'CpuVisionIdleSeconds')) {
         if ($PSBoundParameters.ContainsKey($name)) { throw "-$name configures ninfer; use llama native options in -WorkerArgs" }
     }
     if ($SpeculativeMode -ne 'none') {
@@ -358,6 +387,10 @@ if ($Backend -eq 'llamacpp') { $nativeArgs += $nativeArgsSpec }
 if ($DiskPath) { $nativeArgs += @('--kvmem-disk-path', $DiskPath, '--kvmem-disk-mib', "$DiskMiB") }
 $nativeArgs += @(Get-KVMemQueryScoringArgs $PSBoundParameters)
 $nativeArgs += $WorkerArgs
+$launchEnvironment = @{ CUDA_VISIBLE_DEVICES = $Gpu; CUDA_DEVICE_ORDER = 'PCI_BUS_ID' }
+if ($Backend -eq 'ninfer') {
+    $launchEnvironment['KVMEM_CHECKPOINT_EXTRA_RECOMPUTE_TOKENS'] = "$CheckpointExtraRecomputeTokens"
+}
 if ($DryRun) {
     $displayArgs = @($nativeArgs)
     for ($i = 0; $i -lt $displayArgs.Count; $i++) {
@@ -367,13 +400,38 @@ if ($DryRun) {
     }
     @{ backend = $Backend; argv = @($Worker) + $displayArgs; capabilities = $capabilities
        token_settings = $tokenPlan
-       environment = @{ CUDA_VISIBLE_DEVICES = $Gpu; CUDA_DEVICE_ORDER = 'PCI_BUS_ID' } } |
+       environment = $launchEnvironment } |
         ConvertTo-Json -Depth 6
     return
 }
+if ($TensorParallel -or $CheckpointExtraRecomputeTokens -gt 0) {
+    $probeInfo = New-KVMemProcessInfo $Worker @('--kvmem-capabilities')
+    $probeInfo.RedirectStandardOutput = $true
+    $probeInfo.RedirectStandardError = $true
+    $probeInfo.EnvironmentVariables['CUDA_VISIBLE_DEVICES'] = '-1'
+    $probe = [Diagnostics.Process]::new()
+    $probe.StartInfo = $probeInfo
+    try {
+        $null = $probe.Start()
+        $stdout = $probe.StandardOutput.ReadToEndAsync()
+        $stderr = $probe.StandardError.ReadToEndAsync()
+        if (!$probe.WaitForExit(10000)) { $probe.Kill(); $probe.WaitForExit(); throw 'NInfer capability probe timed out' }
+        $contract = $stdout.Result | ConvertFrom-Json
+        $revision = if ($contract) { $contract.PSObject.Properties['heads_tensor_parallel_revision'] } else { $null }
+        if ($probe.ExitCode -ne 0) { throw 'NInfer capability probe failed' }
+        if ($TensorParallel -and (!$revision -or
+            ($revision.Value -isnot [int] -and $revision.Value -isnot [long]) -or $revision.Value -lt 1)) {
+            throw 'Worker does not support KVMem heads tensor parallelism; update the complete NInfer package'
+        }
+        $checkpointRevision = if ($contract) { $contract.PSObject.Properties['checkpoint_recompute_revision'] } else { $null }
+        if ($CheckpointExtraRecomputeTokens -gt 0 -and (!$checkpointRevision -or
+            ($checkpointRevision.Value -isnot [int] -and $checkpointRevision.Value -isnot [long]) -or $checkpointRevision.Value -lt 1)) {
+            throw 'Worker does not support checkpoint recompute limits; update the complete NInfer package'
+        }
+    } finally { $probe.Dispose() }
+}
 $info = New-KVMemProcessInfo $Worker $nativeArgs
-$info.EnvironmentVariables['CUDA_VISIBLE_DEVICES'] = $Gpu
-$info.EnvironmentVariables['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
+foreach ($entry in $launchEnvironment.GetEnumerator()) { $info.EnvironmentVariables[$entry.Key] = $entry.Value }
 $child = New-Object System.Diagnostics.Process
 $child.StartInfo = $info
 $started = $false

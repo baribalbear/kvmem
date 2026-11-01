@@ -16,10 +16,10 @@ index a51a8a648f14ec3d951b0b403bee787650c69882..1a9ca3dbc97a6634dc6d71ce5e671a3e
 +priced workspace for all admitted GGUF blocks; added native shape/conv oracles,
 +exact artifact import checks and a bounded weight-only NVFP4 conversion method.
 diff --git a/src/ops/linear/nvfp4/nvfp4_dispatch.cpp b/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
-index 51b1f59926f40d0a3c2a8f12d42479145cc46dbf..4d37cae317afef57c964637a3c9d322f4e79a8c3 100644
+index bff72847c0adfd16e9a2a0b432bf800aab01c660..295d02e0cdc4ad7e2e1d5532ecbee54c3c52b13f 100644
 --- a/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
 +++ b/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
-@@ -10,7 +10,7 @@
+@@ -11,7 +11,7 @@
  namespace ninfer::ops::detail {
  namespace {
  const std::array kShapes{&kNvfp4N14336K5120, &kNvfp4N16384K5120, &kNvfp4N34816K5120,
@@ -236,7 +236,7 @@ index 0000000000000000000000000000000000000000..01c9721a0baa0546e6f43c8ee7f54054
 +
 +} // namespace ninfer::ops::detail::unified
 diff --git a/src/ops/linear/nvfp4/sources.cmake b/src/ops/linear/nvfp4/sources.cmake
-index 4ca4b2f653ea112156db6b3d14ccb670580e7139..fca54d281088cf5b78af43b06e010b27b6cf48ed 100644
+index 08273db3fae42671a206946e5e23aa7a68d7c59b..f99fd8d12b29600e71bfac1de6e854199621fc80 100644
 --- a/src/ops/linear/nvfp4/sources.cmake
 +++ b/src/ops/linear/nvfp4/sources.cmake
 @@ -1,4 +1,6 @@

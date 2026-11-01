@@ -13,7 +13,7 @@ import uuid
 
 from .config import without_secrets
 from .plan import build_plan
-from .worker import probe_worker
+from .worker import probe_worker, require_launch_features
 from .systemd import profile_id as validate_id, render_unit, unit_name
 
 
@@ -120,6 +120,7 @@ def export_profile(data, backend_root, profiles_root, profile_id, *,
         raise ValueError('A Linux plan is required')
     if _validated_plan is None:
         plan['worker'] = probe_worker(plan['argv'][0], plan['backend'], plan['environment'])
+        require_launch_features(plan['worker'], data['parameters'])
     revision = uuid.uuid4().hex
     target = revisions / revision
     secret_ref = None

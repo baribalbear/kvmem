@@ -1,0 +1,33 @@
+--- a/core/device/aql.cpp
++++ b/core/device/aql.cpp
+@@ -1175,13 +1175,24 @@
+ 
+ using namespace aql;
+ 
+-// ROCDXG can grant the CPU access to a VRAM allocation without mapping that
+-// address into the CPU page tables. Use coherent host memory for kernel args
+-// there; native Linux retains its BAR-backed argument rings and tapes.
++// A successful access grant does not prove a CPU-writable VRAM mapping.
++// Keep BAR-backed arguments when supported; ROCDXG and CPU-inaccessible GPU
++// pools use coherent host memory for both argument rings and recorded tapes.
+ bool alloc_kernargs(int ord, size_t bytes, void** out) {
+-    const bool dxg = G().kfd < 0;
+-    const auto pool = dxg ? G().host_fine : G().dev[(size_t)ord].vram;
+-    const auto accessor = dxg ? G().dev[(size_t)ord].agent : G().cpu;
++    bool host_args = G().kfd < 0;
++    if (!host_args) {
++        hsa_amd_memory_pool_access_t access = HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
++        const auto status = hsa_amd_agent_memory_pool_get_info(
++            G().cpu, G().dev[(size_t)ord].vram,
++            HSA_AMD_AGENT_MEMORY_POOL_INFO_ACCESS, &access);
++        // A successful allow_access call does not create a writable CPU mapping
++        // when the pool says NEVER_ALLOWED (e.g. native Linux with a small BAR).
++        // Use the existing coherent-host path when CPU access is not proven.
++        host_args = status != HSA_STATUS_SUCCESS ||
++                    access == HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
++    }
++    const auto pool = host_args ? G().host_fine : G().dev[(size_t)ord].vram;
++    const auto accessor = host_args ? G().dev[(size_t)ord].agent : G().cpu;
+     *out = nullptr;
+     if (hsa_amd_memory_pool_allocate(pool, bytes, 0, out) != HSA_STATUS_SUCCESS)
+         return false;

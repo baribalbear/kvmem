@@ -56,6 +56,15 @@ class PackageTests(unittest.TestCase):
         (self.chat/'ui-build.json').write_text('{"console_chat_protocol":0}')
         with self.assertRaisesRegex(ValueError,'chat'): self.build()
 
+    def test_radiance_package_contains_worker_plan_and_bounded_model_inspector(self):
+        result=package.package(ROOT,self.directory/'radiance',self.chat,self.wheel,self.sha,'radiance')
+        directory=Path(result['directory'])
+        info=json.loads((directory/'console-build.json').read_text())
+        self.assertEqual(info['supported_backends'],['radiance'])
+        self.assertIn('radiance',(directory/'START-HERE.txt').read_text())
+        for name in ('scripts/launcher/radiance.py','backends/radiance/tools/inspect_rad.py'):
+            self.assertEqual(hashlib.sha256((directory/name).read_bytes()).hexdigest(),info['controller_files'][name])
+
     def test_wheel_traversal_is_rejected_and_partial_folder_removed(self):
         with zipfile.ZipFile(self.wheel,'a') as archive:
             archive.writestr('../outside.py','malicious fixture')

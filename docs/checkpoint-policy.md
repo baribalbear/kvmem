@@ -19,9 +19,50 @@ Set these environment variables before starting the worker:
 | `KVMEM_CHECKPOINT_HOT` | min(4, count) | Target number of images in RAM; at most count |
 | `KVMEM_CHECKPOINT_HOST_MIB` | 1024 | Checkpoint Host budget per lane |
 
-Numeric values must be positive except MIN_GAP, which also accepts zero. The extra variables are ignored in legacy
-mode. These defaults are experimental starting points, not tuned recommendations.
+Numeric values in the table must be positive except MIN_GAP, which also accepts zero.
+The table's extra spread variables are ignored in legacy mode. These defaults are
+experimental starting points, not tuned recommendations.
 The interval is not a bound on recomputation after pruning or skipped captures.
+
+### NInfer checkpoint recompute limit
+
+NInfer Qwen3.5 adds `KVMEM_CHECKPOINT_EXTRA_RECOMPUTE_TOKENS` in both `legacy`
+and `spread` modes. Its range is 0–2147483647; the default 0 disables this
+optimization. The console's NInfer-only **Checkpoint extra recompute limit**
+(`CheckpointExtraRecomputeTokens` in saved JSON) and Windows
+`-CheckpointExtraRecomputeTokens` set the same worker environment variable.
+The launcher writes an explicit 0 when omitted, so an inherited environment
+cannot silently enable the feature. Linux exports preserve that explicit value.
+A positive setting requires a worker reporting `checkpoint_recompute_revision`
+at least 1. The value 16 remains an experimental candidate, not a tuned default.
+
+The limit permits replacing a low-value checkpoint with an already complete,
+legal earlier state at most that many tokens away. For an ordinary prompt-tail
+capture, the decision happens before its extra prefill split, allocation and
+state copy; the earlier point must already cover the current full Query.
+An actual Query replay checkpoint still captures the exact pre-Query state and
+remains protected while executing. On the successful request-finish path it may
+participate in nearby cleanup; its substitute can be before the Query. The
+`query_replayed` flag is not a completion signal. Failed or cancelled requests
+retain their valid recovery states without this nearby cleanup. Cleanup compares against
+points that will actually remain, so a chain of deleted neighbors cannot silently
+increase the distance. A newer output endpoint does not replace an input-side
+point beyond a repeated request's legal restore frontier.
+
+This limit bounds extra tokens for the nearby decision, not latency, total future
+recomputation or memory. A later Query retry may need to recapture the exact
+pre-Query image; a cold substitute may require SSD reads. Budget eviction, edited
+input and read failures can require more recomputation. Native prefix, state,
+session and KV proofs still govern every restore. Active restore/transfer leases
+and shared owners delay physical release; an idle pool can retain a freed buffer.
+
+Keep `KVMEM_CHECKPOINT_MIN_GAP=0` when enabling this NInfer setting. Launchers reject
+the two positive settings together. A directly launched worker rejects simultaneous
+active thresholds in spread mode; in legacy mode the old MIN_GAP setting is ignored.
+Neither path applies both thinning rules. Query replay's
+`--kvmem-query-replay-max-tokens` remains an independent admission cap. Existing
+count, bytes and hot/Host budgets retain their meanings. This setting does not
+enable spread mode or change llama.cpp/PolyStrata checkpoint behavior.
 
 Use the existing `--kvmem-host-mib`, `--kvmem-disk-mib` and `--kvmem-disk-path`
 options for native KV storage and SSD capacity. Checkpoints and KV share D;
@@ -55,6 +96,87 @@ text batch. Periodic captures follow actual completed chunks. A checkpoint never
 splits an indivisible media group or names a frontier not yet evaluated. Optional
 long-generation sampling is not enabled in this version.
 
+### NInfer input reuse and template-safe fallback
+
+NInfer Qwen3.5 KVMem distinguishes two input-side uses. The existing template
+rewrite boundary remains the conservative fallback for a later real-user turn:
+adding that user can change how earlier assistant reasoning is rendered. The
+existing `memory_input_end` identifies the end of the accepted input before the
+current generation opener. The separate `InputReuse` role can preserve a complete
+state there for deep reuse when the actual next request only appends assistant/tool
+history. It does not reuse the `PromptTail` role or its Query-retirement rules.
+At T=0, an exact Query image can therefore remain alongside `InputReuse` where
+the previous ordinary-tail path could retire it; this repair does not promise
+unchanged peak or retained checkpoint memory.
+Capturing the deeper state does not overwrite the conservative fallback merely
+because it is newer. It does not change the template, request fields or non-KVMem
+execution.
+
+The deeper point is considered only when
+`0 < rewrite_frontier < memory_input_end < prompt_tokens`, and is captured only
+at an evaluated, legal boundary covering the full current Query, if any. For
+these requests it replaces the ordinary `prompt_tokens - 1` capture target;
+it does not add that target as another copy. If its frontier already has a valid complete
+state, the roles share that image rather than copying it again. The NInfer
+extra-recompute limit uses the same actual-state and shared-image rules before
+an optional nearby capture; a planned point or a failed capture is not a
+substitute. For the ordinary 499-token example, `memory_input_end` and the
+existing InputFallback are both at 492, so this distinction adds no capture and
+leaves the existing policy intact: T=0 retains the ordinary 498 tail, while
+T=16 may use the completed 492 state under its usual skip rules.
+When the conservative point is 34 and the deep input ends much later, keeping
+both can require another full recurrent-state image and prefill split. That
+cost is intentional and is separate from the benefit of a later deep restore.
+
+The next request still selects the deepest candidate that passes its actual
+token/position/media prefix, accepted-state, KV and session checks. A tool
+continuation may match the deeper input; a new user that changes the template
+must reject that candidate and can use the conservative point or an earlier
+legal one. Neither the label nor the message type authorizes reuse. Ordinary
+tool continuation remains append plus resident-only Pressure, without a new
+Query recall. Existing retention and resource budgets still apply.
+
+This input-boundary repair was authorized and directly validated on 2026-10-31
+with Qwen3.5-4B-MTP-Q4_K_M, INT8 KV, FP16 GDN, MTP4 and one RTX 5060 Ti.
+The unchanged `input-fallback` fixture passes at T=0 and T=16: the first direct
+tool append restores the true input boundary 1447 instead of 34. The earlier
+1450 estimate and the observed LCP 1451 are not that input boundary. The expanded
+native test also passes repeat, tool continuation and cancellation recovery;
+a new real-user turn has LCP 37 and correctly restores fallback 34.
+Evidence: [original fixture T0](../../input-reuse-20261031/original-fixture-T0/results.txt),
+[T16](../../input-reuse-20261031/original-fixture-T16/results.txt), and
+[native MTP report](../../input-reuse-20261031/native-mtp/report.json).
+
+The [paired performance report](../../input-reuse-20261031/perf-4b/report.json)
+compares the preceding checkpoint-cleanup worker with this repair on the same
+card and settings: one warmup excluded, three measured cold-input/tool pairs
+per profile, 96 generated tokens per request. Median times in milliseconds:
+
+| T | Cold prefill, old → repaired | Direct tool native TTFT, old → repaired | Two-request wall time, old → repaired |
+|---:|---:|---:|---:|
+| 0 | 557.0 → 582.9 (+4.65%) | 661.3 → 195.0 | 2249 → 1813 |
+| 16 | 552.2 → 576.1 (+4.32%) | 654.6 → 192.8 | 2219 → 1781 |
+
+The extra capture increases cold-prefill time while preserving 1447 tokens for
+the immediate tool request. These are 4B single-card, small-sample results for
+fixed synthetic assistant/tool history with the generated answer discarded;
+they do not establish a 27B or general throughput gain.
+
+The completed repair regression set also passes T=0 and T=16 for
+[ordinary decode](../../input-reuse-20261031/native-ordinary/report.json) and
+[long Query, MTP, shared reuse and SSD](../../input-reuse-20261031/query-mtp-ssd/report.json),
+including cancellation recovery and an actual cold read of the InputReuse image
+at frontier 6443. The [27B single-card short-prompt check](../../input-reuse-20261031/short-27b-single/report.json)
+confirms that the ordinary 499-token case adds no InputReuse capture: T=0 keeps
+492 and 498, while T=16 skips 498 using 492. This 27B check establishes capture
+and restore behavior, not TP correctness or performance. These runs use native
+transfer verification for restore claims; they do not inject native allocation
+or copy failures. Host contracts separately cover incomplete-source rejection
+and publication ownership. The earlier checkpoint-cleanup package remains a
+separate baseline, not evidence for this repair.
+
+### Nearby coverage and retention
+
 Before constructing optional coverage or reuse-anchor images, a metadata-only
 lookup checks for a valid earlier archive point less than MIN_GAP tokens away.
 If found, capture is skipped; restoring that earlier point later performs the
@@ -67,7 +189,8 @@ spacing when a new endpoint arrives. Comparisons use actual retained ordinary
 points, so skipped neighbors cannot move the representative forward indefinitely.
 Required Query/replay, rollback and MTP snapshots remain exact execution leases.
 When those leases end, their images compete under the same historical spacing.
-MIN_GAP=0 disables both the capture gate and nearby directory thinning. This
+MIN_GAP=0 disables this MIN_GAP-based capture gate and directory thinning; it does
+not disable NInfer's separate extra-recompute setting described above. This
 simple rule has no cost predictor, usage estimator or background control loop.
 It defaults off: the 64-token experiment reduced some retention/write work but
 regressed several tail-edit and switch-back requests. The validation record

@@ -21,7 +21,8 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def package(source, output, chat, wheel, expected):
+def package(source, output, chat, wheel, expected, backend='ninfer'):
+    if backend not in ('ninfer','radiance','all'):raise ValueError('Unsupported console backend')
     source, output, chat, wheel = (Path(p).resolve() for p in (source, output, chat, wheel))
     if output.exists() or Path(str(output) + '.tar.gz').exists():
         raise ValueError('Output already exists; choose a new versioned package path')
@@ -37,6 +38,8 @@ def package(source, output, chat, wheel, expected):
              'scripts/console_hardware.py', 'scripts/console_memory.py', 'scripts/model_health.py', 'scripts/requirements-console.txt',
              'scripts/launcher-capabilities.json', 'scripts/speculative-capabilities.json',
              'docs/linux-launcher.md']
+    if backend in ('radiance','all'):
+        files.append('backends/radiance/tools/inspect_rad.py')
     for folder in ('scripts/launcher', 'scripts/model_health_ninfer', 'ui/monitor'):
         files.extend(str(p.relative_to(source)).replace('\\', '/') for p in (source / folder).iterdir()
                      if p.is_file() and p.suffix not in ('.pyc', '.map'))
@@ -66,14 +69,14 @@ def package(source, output, chat, wheel, expected):
             archive.extractall(runtime)
         (staging / 'START-HERE.txt').write_text(
             'Linux x86_64 console preview; system Python 3.10+ is required.\n'
-            'No worker or model is included. Select a compatible Linux NInfer worker.\n'
+            f'No worker or model is included. Select a compatible Linux worker for {backend}.\n'
             '中文: bash START-HERE-CN.sh\nEnglish: bash START-HERE-EN.sh\n'
             'Headless: bash scripts/linux/start-ui.sh --no-browser\n'
             'Check: bash scripts/linux/start-ui.sh --check\n'
             'Guide: docs/linux-launcher.md\n', encoding='utf-8', newline='\n')
-        controller_files = {name: digest(staging / name) for name in files if name.startswith(('scripts/', 'ui/monitor/'))}
+        controller_files = {name: digest(staging / name) for name in files if name.startswith(('scripts/', 'ui/monitor/', 'backends/radiance/tools/'))}
         info = dict(schema_version=1, package_kind='console-only-preview', platform='linux-x86_64',
-                    launch_contract_version=3, supported_backends=['ninfer'], python_minimum='3.10',
+                    launch_contract_version=3, supported_backends=['ninfer','llamacpp','radiance'] if backend=='all' else [backend], python_minimum='3.10',
                     psutil_version='7.2.2', psutil_wheel=wheel.name, psutil_sha256=expected,
                     native_worker_included=False, native_boot_validated=False, controller_files=controller_files,
                     chat_manifest_sha256=digest(chat / 'ui-build.json'))
@@ -100,5 +103,6 @@ if __name__ == '__main__':
     parser.add_argument('--chat-ui', type=Path, required=True)
     parser.add_argument('--psutil-wheel', type=Path, required=True)
     parser.add_argument('--psutil-sha256', required=True)
+    parser.add_argument('--backend', choices=('ninfer','radiance','all'), default='ninfer')
     args = parser.parse_args()
-    print(json.dumps(package(args.source, args.output, args.chat_ui, args.psutil_wheel, args.psutil_sha256), indent=2))
+    print(json.dumps(package(args.source, args.output, args.chat_ui, args.psutil_wheel, args.psutil_sha256,args.backend), indent=2))

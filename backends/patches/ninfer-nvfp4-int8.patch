@@ -1,8 +1,8 @@
 diff --git a/apps/cli/main.cpp b/apps/cli/main.cpp
-index 11fa1957f27ff5edbe63a1853c0d989010557866..8eb1e484de560aae871eb5cb60b223a8ee595546 100644
+index 840ffa6cfc17ff408f7748132cfff6db9845c872..025e841048e5f15dfcc3d8a611775f5720bb696a 100644
 --- a/apps/cli/main.cpp
 +++ b/apps/cli/main.cpp
-@@ -411,6 +411,7 @@ int main(int argc, char** argv) {
+@@ -415,6 +415,7 @@ int main(int argc, char** argv) {
          engine_options.cuda_memory_probe_step_bytes = cli.cuda_memory_probe_step_bytes;
          engine_options.mlp_a8_decode            = cli.mlp_a8_decode;
          engine_options.prefill_a8               = cli.prefill_a8;
@@ -11,10 +11,10 @@ index 11fa1957f27ff5edbe63a1853c0d989010557866..8eb1e484de560aae871eb5cb60b223a8
          engine_options.prefill_cublas           = cli.prefill_cublas;
          engine_options.prefill_cublas_projections = cli.prefill_cublas_projections;
 diff --git a/apps/cli/options.cpp b/apps/cli/options.cpp
-index 6c967120e4e4473fe3ccb34efbb017997fa110b7..2f4228326de221123786a82a0b2cf70964d12905 100644
+index 091cdb3cb923417e76189065d93639b4aec6907d..5689238dea2aadb93b416390c9d1c52a4238ff19 100644
 --- a/apps/cli/options.cpp
 +++ b/apps/cli/options.cpp
-@@ -245,9 +245,13 @@ std::string usage_text(const char* argv0) {
+@@ -259,9 +259,13 @@ std::string usage_text(const char* argv0) {
             "  --no-prefill-a8               return full prefill tiles to their A16 routes,\n"
             "                                which is how the integer routes are measured on\n"
             "                                a whole request\n"
@@ -29,7 +29,7 @@ index 6c967120e4e4473fe3ccb34efbb017997fa110b7..2f4228326de221123786a82a0b2cf709
             "  --prefill-cublas              hand wide prefill GEMMs to cuBLAS: a large\n"
             "                                prefill speedup for a small perplexity cost;\n"
             "                                wants a larger --prefill-chunk\n"
-@@ -490,6 +494,8 @@ Options parse_options(int argc, char** argv) {
+@@ -522,6 +526,8 @@ Options parse_options(int argc, char** argv) {
              options.mlp_a8_decode = true;
          } else if (arg == "--no-prefill-a8") {
              options.prefill_a8 = false;
@@ -39,10 +39,10 @@ index 6c967120e4e4473fe3ccb34efbb017997fa110b7..2f4228326de221123786a82a0b2cf709
              options.nvfp4_w4a16 = true;
          } else if (arg == "--lookup-ngram") {
 diff --git a/apps/cli/options.h b/apps/cli/options.h
-index 352bead83862a5f3535ae9c272be0023a1791c82..89c5a3740ae169a19cb776f7bce9f3ce692848cd 100644
+index a8d481887d1d035ee07c4d8ba148cb87c667d08d..9d48126d44723aa4009c8abefcb89f0d36a007dc 100644
 --- a/apps/cli/options.h
 +++ b/apps/cli/options.h
-@@ -68,6 +68,7 @@ struct Options {
+@@ -73,6 +73,7 @@ struct Options {
      bool use_alt_prefix_caching = false;
      bool mlp_a8_decode  = false;
      bool prefill_a8     = true;
@@ -51,10 +51,10 @@ index 352bead83862a5f3535ae9c272be0023a1791c82..89c5a3740ae169a19cb776f7bce9f3ce
      bool prefill_cublas = false;
      bool prefill_cublas_projections = true;
 diff --git a/apps/perplexity/main.cpp b/apps/perplexity/main.cpp
-index 255de819a7d6f5fbe0017ccb3adb1de0083f061d..adfeb899b96d816a12286a1086734b3219c8da6a 100644
+index 44bb4fba98eacd66bbc2d7e2d2486324d91fb022..377788475de00ba4cef419f20ca939ea5c97206c 100644
 --- a/apps/perplexity/main.cpp
 +++ b/apps/perplexity/main.cpp
-@@ -85,6 +85,10 @@ struct Options {
+@@ -92,6 +92,10 @@ struct Options {
      bool prefill_cublas                 = false;
      bool prefill_cublas_projections     = true;
      bool fast_prefill_kernel            = false;
@@ -65,7 +65,7 @@ index 255de819a7d6f5fbe0017ccb3adb1de0083f061d..adfeb899b96d816a12286a1086734b32
      ninfer::product::LogLevel log_level = ninfer::product::LogLevel::Info;
  };
  
-@@ -111,6 +115,8 @@ std::string usage_text() {
+@@ -121,6 +125,8 @@ std::string usage_text() {
             "       (--no-prefill-a8 is the opposite: scoring runs the prefill phase, so this is\n"
             "        how the integer prefill routes' perplexity cost is measured)\n"
             "       [--prefill-cublas [--no-prefill-cublas-projections]] [--fast-prefill-kernel]\n"
@@ -74,7 +74,7 @@ index 255de819a7d6f5fbe0017ccb3adb1de0083f061d..adfeb899b96d816a12286a1086734b32
             "       (--prefill-cublas scores through the cuBLAS prefill route, which is how its\n"
             "        perplexity cost is measured; the projections flag keeps the attention and GDN\n"
             "        input projections off it)\n"
-@@ -162,6 +168,8 @@ Options parse_options(int argc, char** argv) {
+@@ -172,6 +178,8 @@ Options parse_options(int argc, char** argv) {
              out.device = parse_integer<int>(value("--device"), "device");
          } else if (option == "--fast-prefill-kernel") {
              out.fast_prefill_kernel = true;
@@ -83,7 +83,7 @@ index 255de819a7d6f5fbe0017ccb3adb1de0083f061d..adfeb899b96d816a12286a1086734b32
          } else if (option == "--kv-dtype") {
              const std::string_view dtype = value("--kv-dtype");
              if (dtype == "bf16") {
-@@ -392,6 +400,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
+@@ -430,6 +438,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
      engine_options.prefill_cublas   = options.prefill_cublas;
      engine_options.prefill_cublas_projections = options.prefill_cublas_projections;
      engine_options.fast_prefill_kernel        = options.fast_prefill_kernel;
@@ -92,10 +92,10 @@ index 255de819a7d6f5fbe0017ccb3adb1de0083f061d..adfeb899b96d816a12286a1086734b32
      engine_options.diagnostic_observer        = ninfer::product::engine_diagnostic_observer(logger);
      ninfer::Engine engine(std::move(engine_options));
 diff --git a/bench/ops/linear_bench.cu b/bench/ops/linear_bench.cu
-index a5e169d52f8d84888a440586b8f0a10d50fa7786..3721fdf5af320cddfc7a27448d8bad446c115b61 100644
+index 467b60941e29ddab1adb8e34b2aa22346e150e2f..2caeeb09929d0988b32b889106a4783e2f0884de 100644
 --- a/bench/ops/linear_bench.cu
 +++ b/bench/ops/linear_bench.cu
-@@ -291,6 +291,7 @@ const char* policy_name(LinearPolicy policy) {
+@@ -295,6 +295,7 @@ const char* policy_name(LinearPolicy policy) {
      if (policy == LinearPolicy::AllowA8) { return "A8"; }
      if (policy == LinearPolicy::AllowA4) { return "A4"; }
      if (policy == LinearPolicy::AllowA8Int) { return "A8I"; }
@@ -103,7 +103,7 @@ index a5e169d52f8d84888a440586b8f0a10d50fa7786..3721fdf5af320cddfc7a27448d8bad44
      throw std::invalid_argument("unsupported Linear benchmark policy");
  }
  
-@@ -316,7 +317,9 @@ LinearPolicy parse_policy(std::string_view text) {
+@@ -320,7 +321,9 @@ LinearPolicy parse_policy(std::string_view text) {
      if (value == "a8" || value == "allowa8") { return LinearPolicy::AllowA8; }
      if (value == "a4" || value == "allowa4") { return LinearPolicy::AllowA4; }
      if (value == "a8int" || value == "allowa8int") { return LinearPolicy::AllowA8Int; }
@@ -114,15 +114,15 @@ index a5e169d52f8d84888a440586b8f0a10d50fa7786..3721fdf5af320cddfc7a27448d8bad44
  }
  
  std::uint64_t parse_u64(std::string_view text, const char* label) {
-@@ -382,7 +385,7 @@ void usage(const char* argv0) {
+@@ -386,7 +389,7 @@ void usage(const char* argv0) {
                   "  iq2_xxs, iq2_xs, iq2_s, iq3_xxs, iq3_s, iq4_nl, iq4_xs, q4_0, q5_0, q2_0) over\n"
                   "  random blocks.\n\n"
                   "Options:\n"
 -                 "  --policy a16|a8|a4|a8int Activation-compute policy (default a16).\n"
 +                 "  --policy a16|a8|a4|a8int|nvfp4int8 Activation-compute policy (default a16).\n"
+                  "  --out bf16|fp32    Output dtype (default bf16); fp32 is a tensor-parallel\n"
+                  "                     rank's partial sum.\n"
                   "  --execution MODE   eager (default) or graph; time the complete Op.\n"
-                  "  --graph-calls N    Calls per timed graph (1..64, default 1); report per call.\n"
-                  "  --profile          Capture exactly one post-warmup public Linear call.\n"
 diff --git a/bench/ops/nvfp4_linear_swiglu_bench.cu b/bench/ops/nvfp4_linear_swiglu_bench.cu
 index 41dfe32719f104d795b9395b1e76f3105b1579b8..651187755940985b4d6dc44e1bae38119647a755 100644
 --- a/bench/ops/nvfp4_linear_swiglu_bench.cu
@@ -152,10 +152,10 @@ index 41dfe32719f104d795b9395b1e76f3105b1579b8..651187755940985b4d6dc44e1bae3811
  
  void write_csv(const Options& options, const std::vector<Result>& results,
 diff --git a/docs/device-profiles.md b/docs/device-profiles.md
-index c7fe388516b1c6257d925a195fa0d0a52c602c10..804c14422cb2e1aa48d862a5baeeea77f490b682 100644
+index 3b5905cdc80976c4e535492051a28128d151edb6..33c4d5709c645f9cce59c7d95e78835ad27b6434 100644
 --- a/docs/device-profiles.md
 +++ b/docs/device-profiles.md
-@@ -113,6 +113,7 @@ survives a second interleaved measurement, and its output matches the compiled r
+@@ -117,6 +117,7 @@ survives a second interleaved measurement, and its output matches the compiled r
  | `q8_ksplit/<rows>x<k>` | the four-K-warp form (`kw4`: at most 128 registers a thread, four CTAs an SM) of the 8-column tile of the Q8 G32 K-split contraction, which MTP heads, DFlash2 drafters and Q8 heads run, instead of the route's own schedule | the eleven contraction shapes of those layers, widths 1 to 8 |
  | `unified/q4_q5_attn_input`, `unified/q4_q5_gdn_input`, `unified/q4_linear_swiglu`, `unified/q4_linear_add`, `unified/q5_linear_add/5120x<k>` | upstream's routes for the fused groupwise projections over the unified Linear templates (`unified`) instead of this line's own | the model shapes, widths 1 to 64 (the small-T launches only where those are all the switch covers) |
  | `unified/nvfp4_attn_input`, `unified/nvfp4_gdn_input`, `unified/nvfp4_linear_add`, `unified/nvfp4_linear_swiglu` | the switch of the NVFP4 fused projections onto the unified Linear templates (`unified`) instead of this line's own chain. Under the A16 policies both chains are registered at every width a fused launch serves, so a key names a chain rather than a width | the model shapes, widths 1 to 1024. The two chains share the T = 1 decode kernel and, above the own small-T ceiling (32 columns; 16 for SwiGLU), the same wide fused A16 MMA, so what the key really decides is the small-T band: this line's own small-T kernels against the unified SIMT and sliced-K ladder |
@@ -164,10 +164,10 @@ index c7fe388516b1c6257d925a195fa0d0a52c602c10..804c14422cb2e1aa48d862a5baeeea77
  | `w4_cublas/<op>`, `w4_cublas/<op>/a8` | with `--prefill-cublas`, whether a prompt call of each projection (`q4_linear_swiglu`, `linear_add/5120x17408`, `linear_add/5120x6144`, `q4_q5_gdn_input`, `q4_q5_attn_input`) takes the cuBLAS route (`on`, `off`): the plain key at widths the integer A8 mainloop cannot take, `/a8` at the multiples of its 128-column tile. Where no band reaches a width, calls of 512 columns and more take the route; no band sends a call of 128 columns or fewer (a decode or verify round) to it | widths 136 to 1,500, and 256 to 2,048 under `/a8` |
  | `gdn_two_stage/h<value heads>` | the two-stage GDN prefill (fused Q/K normalization and control preparation, then one FP32-state recurrence that also writes the output) instead of the WY/state-passing/output pipeline | prompts of 16 to 8192 tokens, 48 and 32 value heads |
 diff --git a/include/ninfer/engine_options.h b/include/ninfer/engine_options.h
-index fc38adbdde5c2be79b0fa317dad84b1101af01b1..25e8882f7d0993a830718c570a1fa78124f6ddf8 100644
+index b0d3d898d5cf395b399e3afbf167cd425bab7cb7..bfa9692147d3296777a9f39436fc6e0f817c1e32 100644
 --- a/include/ninfer/engine_options.h
 +++ b/include/ninfer/engine_options.h
-@@ -603,6 +603,12 @@ struct EngineOptions {
+@@ -625,6 +625,12 @@ struct EngineOptions {
      // permission to A16Only, so the flag is a no-op there: it only ever trades A4 away and never
      // introduces a compute domain the card lacks.
      bool nvfp4_w4a16                       = false;
@@ -181,7 +181,7 @@ index fc38adbdde5c2be79b0fa317dad84b1101af01b1..25e8882f7d0993a830718c570a1fa781
      // preprocessing. Also bounds the overlay window.
      std::uint32_t vision_max_merged_tokens = 16384;
 diff --git a/include/ninfer/ops/attn_input_proj.h b/include/ninfer/ops/attn_input_proj.h
-index f87cb21b92a4f7ccad8f91a5b142989af85678c9..5975dbb64a5561e522b701069c121277d2d24752 100644
+index 6d28459397bb74b9d3be8798d457429a1dc838dc..72a877186628b47fd440d6c53f39da8e93e5742b 100644
 --- a/include/ninfer/ops/attn_input_proj.h
 +++ b/include/ninfer/ops/attn_input_proj.h
 @@ -130,6 +130,35 @@ void attn_input_proj_fused_rmsnorm_nvfp4(const Tensor& residual, const Tensor& n
@@ -221,7 +221,7 @@ index f87cb21b92a4f7ccad8f91a5b142989af85678c9..5975dbb64a5561e522b701069c121277
   * Applies the A16-only single-parent Q/K/output-gate/V projection without transient workspace.
   */
 diff --git a/include/ninfer/ops/linear.h b/include/ninfer/ops/linear.h
-index 478453c6deaac6d431dec04a10a68248dda771d0..4b9f40c703cb820236d1a0293284dab0239ac7ab 100644
+index 468bd423af78b130977d5c541d1621340a430065..1bccc9db09540797fc90201832fdb548ce13ff3b 100644
 --- a/include/ninfer/ops/linear.h
 +++ b/include/ninfer/ops/linear.h
 @@ -44,12 +44,21 @@ enum class LinearPolicy : std::uint8_t {
@@ -261,10 +261,10 @@ index 478453c6deaac6d431dec04a10a68248dda771d0..4b9f40c703cb820236d1a0293284dab0
  /// weight-sized and has to be amortised over the tokens in the call.
  [[nodiscard]] constexpr bool allows_cublas_prefill(LinearPolicy policy) noexcept {
 diff --git a/include/ninfer/ops/linear_swiglu.h b/include/ninfer/ops/linear_swiglu.h
-index 0c39ab82f8ddb5b60d2db7214d21bb1c4c029fd2..fc3bac81241db4593bc7776f49f648aa91413a75 100644
+index 215ec87ed7bf5465156a6df02dd8e0ad55e3010c..bd747a4aa2fafd5f8a9e567dec0fbbefcd3bacd4 100644
 --- a/include/ninfer/ops/linear_swiglu.h
 +++ b/include/ninfer/ops/linear_swiglu.h
-@@ -104,4 +104,32 @@ void linear_swiglu(const Tensor& x, const Weight& gate_weight, const Weight& up_
+@@ -106,4 +106,32 @@ void linear_swiglu(const Tensor& x, const Weight& gate_weight, const Weight& up_
      QType gate_qtype, QType up_qtype, std::int32_t rows, std::int32_t input_rows,
      LinearPolicy policy, std::int32_t min_tokens, std::int32_t max_tokens);
  
@@ -298,10 +298,10 @@ index 0c39ab82f8ddb5b60d2db7214d21bb1c4c029fd2..fc3bac81241db4593bc7776f49f648aa
 +
  } // namespace ninfer::ops
 diff --git a/src/calibration/device_calibration.cu b/src/calibration/device_calibration.cu
-index 9028714c204c7e1b710c0742acd309ffd48c4dfd..4a1276a544e4aa4a2ca3bcb239362485a6b89802 100644
+index e58b5efae495ae260bedf80a7668e76b255fd6d6..14c99aa1766c799d36ea6540990f2811ce763cdb 100644
 --- a/src/calibration/device_calibration.cu
 +++ b/src/calibration/device_calibration.cu
-@@ -728,15 +728,17 @@ void calibrate_groupwise(ops::DeviceRouteProfile& profile, Timer& timer,
+@@ -1056,15 +1056,17 @@ void calibrate_groupwise(ops::DeviceRouteProfile& profile, Timer& timer,
      }
  }
  
@@ -322,7 +322,7 @@ index 9028714c204c7e1b710c0742acd309ffd48c4dfd..4a1276a544e4aa4a2ca3bcb239362485
  void calibrate_nvfp4_fused(ops::DeviceRouteProfile& profile, Timer& timer,
                             const CalibrationOptions& options) {
      // A card that cannot select the unified table has no switch onto it to measure.
-@@ -759,8 +761,9 @@ void calibrate_nvfp4_fused(ops::DeviceRouteProfile& profile, Timer& timer,
+@@ -1087,8 +1089,9 @@ void calibrate_nvfp4_fused(ops::DeviceRouteProfile& profile, Timer& timer,
      DeviceBuffer z_plane    = bf16_buffer(static_cast<std::size_t>(6144) * max_tokens);
      DeviceBuffer residual   = bf16_buffer(static_cast<std::size_t>(hidden) * max_tokens);
      DeviceBuffer swiglu_out = bf16_buffer(static_cast<std::size_t>(17408) * max_tokens);
@@ -334,7 +334,7 @@ index 9028714c204c7e1b710c0742acd309ffd48c4dfd..4a1276a544e4aa4a2ca3bcb239362485
      DeviceBuffer norm_weight        = bf16_buffer(static_cast<std::size_t>(hidden));
      DeviceBuffer x_normed           = bf16_buffer(static_cast<std::size_t>(hidden) * max_tokens);
      constexpr float kNormEps        = 1e-6F;
-@@ -787,6 +790,25 @@ void calibrate_nvfp4_fused(ops::DeviceRouteProfile& profile, Timer& timer,
+@@ -1115,6 +1118,25 @@ void calibrate_nvfp4_fused(ops::DeviceRouteProfile& profile, Timer& timer,
          Tensor gate_out = tensor(gate, 6144, cols);
          Tensor k_out    = tensor(k_plane, 1024, cols);
          Tensor v_out    = tensor(v_plane, 1024, cols);
@@ -360,7 +360,7 @@ index 9028714c204c7e1b710c0742acd309ffd48c4dfd..4a1276a544e4aa4a2ca3bcb239362485
          ops::detail::nvfp4_attn_input_dispatch(tensor(x_hidden, hidden, cols), attn.weight, q_out,
                                                 gate_out, k_out, v_out, policy, &workspace, stream);
      };
-@@ -812,6 +834,20 @@ void calibrate_nvfp4_fused(ops::DeviceRouteProfile& profile, Timer& timer,
+@@ -1140,6 +1162,20 @@ void calibrate_nvfp4_fused(ops::DeviceRouteProfile& profile, Timer& timer,
                                  cudaStream_t stream) {
          auto scope = workspace.scope();
          Tensor o   = tensor(swiglu_out, 17408, cols);
@@ -381,7 +381,7 @@ index 9028714c204c7e1b710c0742acd309ffd48c4dfd..4a1276a544e4aa4a2ca3bcb239362485
          ops::detail::nvfp4_linear_swiglu_dispatch(tensor(x_hidden, hidden, cols), gate_up.weight, o,
                                                    policy, workspace, stream);
      };
-@@ -835,12 +871,27 @@ void calibrate_nvfp4_fused(ops::DeviceRouteProfile& profile, Timer& timer,
+@@ -1163,12 +1199,27 @@ void calibrate_nvfp4_fused(ops::DeviceRouteProfile& profile, Timer& timer,
          {"unified/nvfp4_linear_swiglu", small_t_widths,
           bind_policy(swiglu_run, ops::LinearPolicy::A16Only), view(swiglu_out, 17408), {}},
      };
@@ -416,10 +416,10 @@ index 9028714c204c7e1b710c0742acd309ffd48c4dfd..4a1276a544e4aa4a2ca3bcb239362485
      }
  }
 diff --git a/src/calibration/route_catalog.cpp b/src/calibration/route_catalog.cpp
-index 15258bb94cb76fad5a86a618e5ae985615742f82..6b4820a61fad6bcc57070f8f61fa5c79e72a649d 100644
+index 16fe686ef157f5ee2b87ca414b3464030f6b345f..302dc79eabf665273c27acdeda558e025c1c9d4d 100644
 --- a/src/calibration/route_catalog.cpp
 +++ b/src/calibration/route_catalog.cpp
-@@ -76,9 +76,15 @@ std::vector<RouteCatalogEntry> build_catalog(ops::DeviceTier tier) {
+@@ -84,9 +84,15 @@ std::vector<RouteCatalogEntry> build_catalog(ops::DeviceTier tier) {
                  add(key, {"unified"});
              }
              // QUASAR NVFP4 fused projections: the A16 chain choice at every width a fused launch
@@ -438,10 +438,10 @@ index 15258bb94cb76fad5a86a618e5ae985615742f82..6b4820a61fad6bcc57070f8f61fa5c79
              }
          }
 diff --git a/src/models/load_options.h b/src/models/load_options.h
-index aaef36e9c825f068abd1d80547ddbd7bbd7bc178..78f1f297cb2e2610cf27254faf20e4cc09465f38 100644
+index 63441135f84a66094b200605c25e5da110a7612e..3274170730d671c1026ccf97d9464adea42b28a1 100644
 --- a/src/models/load_options.h
 +++ b/src/models/load_options.h
-@@ -28,6 +28,8 @@ struct LoadOptions {
+@@ -30,6 +30,8 @@ struct LoadOptions {
      bool mlp_a8_decode = false;
      // Clearing this returns full prefill tiles to their A16 routes; see EngineOptions::prefill_a8.
      bool prefill_a8 = true;
@@ -450,7 +450,7 @@ index aaef36e9c825f068abd1d80547ddbd7bbd7bc178..78f1f297cb2e2610cf27254faf20e4cc
      // Prefer the dequantising NVFP4 A16 routes over a native-FP4 card's A4 permission; see
      // EngineOptions::nvfp4_w4a16.
      bool nvfp4_w4a16 = false;
-@@ -133,6 +135,7 @@ struct LoadOptions {
+@@ -143,6 +145,7 @@ struct LoadOptions {
              .expert_residency = options.expert_residency,
              .mlp_a8_decode  = options.mlp_a8_decode,
              .prefill_a8     = options.prefill_a8,
@@ -459,10 +459,10 @@ index aaef36e9c825f068abd1d80547ddbd7bbd7bc178..78f1f297cb2e2610cf27254faf20e4cc
              .prefill_cublas = options.prefill_cublas,
              .prefill_cublas_projections = options.prefill_cublas_projections,
 diff --git a/src/models/qwen3_5/execution/ffn.cpp b/src/models/qwen3_5/execution/ffn.cpp
-index f657383f2375ce7176fe9bc739c9391bf831892d..3fd12efce6e1582fa79480eb86b4fd4f864aa47a 100644
+index 34ccb18406e37d6c03ad18dacecd490488ba5db9..1c18d797ebcc2f36723a92e10d9b09cf6a37e03a 100644
 --- a/src/models/qwen3_5/execution/ffn.cpp
 +++ b/src/models/qwen3_5/execution/ffn.cpp
-@@ -161,10 +161,24 @@ const Tensor* ffn_input_signs(const FfnParameters& parameters) {
+@@ -173,10 +173,24 @@ const Tensor* ffn_input_signs(const FfnParameters& parameters) {
  void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual,
           const ops::SparseMoeHints& hints, WorkspaceArena& workspace, cudaStream_t stream, bool mtp,
           bool verify, InputBasis basis, bool wide_verification, NativeExpertRuntime* experts,
@@ -485,10 +485,10 @@ index f657383f2375ce7176fe9bc739c9391bf831892d..3fd12efce6e1582fa79480eb86b4fd4f
 +        if (input_norm != nullptr) {
 +            throw std::invalid_argument("FFN: a tensor-parallel share cannot fold its input norm");
 +        }
-         const auto* dense = std::get_if<DenseParameters>(&parameters);
-         if (dense == nullptr || mtp || rotated_dense(*dense)) {
-             throw std::logic_error("a tensor-parallel FFN share is an unrotated dense FFN");
-@@ -250,8 +264,13 @@ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual
+         if (const auto* share = std::get_if<MoeShareParameters>(&parameters); share && !mtp) {
+             const auto storage =
+                 workspace.alloc_bytes(ffn_workspace_bytes(parameters, columns, columns));
+@@ -277,8 +291,13 @@ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual
      Tensor activation = workspace.alloc(DType::BF16, {gu.n / 2, columns});
      {
          auto call = workspace.scope();
@@ -505,13 +505,13 @@ index f657383f2375ce7176fe9bc739c9391bf831892d..3fd12efce6e1582fa79480eb86b4fd4f
      ops::linear_add(activation, down, residual,
                      residual_projection_policy(p.down, wide_verification), workspace, stream);
 diff --git a/src/models/qwen3_5/execution/ffn.h b/src/models/qwen3_5/execution/ffn.h
-index 18cdcba377b8b790eef4fd3c4df7db3890c3b02d..c64839479b69c2303692515eceb085eb72f99f9a 100644
+index 72ef46618c99650a22b2baf1ed74d663dbe6ff40..ac4f25532fdd992028dc3b5d034e40cceb170909 100644
 --- a/src/models/qwen3_5/execution/ffn.h
 +++ b/src/models/qwen3_5/execution/ffn.h
-@@ -11,6 +11,15 @@ class NativeExpertRuntime;
- [[nodiscard]] std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t first,
+@@ -13,6 +13,15 @@ class NativeExpertRuntime;
                                                std::int32_t last, bool mtp = false,
-                                               bool verify = false, bool wide_verification = false);
+                                               bool verify = false, bool wide_verification = false,
+                                               bool partial = false);
 +// A caller that did not normalise its input. The integer gate_up route folds that norm into its own
 +// quantise pass, so `hidden` is then the un-normed residual row and this names the norm that would
 +// have produced it. `ffn` honours it only on the Dense NVFP4 single-source path the eligibility
@@ -522,9 +522,9 @@ index 18cdcba377b8b790eef4fd3c4df7db3890c3b02d..c64839479b69c2303692515eceb085eb
 +};
 +
  // `wide_verification` keeps the neural path's residual activation precision in a wide single-row
- // copy verification (see residual_projection_policy). With `partial`, a dense FFN writes its down
- // projection to that FP32 [hidden, T] matrix instead of adding it to `residual` (a tensor-parallel
-@@ -19,7 +28,7 @@ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual
+ // copy verification (see residual_projection_policy). With `partial`, a dense FFN share writes its
+ // down projection, and an expert share its experts' sum, to that FP32 [hidden, T] matrix instead of
+@@ -21,7 +30,7 @@ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual
           const ops::SparseMoeHints& hints, WorkspaceArena& workspace, cudaStream_t stream,
           bool mtp = false, bool verify = false, InputBasis basis = InputBasis::Primal,
           bool wide_verification = false, NativeExpertRuntime* experts = nullptr,
@@ -534,7 +534,7 @@ index 18cdcba377b8b790eef4fd3c4df7db3890c3b02d..c64839479b69c2303692515eceb085eb
  [[nodiscard]] const Tensor* ffn_input_signs(const FfnParameters& parameters);
  
 diff --git a/src/models/qwen3_5/execution/parameters.cpp b/src/models/qwen3_5/execution/parameters.cpp
-index 0dbd8a234b607d40f20c287cd00a724dcb02f9cc..e57f685041fde3e14d8198fbc0d02548724d0594 100644
+index ade33e9f885cd562965106ab9cc0375b5b75fa61..d86a7225c29a26fa182142e673c27b82fdb37ad6 100644
 --- a/src/models/qwen3_5/execution/parameters.cpp
 +++ b/src/models/qwen3_5/execution/parameters.cpp
 @@ -89,6 +89,23 @@ public:
@@ -575,7 +575,7 @@ index 0dbd8a234b607d40f20c287cd00a724dcb02f9cc..e57f685041fde3e14d8198fbc0d02548
      void nvfp4_w4a16_route_single(ops::ProjectionWeights& projection, std::int32_t n,
                                    std::int32_t k) const {
          if (auto* single = std::get_if<ops::SingleProjectionWeight>(&projection)) {
-@@ -199,6 +223,8 @@ public:
+@@ -197,6 +221,8 @@ public:
          integer_route(out.down, QType::T2_G128_FP16, 5120, 17408);
          nvfp4_w4a16_route(out.gate_up, 34816, 5120);
          nvfp4_w4a16_route(out.down, 5120, 17408);
@@ -584,7 +584,7 @@ index 0dbd8a234b607d40f20c287cd00a724dcb02f9cc..e57f685041fde3e14d8198fbc0d02548
          // --mlp-a8-decode is a separate verify-phase trade from --prefill-a8: it must admit the
          // decode route by this profile's own format/shape, not by whether prefill promotion
          // already ran, so the two flags stay orthogonal as documented.
-@@ -307,10 +333,12 @@ public:
+@@ -329,10 +355,12 @@ public:
              integer_route(attention_output, QType::Q5_G64_FP16, 5120, 6144);
              integer_route(attention_output, QType::T2_G128_FP16, 5120, 6144);
              nvfp4_w4a16_route(attention_output, 5120, 6144);
@@ -597,7 +597,7 @@ index 0dbd8a234b607d40f20c287cd00a724dcb02f9cc..e57f685041fde3e14d8198fbc0d02548
              integer_route_pair(attention_projection, QType::Q4_G64_FP16, 7168, QType::Q5_G64_FP16,
                                 7168, 5120);
              integer_route_pair(attention_projection, QType::T2_G128_FP16, 7168, QType::T2_G128_FP16,
-@@ -326,10 +354,12 @@ public:
+@@ -348,10 +376,12 @@ public:
              integer_route(gdn_output, QType::Q5_G64_FP16, 5120, 6144);
              integer_route(gdn_output, QType::T2_G128_FP16, 5120, 6144);
              nvfp4_w4a16_route(gdn_output, 5120, 6144);
@@ -610,7 +610,7 @@ index 0dbd8a234b607d40f20c287cd00a724dcb02f9cc..e57f685041fde3e14d8198fbc0d02548
              integer_route_pair(gdn_projection, QType::Q4_G64_FP16, 4096, QType::Q5_G64_FP16, 12288,
                                 5120);
              integer_route_pair(gdn_projection, QType::T2_G128_FP16, 4096, QType::T2_G128_FP16,
-@@ -414,6 +444,7 @@ public:
+@@ -445,6 +475,7 @@ public:
          if (packable) {
              out.projection.packed = ops::prepare_linear_weight(inputs);
              nvfp4_w4a16_route(out.projection.packed, 14336, 5120);
@@ -618,19 +618,19 @@ index 0dbd8a234b607d40f20c287cd00a724dcb02f9cc..e57f685041fde3e14d8198fbc0d02548
          }
          if (model_.config().text.architecture == Architecture::Qwen3_5) {
              out.projection.rows = {linear(a.query), linear(a.key), linear(a.gate), linear(a.value)};
-@@ -422,6 +453,7 @@ public:
+@@ -453,6 +484,7 @@ public:
          out.key_norm    = tensor(a.key_norm);
          out.output      = linear(a.output);
          nvfp4_w4a16_route(out.output, 5120, 6144);
 +        nvfp4_int8_route(out.output, 5120, 6144);
-         out.ffn         = ffn(w.layer);
+         out.ffn         = ffn(w.layer.ffn);
          out.output_head = head(w.output_head_use);
          return out;
 diff --git a/src/models/qwen3_5/execution/text.cpp b/src/models/qwen3_5/execution/text.cpp
-index 4a165b85fb09321144136721465a286ed7edbac9..dd76dc62e114c4e4802006b72a6569a5caeb145a 100644
+index a2b6fd77862083243ec28f4e6a52d9557cad4e52..dec5e3c81b7a46004651a6baf0ff05e575116f8b 100644
 --- a/src/models/qwen3_5/execution/text.cpp
 +++ b/src/models/qwen3_5/execution/text.cpp
-@@ -903,13 +903,19 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase
+@@ -926,13 +926,19 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase
      const bool fused_nvfp4 = input_basis == InputBasis::Primal && single != nullptr &&
                               ops::attn_input_proj_fused_rmsnorm_nvfp4_eligible(single->weight,
                                                                                 single->policy, T);
@@ -652,7 +652,7 @@ index 4a165b85fb09321144136721465a286ed7edbac9..dd76dc62e114c4e4802006b72a6569a5
          ops::rmsnorm(x, w.input_norm, config_.rms_norm_eps, true, h, s);
      }
  
-@@ -929,6 +935,10 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase
+@@ -952,6 +958,10 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase
          ops::attn_input_proj_fused_rmsnorm_nvfp4(x, w.input_norm, config_.rms_norm_eps,
                                                   single->weight, q_flat, gate_flat, k_flat, v_flat,
                                                   single->policy, work_, s);
@@ -663,7 +663,7 @@ index 4a165b85fb09321144136721465a286ed7edbac9..dd76dc62e114c4e4802006b72a6569a5
      } else {
          attention_projection(h, p, q_flat, gate_flat, k_flat, v_flat, work_, s, input_basis);
      }
-@@ -1286,14 +1296,35 @@ void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase phas
+@@ -1357,14 +1367,35 @@ void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase phas
          ops::rmsnorm_hadamard(x, weights.post_attention_norm, config.rms_norm_eps, true, *signs, h,
                                ctx_.stream);
          ffn(h, weights.ffn, x, hints, work_, ctx_.stream, false, phase == Phase::Verify,
@@ -1458,10 +1458,10 @@ index 5a51c61d1ccdaa7a254dfd4322aa6bb291b31330..041c0d6806faf01a0dd202bae37c591e
    "${CMAKE_CURRENT_LIST_DIR}/nvfp4/nvfp4_gdn_input_plan.cpp"
    "${CMAKE_CURRENT_LIST_DIR}/nvfp4/nvfp4_gdn_input_plan_unified.cpp"
 diff --git a/src/ops/linear/common/output.cuh b/src/ops/linear/common/output.cuh
-index f75b62b4f12b00279dade5d082250ad1c30b1b54..7a2c1033a69e24a246fd1e6da54a373cdaa234ce 100644
+index 8f27e1ba1162a9c580a1ae194db6f5a887784289..6887ae39c8b5ab1afd0091c82c73a13d083b398f 100644
 --- a/src/ops/linear/common/output.cuh
 +++ b/src/ops/linear/common/output.cuh
-@@ -37,6 +37,32 @@ struct LinearBf16StridedOutput {
+@@ -59,6 +59,32 @@ struct LinearBf16StridedOutput {
      }
  };
  
@@ -1509,32 +1509,28 @@ index e4833d2100f79a5be201baa78ae648cdf7ae1605..27885e7a189213f7d01c0723e8c08c36
  bool is_nvfp4_fused_key(std::string_view key) {
      constexpr std::string_view kUnifiedPrefix = "unified/";
 diff --git a/src/ops/linear/linear.cpp b/src/ops/linear/linear.cpp
-index e8c0b7d8851774defb281f8e58781e0167ce6a40..1fe17e044f436576cefae03d783ad54b2e4ce702 100644
+index 05846bd09b70c2f9af6767f5aa4f27bb3e654cef..53bb81802e2d51df15ce182020d7d1d8f0ed762a 100644
 --- a/src/ops/linear/linear.cpp
 +++ b/src/ops/linear/linear.cpp
-@@ -87,15 +87,18 @@ void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& o
- }
+@@ -87,14 +87,14 @@ void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& o
  
- // The sm_70 routes take every dense format; without an arena, the widths that need none.
--bool sm70_route(const Tensor& x, const Weight& w, const Tensor& out,
-+// The sm_70 routes take every dense format, but not the NVFP4 int8 family: that policy is the
-+// caller telling this Op which kernels it wants, and sm_70's FP16 route is not one of them.
-+bool sm70_route(const Tensor& x, const Weight& w, const Tensor& out, LinearPolicy policy,
-                 const WorkspaceArena* workspace) {
--    return out.dtype == DType::BF16 && detail::sm70::covers(w, x.ne[1]) &&
-+    return policy != LinearPolicy::AllowNvfp4Int8 && out.dtype == DType::BF16 &&
-+           detail::sm70::covers(w, x.ne[1]) &&
+ // The sm_70 routes take every dense format, into BF16 or an FP32 partial sum; they are this Op's
+ // only routes that read the panel layout. Without an arena, the widths that need none.
+-bool sm70_route(const Tensor& x, const Weight& w, const WorkspaceArena* workspace) {
+-    return detail::sm70::covers(w, x.ne[1]) &&
++bool sm70_route(const Tensor& x, const Weight& w, LinearPolicy policy, const WorkspaceArena* workspace) {
++    return policy != LinearPolicy::AllowNvfp4Int8 && detail::sm70::covers(w, x.ne[1]) &&
             (workspace != nullptr || detail::sm70::direct_tokens(x.ne[1]));
  }
  
  void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
                       WorkspaceArena* workspace, cudaStream_t stream) {
--    if (sm70_route(x, w, out, workspace)) {
-+    if (sm70_route(x, w, out, policy, workspace)) {
-         const detail::sm70::Destination all{
-             static_cast<__nv_bfloat16*>(out.data), w.n, 0, 0, w.n, false};
-         if (workspace == nullptr) {
-@@ -232,7 +235,8 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
+-    if (sm70_route(x, w, workspace)) {
++    if (sm70_route(x, w, policy, workspace)) {
+         detail::sm70::Destination all{nullptr, w.n, 0, 0, w.n, false};
+         if (out.dtype == DType::FP32) {
+             all.fp32 = static_cast<float*>(out.data);
+@@ -235,7 +235,8 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
      const auto routes = [&](std::int32_t lo, std::int32_t hi) {
          return linear_route_workspace_bytes(qtype, output_rows, input_rows, policy, lo, hi);
      };
@@ -1572,10 +1568,10 @@ index cae920e8ccfba6a262c7ef4efed1824e05107d63..050dfc3431bb02fa70da91347308fea0
  // __nv_fp8x2_e4m3 value; both users below compensate with a power-of-two fold (2^15), so every
  // product stays bit-identical.
 diff --git a/src/ops/linear/nvfp4/nvfp4_dispatch.cpp b/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
-index 91bb9ecd8ee57ef7646a4d72f350bd3f47b68a0e..b3519fafa2e2a135b0e53f5c1347d05f09773b29 100644
+index 736fee31a70e0c5f681ac6cc6190777a2c24e847..4ef6ed05744a1986794b1cda605eaae8f846c74c 100644
 --- a/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
 +++ b/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
-@@ -5,6 +5,7 @@
+@@ -6,6 +6,7 @@
  #include "ops/linear/nvfp4/nvfp4_format.h"
  #include <array>
  #include <stdexcept>
@@ -1583,7 +1579,7 @@ index 91bb9ecd8ee57ef7646a4d72f350bd3f47b68a0e..b3519fafa2e2a135b0e53f5c1347d05f
  
  namespace ninfer::ops::detail {
  namespace {
-@@ -52,6 +53,18 @@ void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPo
+@@ -81,6 +82,18 @@ void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPo
          unified::nvfp4_dispatch(x, weight, out, policy, workspace, stream);
          return;
      }
@@ -4798,7 +4794,7 @@ index 0000000000000000000000000000000000000000..815e8352dc2ab6469da03b42533b8228
 +                                        nvfp4_linear_int8_tokens_supported};
 +} // namespace ninfer::ops::detail::unified
 diff --git a/src/ops/linear/nvfp4/sources.cmake b/src/ops/linear/nvfp4/sources.cmake
-index 30ee2c8b33eab6015c9d9d7497e50de2bbb53acc..4ca4b2f653ea112156db6b3d14ccb670580e7139 100644
+index c139fe8c159f05d076f945dbb96111d9b44e857c..08273db3fae42671a206946e5e23aa7a68d7c59b 100644
 --- a/src/ops/linear/nvfp4/sources.cmake
 +++ b/src/ops/linear/nvfp4/sources.cmake
 @@ -1,5 +1,7 @@
@@ -4809,7 +4805,7 @@ index 30ee2c8b33eab6015c9d9d7497e50de2bbb53acc..4ca4b2f653ea112156db6b3d14ccb670
    "${CMAKE_CURRENT_LIST_DIR}/nvfp4_w4a4.cu"
    "${CMAKE_CURRENT_LIST_DIR}/nvfp4_a4.cu"
    "${CMAKE_CURRENT_LIST_DIR}/nvfp4_dispatch.cpp"
-@@ -14,6 +16,7 @@ target_sources(ninfer_ops PRIVATE
+@@ -16,6 +18,7 @@ target_sources(ninfer_ops PRIVATE
    "${CMAKE_CURRENT_LIST_DIR}/shapes/n5120_k6144_unified.cu"
    "${CMAKE_CURRENT_LIST_DIR}/shapes/n5120_k17408.cu"
    "${CMAKE_CURRENT_LIST_DIR}/shapes/n5120_k17408_unified.cu"
@@ -4818,10 +4814,10 @@ index 30ee2c8b33eab6015c9d9d7497e50de2bbb53acc..4ca4b2f653ea112156db6b3d14ccb670
  
  if(TARGET ninfer_nvfp4_non_rdc)
 diff --git a/src/ops/linear/t2/t2_dispatch.cpp b/src/ops/linear/t2/t2_dispatch.cpp
-index 49a61e4e9365f3c910364e8dd69b66c8e23c41ab..1ae0b10e18d0354132e0fc4e982ad9e906e98bd1 100644
+index 1bb2623aef3230cf11a5f4ea700fbbad2aaa88c4..5389d87879088baf71313d2d73d1e196907c33de 100644
 --- a/src/ops/linear/t2/t2_dispatch.cpp
 +++ b/src/ops/linear/t2/t2_dispatch.cpp
-@@ -77,6 +77,7 @@ T2Launch select_t2_launch(std::int32_t n, std::int32_t k, std::int32_t t, Linear
+@@ -94,6 +94,7 @@ T2Launch select_t2_launch(std::int32_t n, std::int32_t k, std::int32_t t, Linear
      case LinearPolicy::AllowA8:
      case LinearPolicy::AllowA8Int:
      case LinearPolicy::AllowA8IntDecode:
@@ -5738,10 +5734,10 @@ index 8715e725278f48354e179df0791fb5181e128477..e4a7c6dceb67dfc4b49a719e64d2b03a
    "${CMAKE_CURRENT_LIST_DIR}/nvfp4/nvfp4_linear_swiglu_a4.cu"
    "${CMAKE_CURRENT_LIST_DIR}/nvfp4/nvfp4_linear_swiglu_plan.cpp"
 diff --git a/src/ops/wrapper/attn_input_proj.cpp b/src/ops/wrapper/attn_input_proj.cpp
-index 52064a8c91a9b1eb82e2ad8ad64609c3197126f2..e1dea8e5797af1e9c4c6c8740264e2b64028b09d 100644
+index 1fb8420c66aaa5fc6c2e8fe2e973e62b8751ba6a..b06c1fa9444e470a5ed1df64ae3e1e953c4b3135 100644
 --- a/src/ops/wrapper/attn_input_proj.cpp
 +++ b/src/ops/wrapper/attn_input_proj.cpp
-@@ -17,6 +17,7 @@
+@@ -18,6 +18,7 @@
  #include "ops/attn_input_proj/bf16/bf16_attn_input_plan.h"
  #include "ops/attn_input_proj/fp8/fp8_attn_input_plan.h"
  #include "ops/attn_input_proj/nvfp4/nvfp4_attn_input_plan.h"
@@ -5749,7 +5745,7 @@ index 52064a8c91a9b1eb82e2ad8ad64609c3197126f2..e1dea8e5797af1e9c4c6c8740264e2b6
  #include "ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.h"
  #include "ops/attn_input_proj/q8/q8_attn_input_plan.h"
  #include "ops/linear/fp8/fp8_config.h"
-@@ -109,6 +110,9 @@ void validate_policy(LinearPolicy policy) {
+@@ -110,6 +111,9 @@ void validate_policy(LinearPolicy policy) {
      // below, where no such route is registered for their qtypes.
      case LinearPolicy::AllowA8Int:
      case LinearPolicy::AllowA8IntDecode:
@@ -5759,7 +5755,7 @@ index 52064a8c91a9b1eb82e2ad8ad64609c3197126f2..e1dea8e5797af1e9c4c6c8740264e2b6
      // The cuBLAS prefill route is registered only for linear_swiglu and linear_add. Everywhere else
      // this policy means exactly what AllowA8Int means, and is accepted rather than rejected so that
      // one engine-wide setting does not have to be threaded per Op.
-@@ -175,8 +179,9 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Te
+@@ -176,8 +180,9 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Te
      validate_policy(policy);
      policy = without_integer(policy);
      // The parent's rows are [query; key; gate; value].
@@ -5771,7 +5767,7 @@ index 52064a8c91a9b1eb82e2ad8ad64609c3197126f2..e1dea8e5797af1e9c4c6c8740264e2b6
          sm70_split(x, weight, {&q, &k, &gate, &v}, nullptr, {}, policy, *workspace, stream);
          return;
      }
-@@ -313,6 +318,8 @@ std::size_t attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::in
+@@ -314,6 +319,8 @@ std::size_t attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::in
      const auto routes = [&](std::int32_t lo, std::int32_t hi) {
          return single_parent_route_bytes(parent_qtype, parent_rows, input_rows, policy, lo, hi);
      };
@@ -5780,7 +5776,7 @@ index 52064a8c91a9b1eb82e2ad8ad64609c3197126f2..e1dea8e5797af1e9c4c6c8740264e2b6
      return detail::sm70::capacity(parent_qtype, parent_rows, input_rows, min_tokens, max_tokens,
                                    without_integer(policy), routes);
  }
-@@ -568,6 +575,42 @@ void attn_input_proj_fused_rmsnorm_nvfp4(const Tensor& residual, const Tensor& n
+@@ -569,6 +576,42 @@ void attn_input_proj_fused_rmsnorm_nvfp4(const Tensor& residual, const Tensor& n
                                                    gate, k, v, workspace, stream);
  }
  
@@ -5824,10 +5820,10 @@ index 52064a8c91a9b1eb82e2ad8ad64609c3197126f2..e1dea8e5797af1e9c4c6c8740264e2b6
                       Tensor& gate, Tensor& k, Tensor& v, cudaStream_t stream) {
      dispatch_single_parent(x, query_key_gate_value_weight, q, gate, k, v, LinearPolicy::A16Only,
 diff --git a/src/ops/wrapper/gdn_input_proj.cpp b/src/ops/wrapper/gdn_input_proj.cpp
-index 74e9c55d3984a7c2f8f802a0868bd877521f31b0..9ac5ad68a2b52d5ef5b4434b6ec5fd6c169bece6 100644
+index 03be8894773eb45e449839600050e88067bcff6e..e8e732e240220302d23eddb232e0edaffc46a972 100644
 --- a/src/ops/wrapper/gdn_input_proj.cpp
 +++ b/src/ops/wrapper/gdn_input_proj.cpp
-@@ -310,6 +310,9 @@ void validate_policy(LinearPolicy policy) {
+@@ -311,6 +311,9 @@ void validate_policy(LinearPolicy policy) {
      // below, where no such route is registered for their qtypes.
      case LinearPolicy::AllowA8Int:
      case LinearPolicy::AllowA8IntDecode:
@@ -5869,7 +5865,7 @@ index 2c4a18ea3b4184d3e986d12dfbe4d416d46f74fa..3c6685b6b96335343e2c424c86e41f32
          const auto activation = detail::sm70::prepare_for(
              x, w.n, ws, stream, detail::sm70::integer_takes(w, t, policy));
 diff --git a/src/ops/wrapper/linear_swiglu.cpp b/src/ops/wrapper/linear_swiglu.cpp
-index 42be4d3be779a2108826ed326db8807bcefb4ef4..7ed2eebbc40695daefa55e930a361743f2affa66 100644
+index 52632d34e1249ee2e2b0f62bf70b3c8355a0489b..5b97fbf12b9f540a8f204707565d3ab4cbcfb6df 100644
 --- a/src/ops/wrapper/linear_swiglu.cpp
 +++ b/src/ops/wrapper/linear_swiglu.cpp
 @@ -15,6 +15,7 @@
@@ -5915,7 +5911,7 @@ index 42be4d3be779a2108826ed326db8807bcefb4ef4..7ed2eebbc40695daefa55e930a361743
          auto scope            = ws.scope();
          const auto activation = detail::sm70::prepare_for(
              x, gate_up_weight.n, ws, stream,
-@@ -321,4 +325,43 @@ std::size_t linear_swiglu_pair_workspace_capacity_bytes(QType gate_qtype, QType
+@@ -366,4 +370,43 @@ std::size_t linear_swiglu_pair_workspace_capacity_bytes(QType gate_qtype, QType
      return detail::gguf_swiglu_workspace_bytes(gate, &up, min_tokens, max_tokens);
  }
  
@@ -5960,10 +5956,10 @@ index 42be4d3be779a2108826ed326db8807bcefb4ef4..7ed2eebbc40695daefa55e930a361743
 +
  } // namespace ninfer::ops
 diff --git a/src/serve/generation_service.cpp b/src/serve/generation_service.cpp
-index c914b1ee6a8375e10ca8edfe8f7b20a603d19dce..1eb985b4457a7edac2c8821f28756209746d1331 100644
+index 182927752c1d5322d762baeefa4915f32f7f3857..51964b91206faec88e9f5d6f70bd8696aa14e6fb 100644
 --- a/src/serve/generation_service.cpp
 +++ b/src/serve/generation_service.cpp
-@@ -323,6 +323,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
+@@ -324,6 +324,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
      engine_options.suspend                  = options.suspend;
      engine_options.mlp_a8_decode            = options.mlp_a8_decode;
      engine_options.prefill_a8               = options.prefill_a8;
@@ -5972,10 +5968,10 @@ index c914b1ee6a8375e10ca8edfe8f7b20a603d19dce..1eb985b4457a7edac2c8821f28756209
      engine_options.prefill_cublas           = options.prefill_cublas;
      engine_options.prefill_cublas_projections = options.prefill_cublas_projections;
 diff --git a/src/serve/request_log.cpp b/src/serve/request_log.cpp
-index 9d2130ba72fb8bada58547c0c03e47e50e3304cf..2d777aa72150695d186e3e69d822c53efb14276c 100644
+index ba8dec733e3f957eb3119051d2efacc26eb96276..961fd5aa581efdfab244af73a96a3f7dc5ffec0b 100644
 --- a/src/serve/request_log.cpp
 +++ b/src/serve/request_log.cpp
-@@ -844,6 +844,7 @@ std::string format_server_start_json(
+@@ -846,6 +846,7 @@ std::string format_server_start_json(
          {"auto_resume", engine_options.suspend.auto_resume},
          {"mlp_a8_decode", engine_options.mlp_a8_decode},
          {"prefill_a8", engine_options.prefill_a8},
@@ -5984,10 +5980,10 @@ index 9d2130ba72fb8bada58547c0c03e47e50e3304cf..2d777aa72150695d186e3e69d822c53e
          {"prefix_reuse", options.allow_prefix_reuse},
          {"speculative_backend",
 diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
-index 7c8ac6339a2b8e62db2aaae45ee8e68d4e9928c2..5b9ba7847a7b8043ce0980529ee9a951bdecf8b5 100644
+index 199fe3d84078ee61cd92dadda3b9e76213af7cd6..0951965759e22584db9a49b4c4fe76b5ad2a60f0 100644
 --- a/src/serve/serve_options.cpp
 +++ b/src/serve/serve_options.cpp
-@@ -184,6 +184,8 @@ std::string serve_usage_text(const char* argv0) {
+@@ -216,6 +216,8 @@ std::string serve_usage_text(const char* argv0) {
             "                                GDN input projections off that route\n"
             "  --no-prefill-a8               prefill every projection on the A16 routes\n"
             "                                instead of the integer-activation ones\n"
@@ -5996,7 +5992,7 @@ index 7c8ac6339a2b8e62db2aaae45ee8e68d4e9928c2..5b9ba7847a7b8043ce0980529ee9a951
             "  --nvfp4-w4a16                 native-FP4 cards: NVFP4 weights on the A16\n"
             "                                routes instead of W4A4\n"
             "  --mlp-a8-decode               integer-activation MLP gate_up at decode and\n"
-@@ -1515,6 +1517,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1584,6 +1586,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              options.prefill_a8 = false;
              continue;
          }
@@ -6008,10 +6004,10 @@ index 7c8ac6339a2b8e62db2aaae45ee8e68d4e9928c2..5b9ba7847a7b8043ce0980529ee9a951
              options.nvfp4_w4a16 = true;
              continue;
 diff --git a/src/serve/serve_options.h b/src/serve/serve_options.h
-index 0ddc9758f7366fc191e3cd445e8255a4202f9581..10b27a7d7e7320f72811d5d889cb6764d19ef0d4 100644
+index 4a036cd14823956ec2e8ece4ffd6d6c26be5401d..eb37fdd18c9363a30822348f25e3ed1a41f6ac5e 100644
 --- a/src/serve/serve_options.h
 +++ b/src/serve/serve_options.h
-@@ -127,6 +127,7 @@ struct ServeOptions {
+@@ -132,6 +132,7 @@ struct ServeOptions {
      [[nodiscard]] bool router() const noexcept { return models_dir || models_preset; }
      bool mlp_a8_decode      = false;
      bool prefill_a8         = true;
@@ -6103,10 +6099,10 @@ index 0000000000000000000000000000000000000000..f51930e22c58d36f33050d573d218c55
 +if __name__ == "__main__":
 +    main()
 diff --git a/tests/ops/linear/linear_test_common.cpp b/tests/ops/linear/linear_test_common.cpp
-index c288da1f63f64feebb4998557f042f8b511b8616..a7a5590b9156ccd551adc971f052a88daf9a6e19 100644
+index 480fcb0a003d749e5373ba0bd10390a3f295b494..a9125ffda0de6d6ac4725c4545b0259fd0ef9a79 100644
 --- a/tests/ops/linear/linear_test_common.cpp
 +++ b/tests/ops/linear/linear_test_common.cpp
-@@ -45,6 +45,11 @@ constexpr ReductionCriterion tolerance_for(ActivationCompute activation_compute)
+@@ -48,6 +48,11 @@ constexpr ReductionCriterion tolerance_for(ActivationCompute activation_compute)
          return {kBf16UnitRoundoff, kBf16UnitRoundoff, 2.0 * kBf16UnitRoundoff};
      case ActivationCompute::A8:
          return {kA8QuantizationAllowance, kBf16UnitRoundoff, 1.5 * kA8QuantizationAllowance};
@@ -6119,7 +6115,7 @@ index c288da1f63f64feebb4998557f042f8b511b8616..a7a5590b9156ccd551adc971f052a88d
          return {kA4QuantizationAllowance, kBf16UnitRoundoff, kA4QuantizationAllowance};
      }
 diff --git a/tests/ops/linear/linear_test_common.h b/tests/ops/linear/linear_test_common.h
-index a545316b9de5af9d3cb97d20178fa910727a8200..79f632e26252fcee3941eac51b3a2738ff42c183 100644
+index 222f9772c49c71e6b0514bb5baae8b71323cbc9f..cf87914dcc68b13d074e47fcb04e32e8115d63e8 100644
 --- a/tests/ops/linear/linear_test_common.h
 +++ b/tests/ops/linear/linear_test_common.h
 @@ -14,6 +14,9 @@ enum class ActivationCompute : std::uint8_t {
@@ -7837,10 +7833,10 @@ index 0000000000000000000000000000000000000000..1fa6251fc1c10b85b16daf6669779728
 +    return failures == 0 ? 0 : 1;
 +}
 diff --git a/tests/ops/linear/tests.cmake b/tests/ops/linear/tests.cmake
-index 62346bf50d9c78963d759c00fab75845b7357bc7..0fd182f9f31f0c887c952afbd81280d865d20841 100644
+index 6011765f0cbe5956eba5a1973c6cefb405936e41..29c8adda31edc90e79350b345ddf3ca1220babe7 100644
 --- a/tests/ops/linear/tests.cmake
 +++ b/tests/ops/linear/tests.cmake
-@@ -49,6 +49,19 @@ ninfer_add_op_test(ninfer_linear_nvfp4_a4_test
+@@ -54,6 +54,19 @@ ninfer_add_op_test(ninfer_linear_nvfp4_a4_test
    SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_nvfp4_a4.cpp"
    LIBRARIES ninfer_linear_test_support)
  
@@ -8651,11 +8647,11 @@ index 0000000000000000000000000000000000000000..d98c86930fb6eba9baeb98c5e7a6839c
 +    }
 +}
 diff --git a/tests/ops/tests.cmake b/tests/ops/tests.cmake
-index 8f96b6cf082241f94cbd790d6e0d1fc991579c70..23ccf917938749e112baa6e824b40fda019b79d6 100644
+index 2a49d02504588f247aebb365af25bc399fad4a6b..45ab7b3982fc2497dbe7e774300c8ce33f7f2a8b 100644
 --- a/tests/ops/tests.cmake
 +++ b/tests/ops/tests.cmake
-@@ -215,6 +215,14 @@ ninfer_add_op_test(ninfer_gdn_input_proj_test
-   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_gdn_input_proj.cpp"
+@@ -233,6 +233,14 @@ ninfer_add_op_test(ninfer_gdn_input_proj_parts_test
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_gdn_input_proj_parts.cpp"
    LIBRARIES ninfer_ops)
  
 +# The int8-grouped wrapper routes against real artifact weights; skips unless

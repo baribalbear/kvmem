@@ -11,7 +11,7 @@ index 56579e6fed6b6c8cbf775b2acc1d3af58a9e216e..922b3ca17d06610665d7a67a5773217e
          prepared            = service->prepare(request.generation,
                                                 request.stream ? GenerationConsumerMode::Streaming
 diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
-index e6ea6f52cebc502855b46cd9a80082349c6cdaee..2ed360f4c9696c7c6b7ec4ff57eab8a46252e83d 100644
+index 16a45c49c3b86d4082c041af24c1ea017a1351b3..3b00886ab8726638087e13acda7c90390ce67301 100644
 --- a/src/serve/http_server.cpp
 +++ b/src/serve/http_server.cpp
 @@ -357,6 +357,12 @@ void HttpServer::RequestLifecycle::response_failure(const RequestFailure& failur

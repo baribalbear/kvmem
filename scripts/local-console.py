@@ -60,6 +60,7 @@ from launcher.config import (SPECULATIVE_PROFILES, DEFAULTS, ENGINE_DEFAULTS,
     without_secrets, normalize)
 from launcher.plan import build_plan, capabilities as launcher_capabilities, scoring_settings
 from launcher.export import export_profile, read_revision
+from launcher.worker import require_launch_features
 
 
 def private_log(path, *, truncate=False):
@@ -159,10 +160,13 @@ class Controller:
             if not match:
                 raise ValueError('Cannot detect supported backends from start-backend.ps1')
             self.backends = [name for name in re.findall(r"'([^']+)'", match[1]) if name in NATIVE]
+            if ((self.backend_root/'scripts/launcher-capabilities.json').is_file() and
+                    'radiance' in launcher_capabilities(self.backend_root)['backends']):
+                self.backends.append('radiance')
             self.launcher_query_contract = all(name in source for name in ('QueryScorer', 'GraphAlpha', 'QueryMaxTokens', 'QueryReplayMaxTokens'))
         else:
             manifest = launcher_capabilities(self.backend_root)
-            self.backends = [name for name in manifest['backends'] if name in ('ninfer', 'llamacpp')]
+            self.backends = [name for name in manifest['backends'] if name in ('ninfer', 'llamacpp', 'radiance')]
             self.launcher_query_contract = True
         build_info=self.backend_root/'BUILD-INFO.json'
         if build_info.is_file():
@@ -289,7 +293,8 @@ class Controller:
                        for p in paths.values())):
             raise ValueError('Invalid worker-paths.json: map backend names to absolute executable paths')
         names = {'ninfer': ('ninfer-kvmem-server.exe', 'ninfer-serve.exe'),
-                 'llamacpp': ('llama-kvmem-server.exe',), 'polystrata':('strata-poly.exe',)}
+                 'llamacpp': ('llama-kvmem-server.exe',), 'polystrata':('strata-poly.exe',),
+                 'radiance':('radiance-kvmem-server.exe',)}
         if os.name != 'nt':
             names = {backend: tuple(name.removesuffix('.exe') for name in entries) for backend, entries in names.items()}
         result = {}
@@ -362,12 +367,15 @@ class Controller:
             params['Worker'] = worker['path']
         elif not Path(params['Worker']).is_file():
             raise ValueError('指定的后端程序不存在，请检查“引擎专属参数 → 后端程序”：' + params['Worker'])
-        if os.name != 'nt':
+        if os.name != 'nt' or params['Backend']=='radiance':
             if api_key:
                 params['ApiKey'] = api_key
             result = build_plan({'schema_version': 1, 'parameters': params}, self.backend_root,
                                 reveal_secrets=reveal_secrets)
             result['worker'] = self.worker_capabilities(result['argv'][0], params['Backend'], result['environment'])
+            if params['Backend']=='radiance' and params.get('Vision') and not result['worker'].get('multimodal'):
+                raise ValueError('该 Radiance worker 未编入图片解码支持，请使用带 FFmpeg 的视觉构建。 This Radiance worker has no image decoder; use a vision build with FFmpeg.')
+            require_launch_features(result['worker'], params)
             result['resolved_scoring'] = self.scoring_from_argv(result['argv'])
             with socket.socket() as probe:
                 probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -385,11 +393,16 @@ class Controller:
             json.dump(params, stream, ensure_ascii=False); name = stream.name
         try:
             powershell = str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
+            # PolyStrata validates non-loopback authentication during the dry run.
+            # Pass the key before that check, without putting it in JSON or argv.
+            plan_env = None
+            if api_key and params['Backend'] == 'polystrata':
+                plan_env = dict(os.environ, STRATA_API_KEY=api_key)
             run = subprocess.run([powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                                   '-File', str(ROOT / 'scripts/windows/describe-launch-json.ps1'),
                                   '-BackendRoot', str(self.backend_root), '-ConfigFile', name],
                                  capture_output=True, encoding='utf-8', errors='replace', timeout=45,
-                                 cwd=self.backend_root,
+                                 cwd=self.backend_root, env=plan_env,
                                  creationflags=subprocess.CREATE_NO_WINDOW)
             if run.returncode:
                 message = run.stderr.strip()[-6000:] or run.stdout.strip()[-6000:]
@@ -409,6 +422,7 @@ class Controller:
             result['warnings'] = self.redact(run.stdout[:start].strip())
             native_argv = result.get('native_argv', argv)
             result['worker'] = self.worker_capabilities(native_argv[0], params['Backend'])
+            require_launch_features(result['worker'], params)
             result['resolved_scoring'] = self.scoring_from_argv(native_argv)
             if params['Backend'] == 'polystrata':
                 block = params.get('BlockTokens', 32)
@@ -468,7 +482,7 @@ class Controller:
                 if not path.is_dir():
                     raise ValueError('Select a model directory')
                 return {'path': str(path)}
-            suffix = '.ninfer' if backend == 'ninfer' else '.gguf'
+            suffix = '.rad' if backend=='radiance' else '.ninfer' if backend == 'ninfer' else '.gguf'
             if not path.is_file() or (not template and path.suffix.lower() != suffix):
                 raise ValueError(f'{backend} requires a {suffix} model file')
             return {'path': str(path), 'name': path.name}
@@ -595,9 +609,9 @@ class Controller:
             roots[folder] = roots.get(folder, False) or recursive
         locations = [{'path': str(folder), 'recursive': recursive, 'status': 'pending'}
                      for folder, recursive in roots.items()]
-        suffix = '.ninfer' if backend == 'ninfer' else '.gguf'
+        suffix = '.rad' if backend=='radiance' else '.ninfer' if backend == 'ninfer' else '.gguf'
         found, visited, candidates = {}, {}, 0
-        other = {'.ninfer': set(), '.gguf': set()}
+        other = {'.ninfer': set(), '.gguf': set(), '.rad':set()}
         reasons = set()
         skipped, limited = 0, False
         deadline = time.monotonic() + 3
@@ -792,6 +806,7 @@ class Controller:
                 _, _, plan, config = self.revision_config(profile, state['revision'])
                 if action != 'select':
                     native = self.worker_capabilities(plan['argv'][0], plan['backend'], plan['environment'])
+                    require_launch_features(native, config['parameters'])
                     if native.get('executable_sha256') != plan.get('worker', {}).get('executable_sha256'):
                         raise ValueError('Worker changed; generate and register a new version')
                     if not self.inspect_model(config, for_launch=True)['can_start']:
@@ -1013,6 +1028,7 @@ class Controller:
         from launcher.process_linux import OwnedProcess
         directory, _, plan, clean = self.revision_config(data['profile_id'], data['revision'])
         native = self.worker_capabilities(plan['argv'][0], plan['backend'], plan['environment'])
+        require_launch_features(native, clean['parameters'])
         if native.get('executable_sha256') != plan.get('worker', {}).get('executable_sha256'):
             raise ValueError('Worker changed after script generation; check the configuration and generate a new version')
         health = self.inspect_model(clean, for_launch=True)
@@ -1220,10 +1236,12 @@ def gpu_inventory():
         run = subprocess.run(['nvidia-smi', '--query-gpu=uuid,name,memory.total', '--format=csv,noheader,nounits'],
                              capture_output=True, text=True, timeout=5,
                              creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-        return [dict(zip(('uuid', 'name', 'memory_mib'), (x.strip() for x in line.split(','))))
-                for line in run.stdout.splitlines() if len(line.split(',')) == 3]
+        devices = [dict(zip(('uuid', 'name', 'memory_mib'), (x.strip() for x in line.split(','))), vendor='nvidia')
+                   for line in run.stdout.splitlines() if len(line.split(',')) == 3]
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        devices = []
+    from console_hardware import amd_gpu_inventory
+    return devices + amd_gpu_inventory()
 
 
 class Server(ThreadingHTTPServer):
@@ -1312,6 +1330,7 @@ class Handler(BaseHTTPRequestHandler):
                                 'profiles_root': str(self.control.profiles_root),
                                 'runtime_user': getpass.getuser(),
                                 'speculative_capabilities': self.control.speculative_profiles,
+                                'backend_capabilities': launcher_capabilities(self.control.backend_root)['backends'],
                                 'state_dir': str(self.control.state_dir),
                                 'backend_root': str(self.control.backend_root), 'gpus': self.server.gpus,
                                 'draft': self.control.draft(), 'status': self.control.status(),

@@ -4,6 +4,7 @@
   "query_scoring_revision": 2,
   "backends": {
     "ninfer": {
+      "checkpoint_recompute_min_revision": 1,
       "model_format": ".ninfer",
       "speculative_decoding": true,
       "concurrent_requests": true,
@@ -23,6 +24,15 @@
           ],
           "mtp": true,
           "mode": "layer",
+          "modes": [
+            "layer",
+            "tensor"
+          ],
+          "tensor_attention": [
+            "heads"
+          ],
+          "tensor_split": true,
+          "heads_tensor_parallel_min_revision": 1,
           "max_devices": 8
         },
         "ngram": {
@@ -284,6 +294,118 @@
         ]
       },
       "text_chat": true
+    },
+    "radiance": {
+      "schema_version": 1,
+      "backend": "radiance",
+      "query_scoring_revision": 2,
+      "independent_graph_lrfu": true,
+      "signed_lrfu_hits": true,
+      "model_format": ".rad",
+      "speculative_decoding": true,
+      "concurrent_requests": true,
+      "active_kv_tiering": true,
+      "cross_backend_kv_transfer": false,
+      "ssd_persistence": "process",
+      "streaming": true,
+      "multimodal": true,
+      "disk_restore": false,
+      "history_reuse": true,
+      "text_chat": true,
+      "speculative": {
+        "schema_version": 1,
+        "modes": {
+          "none": {
+            "max_draft_tokens": 0
+          },
+          "mtp": {
+            "max_draft_tokens": 7,
+            "adaptive": true,
+            "ngram": false,
+            "max_concurrency": 8,
+            "max_devices": 2,
+            "draft_asset": "embedded",
+            "adaptive_kind": "native_cost"
+          }
+        }
+      },
+      "supported_combinations": {
+        "text": {
+          "kv": [
+            "fp8",
+            "bf16"
+          ],
+          "max_concurrency": 8,
+          "max_devices": 2,
+          "parallelism": "tensor"
+        },
+        "query": {
+          "scorers": [
+            "page-softmax",
+            "meanq-cosine"
+          ],
+          "bounded_replay": true,
+          "tool_continuation": "resident_pressure"
+        },
+        "storage": {
+          "scope": "process",
+          "shared_active_idle_quota": true,
+          "tier": "ram_ssd",
+          "async_io": true
+        },
+        "active_disk": {
+          "enabled": true,
+          "max_concurrency": 8,
+          "shared_active_idle_quota": true
+        },
+        "images": true,
+        "video": false,
+        "adaptive_mtp": {
+          "max_concurrency": 8,
+          "native_serial_only": true,
+          "policy": "native_cost"
+        },
+        "image_input": {
+          "architectures": [
+            "qwen35"
+          ],
+          "max_concurrency": 8,
+          "encoder_residency": "resident",
+          "complete_media_pages": true,
+          "content_identity_bits": 128,
+          "max_devices": 2
+        }
+      },
+      "qualification": {
+        "platform": "linux",
+        "gpu": "gfx1201",
+        "model": "qwen38-27b-mxfp4",
+        "kv": "fp8",
+        "mtp_depths": [
+          0,
+          3,
+          5,
+          7
+        ],
+        "architecture": "qwen35",
+        "storage": "ram_ssd",
+        "tensor_parallel": [
+          1,
+          2
+        ],
+        "tp2_mtp_depths": [
+          0,
+          7
+        ],
+        "tp_wire": "exact"
+      },
+      "block_tokens": {
+        "default": 128,
+        "supported": [
+          128
+        ],
+        "startup_fixed": true
+      }
     }
   }
 }

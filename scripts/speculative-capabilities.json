@@ -57,5 +57,19 @@
       "solo_drafts": true,
       "adaptive_kind": "native_cost"
     }
+  },
+  "radiance": {
+    "none": {
+      "max_draft_tokens": 0
+    },
+    "mtp": {
+      "max_draft_tokens": 7,
+      "adaptive": true,
+      "ngram": false,
+      "max_concurrency": 8,
+      "max_devices": 2,
+      "draft_asset": "embedded",
+      "adaptive_kind": "native_cost"
+    }
   }
 }

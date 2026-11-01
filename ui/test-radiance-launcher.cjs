@@ -1,0 +1,67 @@
+/* Model-free UI integration; native flag translation and real launches are separate tests. */
+const assert=require('node:assert/strict');
+module.exports=async({browser,base,info})=>{
+ const context=await browser.newContext({viewport:{width:1366,height:900}}),page=await context.newPage(),errors=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ const uuid='GPU-65471d75ce486b4f';
+ const second='GPU-9d36683ccd630821',third='GPU-0000000000000003',nvidia='GPU-0000000000000004';
+ const fixture={...info,backends:[...new Set([...info.backends,'radiance'])],gpus:[uuid,second,third,nvidia].map(id=>({uuid:id,name:id===nvidia?'NVIDIA test GPU':'AMD Radeon AI PRO R9700',vendor:id===nvidia?'nvidia':'amd',memory_mib:'32624'})),
+   status:{state:'stopped'},draft:{schema_version:1,parameters:{Backend:'radiance',Model:'C:/models/target.rad',Gpu:uuid,
+    Context:65536,Budget:4096,Reserve:1024,HostMiB:8192,Prefill:512,SinkTokens:128,RecentTokens:512,
+    KvType:'fp8',MaxTokens:0,Concurrency:2,RetainedSessions:8,SpeculativeMode:'none',DraftTokens:0,DraftPolicy:'fixed',
+    ThinkingMode:'default',RadianceHome:'C:/radiance/home',RocmPath:'C:/ROCm'}}};
+ await page.route('**/api/launcher/info',route=>route.fulfill({json:fixture}));
+ await page.route('**/api/launcher/status',route=>route.fulfill({json:{state:'stopped'}}));
+ await page.route('**/api/launcher/inspect-model',route=>route.fulfill({json:{schema_version:1,status:'ready',can_start:true,model:{format:'rad'},checks:[]}}));
+ await page.goto(base+'/monitor/?lang=en#config');
+ await page.locator('[data-param=Backend]').waitFor();
+ assert.equal(await page.locator('[data-param=Backend]').inputValue(),'radiance');
+ assert.equal(await page.locator('[data-param=Model]').inputValue(),'C:/models/target.rad');
+ assert.deepEqual(await page.locator('[data-param=KvType] option').evaluateAll(items=>items.map(x=>x.value)),['fp8','bf16']);
+ for(const key of ['VisionTokens','VisionResidency','DiskPath','DiskMiB','StageLayers','DraftModel'])
+   assert.equal(await page.locator(`[data-param=${key}]`).isDisabled(),true,key);
+ assert.equal(await page.locator('[data-param=Vision]').isDisabled(),false);
+ await page.getByRole('tab',{name:'Templates & vision',exact:true}).click();
+ await page.locator('[data-param=Vision]').check();
+ assert.equal(await page.locator('[data-param=VisionTokens]').isDisabled(),false);
+ assert.equal(await page.locator('[data-param=VisionResidency]').inputValue(),'resident');
+ assert.equal(await page.locator('[data-param=VisionResidency]').isDisabled(),true);
+ await page.locator('[data-param=Vision]').uncheck();
+ await page.getByRole('tab',{name:'Cache & history',exact:true}).click();
+ assert.equal(await page.locator('[data-param=DiskEnabled]').isDisabled(),false);
+ await page.locator('[data-param=DiskEnabled]').check();
+ for(const key of ['DiskPath','DiskMiB'])assert.equal(await page.locator(`[data-param=${key}]`).isDisabled(),false,key);
+ assert.equal(await page.locator('[data-param=Concurrency]').inputValue(),'2');
+ assert.equal(await page.locator('[data-param=ThinkingMode]').inputValue(),'default');
+ assert.equal(await page.locator('[data-param=VramReserveMiB]').inputValue(),'1024');
+ assert.equal(await page.locator('[data-param=RadianceHome]').inputValue(),'C:/radiance/home');
+ assert.equal(await page.locator('[data-param=RocmPath]').inputValue(),'C:/ROCm');
+ await page.getByRole('tab',{name:'Hardware & acceleration',exact:true}).click();
+ await page.locator('[data-param=SpeculativeMode]').selectOption('mtp');
+ assert.equal(await page.locator('[data-param=DraftTokens]').inputValue(),'3');
+ assert.equal(await page.locator('[data-param=DraftPolicy]').isDisabled(),false);
+ await page.locator('[data-param=DraftPolicy]').selectOption('adaptive');
+ assert.equal(await page.locator('[data-param=DraftTokens]').getAttribute('max'),'7');
+ await page.locator('[data-param=DraftTokens]').fill('7');
+ assert.equal(await page.locator('[data-param=DraftTokens]').evaluate(x=>x.validity.valid),true);
+ await page.locator('[data-param=DraftTokens]').fill('8');
+ assert.equal(await page.locator('[data-param=DraftTokens]').evaluate(x=>x.validity.rangeOverflow),true);
+ await page.locator('[data-param=DraftTokens]').fill('7');
+ const gpu=id=>page.locator(`[data-gpu-choice="${id}"]`);
+ await gpu(second).check();
+ assert.equal(await gpu(uuid).evaluate(x=>x.checkValidity()),true);
+ assert.equal(await page.locator('[data-param=SpeculativeMode]').evaluate(x=>x.checkValidity()),true);
+ assert.equal(await page.locator('[data-param=StageLayers]').isDisabled(),true);
+ assert.deepEqual(await page.locator('[data-param=Gpu]').evaluate(x=>Array.from(x.selectedOptions,o=>o.value)),[uuid,second]);
+ assert.equal(await page.locator('[data-gpu-layers]').first().textContent(),'Tensor parallel');
+ await gpu(third).check();
+ assert.equal(await gpu(uuid).evaluate(x=>x.checkValidity()),false);
+ await gpu(third).uncheck();
+ await gpu(second).uncheck();await gpu(nvidia).check();
+ assert.equal(await gpu(uuid).evaluate(x=>x.checkValidity()),false);
+ await gpu(nvidia).uncheck();await gpu(second).check();
+ assert.equal(await gpu(uuid).evaluate(x=>x.checkValidity()),true);
+ assert.deepEqual(errors,[]);
+ if(process.env.SCREENSHOT_DIR)await page.screenshot({path:require('node:path').join(process.env.SCREENSHOT_DIR,'radiance-launcher.png'),fullPage:true});
+ await context.close();console.log('PASS: Radiance model format, AMD UUID, supported controls and explicit capability gates');
+};

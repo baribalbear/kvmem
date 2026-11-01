@@ -14,7 +14,7 @@ if($Parameters.ContainsKey('ReplayMaxTokens')) {
     $Parameters['QueryReplayMaxTokens']=$Parameters.ReplayMaxTokens
 }
 function Setting($name,$default) { if($Parameters.ContainsKey($name)) { $Parameters[$name] } else { $default } }
-foreach($name in @('StageLayers','FastPrefill','NgramDrafts','NgramMinMatch','DeviceProfile','KvTypeK','KvTypeV','AdaptiveMtp','LogLevel')) {
+foreach($name in @('StageLayers','TensorParallel','TensorSplit','FastPrefill','NgramDrafts','NgramMinMatch','DeviceProfile','KvTypeK','KvTypeV','AdaptiveMtp','LogLevel')) {
     if($Parameters.ContainsKey($name)) { throw "PolyStrata does not expose -$name in this integration" }
 }
 if((Setting 'ReasoningEffort' '') -notin @('','none','low','medium','high','xhigh')) { throw 'PolyStrata reasoning effort must be none, low, medium or high' }

@@ -1,3 +1,5 @@
+diff --git a/src/ops/linear/t5/t5_project.cu b/src/ops/linear/t5/t5_project.cu
+index fdc4723a7914a59fb3b1cae92bcd5bf6f376fa63..83e527b4bfabef4059c013ceeed15804b7d313ce 100644
 --- a/src/ops/linear/t5/t5_project.cu
 +++ b/src/ops/linear/t5/t5_project.cu
 @@ -2,6 +2,7 @@
@@ -8,7 +10,7 @@
  #include "ops/linear/t5/t5_a8.cuh"
  
  #include <cuda_bf16.h>
-@@ -160,7 +161,8 @@
+@@ -160,7 +161,8 @@ void require_input(const Tensor& x, const Weight& w, const char* what) {
  // Validates the weight, policy and outputs, then quantizes the input and multiplies: dp4a GEMV
  // through T = 4, the small-T MMA route through T = 32 (and at any T when N % 64 != 0, in 32-token
  // tiles), the 64 x 64 GEMM through T = 64 (and beyond when N % 128 != 0 or an output is not made
@@ -18,7 +20,7 @@
  template <class Input>
  void project(const Input& input, int tokens, const Weight& w, std::span<Tensor* const> outputs,
               bool accumulate, LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream) {
-@@ -213,10 +215,19 @@
+@@ -213,10 +215,19 @@ void project(const Input& input, int tokens, const Weight& w, std::span<Tensor*
          case 3: launch_small_t<3>(q, w, tokens, packed, accumulate, stream); break;
          default: launch_small_t<4>(q, w, tokens, packed, accumulate, stream); break;
          }
@@ -41,9 +43,11 @@
      }
  }
  
+diff --git a/tests/ops/linear/test_t5.cpp b/tests/ops/linear/test_t5.cpp
+index 45a7c8af795c22e0ef8623f5ac1c9ae0a99f583e..bff5d794975f8385965dac103332edbf5fc8f48c 100644
 --- a/tests/ops/linear/test_t5.cpp
 +++ b/tests/ops/linear/test_t5.cpp
-@@ -287,9 +287,21 @@
+@@ -287,9 +287,21 @@ int embedding_case(const Ternary& w, const std::vector<std::int32_t>& ids) {
  } // namespace
  
  

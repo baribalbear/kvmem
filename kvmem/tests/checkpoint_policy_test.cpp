@@ -2,6 +2,8 @@
 #include <iostream>
 #include <set>
 #include <stdexcept>
+#include <optional>
+#include <string>
 using namespace kvmem;
 static void require(bool ok, const char * why) { if (!ok) throw std::runtime_error(why); }
 struct Record {
@@ -9,7 +11,45 @@ struct Record {
     std::shared_ptr<int> data;
     CheckpointInfo checkpoint_info() const { return {row, CheckpointPurpose::None, data.get(), data ? 8U : 0U}; }
 };
+struct EnvironmentValue {
+    const char* name;
+    std::optional<std::string> saved;
+    explicit EnvironmentValue(const char* key) : name(key) {
+        if (const auto* value = std::getenv(key)) saved = value;
+    }
+    void set(const char* value) const {
+#ifdef _WIN32
+        _putenv_s(name, value ? value : "");
+#else
+        if (value) setenv(name, value, 1); else unsetenv(name);
+#endif
+    }
+    ~EnvironmentValue() { set(saved ? saved->c_str() : nullptr); }
+};
+static void environment_policy() {
+    EnvironmentValue mode("KVMEM_CHECKPOINT_POLICY");
+    EnvironmentValue extra("KVMEM_CHECKPOINT_EXTRA_RECOMPUTE_TOKENS");
+    mode.set("legacy"); extra.set(nullptr);
+    require(CheckpointPolicy::environment().extra_recompute_tokens == 0, "extra recomputation defaults off");
+    extra.set("16");
+    const auto legacy = CheckpointPolicy::environment();
+    require(!legacy.enabled && legacy.extra_recompute_tokens == 16, "native cleanup is independent of spread mode");
+    mode.set("spread");
+    require(CheckpointPolicy::environment().enabled && CheckpointPolicy::environment().extra_recompute_tokens == 16,
+            "spread reads the same native recomputation setting");
+    extra.set("0");
+    require(CheckpointPolicy::environment().extra_recompute_tokens == 0, "zero explicitly disables cleanup");
+    extra.set("2147483647");
+    require(CheckpointPolicy::environment().extra_recompute_tokens == INT32_MAX, "native token range is accepted");
+    for (const auto* invalid : {"-1", "2147483648", "wrong"}) {
+        extra.set(invalid);
+        bool rejected = false;
+        try { (void)CheckpointPolicy::environment(); } catch (const std::invalid_argument&) { rejected = true; }
+        require(rejected, "invalid native recomputation setting rejected");
+    }
+}
 int main() {
+    environment_policy();
     require(!checkpoint_anonymous_continuation(26,7103,7110), "shared root cannot consume an anonymous owner");
     require(!checkpoint_anonymous_continuation(3500,7103,7110), "anonymous middle edit is a branch");
     require(checkpoint_anonymous_continuation(7078,7103,7110), "ordinary tail edit can continue");
@@ -98,5 +138,24 @@ int main() {
     unspaced.remember({100,first},CoveragePurpose::Periodic);
     unspaced.remember({104,new_state},CoveragePurpose::Periodic);
     require(unspaced.size()==2 && !unspaced.nearby(110,valid),"zero gap disables both thinning and capture gate");
+    CheckpointPolicy input_budget=p; input_budget.count=2; input_budget.bytes=16;
+    CheckpointArchive<Record> input_archive(input_budget);
+    input_archive.remember({10,std::make_shared<int>(10)},CoveragePurpose::Root);
+    input_archive.remember({100,std::make_shared<int>(100)},CoveragePurpose::Input);
+    input_archive.remember({150,std::make_shared<int>(150)},CoveragePurpose::Anchor);
+    input_archive.remember({200,std::make_shared<int>(200)},CoveragePurpose::Endpoint);
+    require(input_archive.size()==2 && input_archive.select(100,valid)->row==100 &&
+            input_archive.select(200,valid)->row==200,
+            "a generated endpoint does not evict the repeated-input representative");
+    input_archive.remember({250,std::make_shared<int>(250)},CoveragePurpose::Input);
+    input_archive.remember({300,std::make_shared<int>(300)},CoveragePurpose::Endpoint);
+    require(!input_archive.select(200,valid) && input_archive.select(250,valid)->row==250,
+            "old input roles yield to the newest input and endpoint");
+    input_budget.count=1; input_budget.bytes=8;
+    CheckpointArchive<Record> tiny_input(input_budget);
+    tiny_input.remember({100,std::make_shared<int>(100)},CoveragePurpose::Input);
+    tiny_input.remember({200,std::make_shared<int>(200)},CoveragePurpose::Endpoint);
+    require(tiny_input.size()==1 && !tiny_input.select(100,valid),
+            "input protection yields to hard count and byte budgets");
     std::cout << "checkpoint policy: coverage, tiny budgets, identity, leases, rewind and capture boundaries passed\n";
 }

@@ -10,8 +10,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from launcher.plan import build_plan, token_settings
-from launcher.worker import probe_worker
+from launcher.plan import build_plan, token_settings, capabilities
+from launcher.worker import probe_worker, require_launch_features
+from launcher.export import render_script
 
 GPU = 'GPU-00000000-0000-0000-0000-000000000001'
 
@@ -159,6 +160,47 @@ class PlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.plan('llamacpp', KvTypeK='q8', KvTypeV='f16')
 
+    def test_heads_tensor_parallel_preserves_uuid_order_and_auto_weights(self):
+        data = self.config()
+        ids = [GPU, 'GPU-00000000-0000-0000-0000-000000000002']
+        data['parameters'].update(Gpu=','.join(ids), TensorParallel=True)
+        auto = build_plan(data)
+        self.assertIn('--tensor-parallel', auto['argv'])
+        self.assertEqual(auto['argv'][auto['argv'].index('--tensor-attention') + 1], 'heads')
+        self.assertNotIn('--tensor-split', auto['argv'])
+        self.assertEqual(auto['environment']['CUDA_VISIBLE_DEVICES'], ','.join(ids))
+        data['parameters']['TensorSplit'] = [3, 1]
+        manual = build_plan(data)
+        self.assertEqual(manual['argv'][manual['argv'].index('--tensor-split') + 1], '3,1')
+        data['parameters']['TensorParallel'] = False
+        data['parameters']['TensorSplit'] = []
+        self.assertNotIn('--tensor-parallel', build_plan(data)['argv'])
+        for invalid in [dict(TensorParallel=True, Gpu=GPU),
+                        dict(TensorParallel=True, Gpu=','.join(ids), StageLayers=[32, 32]),
+                        dict(TensorParallel=True, Gpu=','.join(ids), TensorSplit=[3]),
+                        dict(TensorParallel=True, Gpu=','.join(ids), TensorSplit=[float('nan'), 1]),
+                        dict(TensorParallel=True, Gpu=','.join(ids), TensorSplit=[float('inf'), 1]),
+                        dict(TensorParallel=True, Gpu=','.join(ids), TensorSplit=[True, 1]),
+                        dict(TensorParallel=True, Gpu=','.join(ids), TensorSplit=[10**400, 1]),
+                        dict(TensorParallel=True, Gpu=','.join(ids), TensorSplit=[1e308, 1e308]),
+                        dict(TensorParallel=True, Gpu=','.join(ids), TensorSplit=[10**308, 10**308]),
+                        dict(TensorParallel=True, Gpu=','.join(ids), TensorSplit=[0, 1]),
+                        dict(TensorParallel=False, Gpu=','.join(ids), TensorSplit=[3, 1])]:
+            bad = self.config(); bad['parameters'].update(invalid)
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                build_plan(bad)
+
+    def test_heads_tensor_parallel_requires_explicit_worker_capability(self):
+        for contract in [{}, *[{'heads_tensor_parallel_revision': value}
+                for value in (None, False, True, 0, -1, '1', 1.0)]]:
+            with self.subTest(contract=contract):
+                require_launch_features(contract, {})
+                require_launch_features(contract, {'TensorParallel': False})
+                with self.assertRaisesRegex(ValueError, 'heads tensor parallelism'):
+                    require_launch_features(contract, {'TensorParallel': True})
+        for revision in (1, 2):
+            require_launch_features({'heads_tensor_parallel_revision': revision}, {'TensorParallel': True})
+
     def test_secret_redaction_and_private_plan(self):
         data = self.config(ApiKey='test-secret-value')
         public = build_plan(data)
@@ -166,6 +208,40 @@ class PlanTest(unittest.TestCase):
         private = build_plan(data, reveal_secrets=True)
         self.assertEqual(private['argv'][private['argv'].index('--api-key') + 1], 'test-secret-value')
         self.assertNotIn('ApiKey', private['effective_parameters'])
+
+    def test_checkpoint_recompute_setting_is_explicit_ninfer_environment(self):
+        name = 'KVMEM_CHECKPOINT_EXTRA_RECOMPUTE_TOKENS'
+        with patch.dict(os.environ, {name: '64', 'KVMEM_CHECKPOINT_MIN_GAP': '0'}):
+            self.assertEqual(self.plan()['environment'][name], '0')
+            for value in (0, 16, 2147483647):
+                with self.subTest(value=value):
+                    plan = self.plan(CheckpointExtraRecomputeTokens=value)
+                    self.assertEqual(plan['environment'][name], str(value))
+                    self.assertEqual(plan['effective_parameters']['CheckpointExtraRecomputeTokens'], value)
+                    self.assertEqual(plan['argv'], self.plan()['argv'])
+            linux = self.plan(CheckpointExtraRecomputeTokens=16)
+            linux['target_platform'] = 'linux'
+            self.assertIn('export ' + name + '=16', render_script(linux, '/tmp/worker.lock'))
+        for value in (-1, 2147483648, True, 1.5, '16'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.plan(CheckpointExtraRecomputeTokens=value)
+        with self.assertRaisesRegex(ValueError, 'NInfer only'):
+            self.plan('llamacpp', CheckpointExtraRecomputeTokens=0)
+        self.assertNotIn(name, self.plan('llamacpp')['environment'])
+        with patch.dict(os.environ, {'KVMEM_CHECKPOINT_MIN_GAP': '64'}):
+            self.plan(CheckpointExtraRecomputeTokens=0)
+            with self.assertRaisesRegex(ValueError, 'MIN_GAP=0'):
+                self.plan(CheckpointExtraRecomputeTokens=16)
+
+    def test_checkpoint_recompute_requires_worker_support_only_when_enabled(self):
+        for value in (None, False, True, 0, -1, '1', 1.0):
+            contract = {'checkpoint_recompute_revision': value}
+            require_launch_features(contract, {'CheckpointExtraRecomputeTokens': 0})
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'checkpoint recompute'):
+                require_launch_features(contract, {'CheckpointExtraRecomputeTokens': 16})
+        for revision in (1, 2):
+            require_launch_features({'checkpoint_recompute_revision': revision},
+                                    {'CheckpointExtraRecomputeTokens': 16})
 
     def test_native_escape_hatch_is_bounded(self):
         for args in (['--threads', '4; echo bad'], ['--host', '0.0.0.0'],
@@ -176,8 +252,27 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(args[-2:], ['--threads', '8'])
 
     @unittest.skipUnless(os.name == 'nt', 'PowerShell regression comparison')
+    def test_heads_capability_descriptions_agree_and_remain_runtime_gated(self):
+        portable = capabilities()['backends']['ninfer']['supported_combinations']['multi_gpu']
+        run = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive',
+            '-ExecutionPolicy', 'Bypass', '-File', str(ROOT / 'scripts/windows/start-backend.ps1'),
+            '-Backend', 'ninfer', '-Describe'], capture_output=True, timeout=30)
+        self.assertEqual(run.returncode, 0, run.stderr.decode('utf-8', 'replace'))
+        windows = json.loads(run.stdout.decode('utf-8-sig'))['supported_combinations']['multi_gpu']
+        self.assertEqual(windows, portable)
+        self.assertEqual(portable['mode'], 'layer')
+        self.assertEqual(portable['modes'], ['layer', 'tensor'])
+        self.assertEqual(portable['tensor_attention'], ['heads'])
+        self.assertEqual(portable['heads_tensor_parallel_min_revision'], 1)
+        with self.assertRaisesRegex(ValueError, 'heads tensor parallelism'):
+            require_launch_features(portable, {'TensorParallel': True})
+
+    @unittest.skipUnless(os.name == 'nt', 'PowerShell regression comparison')
     def test_windows_canonical_cli_equivalence(self):
         cases = [('ninfer', {}), ('llamacpp', {}),
+                 ('ninfer', dict(CheckpointExtraRecomputeTokens=16)),
+                 ('ninfer', dict(TensorParallel=True, TensorSplit=[3.5, 1],
+                     Gpu=GPU+',GPU-00000000-0000-0000-0000-000000000002')),
                  ('ninfer', dict(SpeculativeMode='mtp', DraftTokens=4, DraftPolicy='adaptive',
                                  NgramDrafts=31, Concurrency=2, MaxTokens=0)),
                  ('ninfer', dict(SpeculativeMode='dflash2', DraftTokens=5, Vision=True,
@@ -189,7 +284,8 @@ class PlanTest(unittest.TestCase):
                  ('llamacpp', dict(SpeculativeMode='mtp', DraftTokens=3, ReasoningEffort='high'))]
         for backend, values in cases:
             with self.subTest(backend=backend, values=values):
-                data = self.config(backend, **values)
+                data = self.config(backend)
+                data['parameters'].update(values)
                 path = self.directory / 'config.json'
                 path.write_text(json.dumps(data['parameters']), encoding='utf-8')
                 run = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive',

@@ -1,0 +1,189 @@
+{
+  "date": "2026-11-01",
+  "integration_base": "f2d28bf20488287095125b359a35d92b9b02758d",
+  "native_upstream": "d0da39796697b79fd08fc570e1781d75943dddb1",
+  "native_prepared_tree": "1e7a5d621c341f2c257b81b9a5632dd19b17b07f",
+  "worker_sha256": "6ba4c564aedb3bf27a872a7a5a9f3870f392ded33b0e54f67b5d8593816d1c03",
+  "patch_count": 27,
+  "checks": {
+    "shared_native_host_targets": 4,
+    "launcher_plan_passed": 29,
+    "launcher_platform_skipped": 42,
+    "console_passed": 61,
+    "radiance_launcher_passed": 9,
+    "javascript_suites": 8,
+    "windows_launcher_matrix": true,
+    "27b_heads_mtp_short_requests": 12,
+    "27b_heads_mtp_query_ssd_requests": 24,
+    "4b_heads_mtp_input_reuse_requests": 14,
+    "dflash2_q3_heads_query_pressure": true,
+    "packed_and_sharded_payload_contract": true
+  },
+  "performance": {
+    "model": "Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+    "model_sha256": "9025edb5c5831cd7c617dfcf745179db277171f68bc21dc9e5b30881411a2ca1",
+    "gpu_order": [
+      "RTX 5060 Ti",
+      "RTX 5050 Laptop"
+    ],
+    "split": [
+      3,
+      1
+    ],
+    "kv": "int8",
+    "mtp_drafts": 2,
+    "budget": 768,
+    "reserve": 1024,
+    "prefill_chunk": 128,
+    "context": 8192,
+    "input_tokens": 499,
+    "output_tokens": 128,
+    "warmup_pairs_per_profile": 1,
+    "measured_pairs_per_profile": 3,
+    "threshold_order": [
+      0,
+      16
+    ],
+    "same_worker_model_gpus_settings": true,
+    "diagnostic_trace_during_timing": false,
+    "profiles": {
+      "0": {
+        "medians": {
+          "cold": {
+            "wall_seconds": 4.14000000001397,
+            "first_content_seconds": 1.625,
+            "prompt_ms": 1598.6898,
+            "prompt_ms_samples": [
+              1587.9323000000002,
+              1598.6898,
+              1640.3188
+            ],
+            "native_ttft_seconds": 1.5997493999999999,
+            "computed_prefill_tokens": [
+              499,
+              499,
+              499
+            ],
+            "tg_tokens_per_second": 51.98221913403272
+          },
+          "repeat": {
+            "wall_seconds": 2.625,
+            "first_content_seconds": 0.10999999998603016,
+            "prompt_ms": 95.39240000000001,
+            "prompt_ms_samples": [
+              95.80569999999999,
+              95.39240000000001,
+              94.3908
+            ],
+            "native_ttft_seconds": 0.09660429999999999,
+            "computed_prefill_tokens": [
+              1,
+              1,
+              1
+            ],
+            "tg_tokens_per_second": 51.720515528921894
+          }
+        },
+        "paired_wall_seconds": [
+          6.75,
+          6.734000000054948,
+          6.797000000020489
+        ],
+        "wall_seconds": {
+          "cold": [
+            4.125,
+            4.14000000001397,
+            4.172000000020489
+          ],
+          "repeat": [
+            2.625,
+            2.594000000040978,
+            2.625
+          ]
+        },
+        "paired_wall_median_seconds": 6.75,
+        "board_vram_peak_mib": {
+          "NVIDIA GeForce RTX 5050 Laptop GPU": 2846.0,
+          "NVIDIA GeForce RTX 5060 Ti": 9830.0
+        }
+      },
+      "16": {
+        "medians": {
+          "cold": {
+            "wall_seconds": 4.01500000001397,
+            "first_content_seconds": 1.4849999999860302,
+            "prompt_ms": 1474.3743,
+            "prompt_ms_samples": [
+              1466.7125,
+              1474.3743,
+              1476.9531
+            ],
+            "native_ttft_seconds": 1.4754977999999999,
+            "computed_prefill_tokens": [
+              499,
+              499,
+              499
+            ],
+            "tg_tokens_per_second": 51.73733987293309
+          },
+          "repeat": {
+            "wall_seconds": 2.76500000001397,
+            "first_content_seconds": 0.25,
+            "prompt_ms": 240.2472,
+            "prompt_ms_samples": [
+              229.1158,
+              240.2472,
+              246.0032
+            ],
+            "native_ttft_seconds": 0.2422169,
+            "computed_prefill_tokens": [
+              7,
+              7,
+              7
+            ],
+            "tg_tokens_per_second": 52.47476790038289
+          }
+        },
+        "paired_wall_seconds": [
+          6.78000000002794,
+          6.76500000001397,
+          6.750000000116415
+        ],
+        "wall_seconds": {
+          "cold": [
+            4.01500000001397,
+            4.0,
+            4.016000000061467
+          ],
+          "repeat": [
+            2.76500000001397,
+            2.76500000001397,
+            2.734000000054948
+          ]
+        },
+        "paired_wall_median_seconds": 6.76500000001397,
+        "board_vram_peak_mib": {
+          "NVIDIA GeForce RTX 5050 Laptop GPU": 2846.0,
+          "NVIDIA GeForce RTX 5060 Ti": 9830.0
+        }
+      }
+    }
+  },
+  "audit": {
+    "new_blocking_product_defects": 0,
+    "radiance_master_conflicts_preserved": true,
+    "optional_capture_keeps_previous_sources_until_success": true,
+    "active_query_checkpoint_protected": true,
+    "tool_continuation_resident_only": true
+  },
+  "limitations": [
+    "T16 improves cold prefill in this sample but makes repeated prompt prefill slower; default remains 0.",
+    "Three measured sequential pairs per threshold and one prompt are not universal performance or threshold tuning.",
+    "The attempted 27B native InputReuse fixture stops at its 4B-specific new-user template-rewrite assumption. It is not a passed test; 4B physical TP qualifies the positive path, and 27B HTTP Query/SSD checks are independent.",
+    "The historical Q4 DFlash2 artifact is absent. The new DFlash2 run uses the explicit available IQ3_S/Q3 artifact, not a performance comparison.",
+    "No new native allocation/copy fault injection, full NVFP4-weight model qualification, other GPU architectures or 3-8 GPU tests.",
+    "Functional state/cache verification is not a broad semantic-quality benchmark. Older performance and DFlash2 output differences below remain historical.",
+    "This is a source integration and validation build; no installed package was replaced.",
+    "Structural InputReuse can retain an additional full Host StateImage plus metadata; extreme simultaneous Query/InputReuse peak memory was not separately measured."
+  ]
+}

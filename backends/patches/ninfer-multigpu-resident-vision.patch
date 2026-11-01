@@ -1,24 +1,3 @@
-diff --git a/src/models/qwen3_5/load.cpp b/src/models/qwen3_5/load.cpp
-index e42beb8057bcc563bb95176f1bdb0740ba303f28..e2e69ae74cbbd6e2ee6691b555ca9c5ac1a38968 100644
---- a/src/models/qwen3_5/load.cpp
-+++ b/src/models/qwen3_5/load.cpp
-@@ -269,16 +269,6 @@ std::vector<std::uint32_t> default_stage_layers(const artifact::Reader& reader,
-             head_bytes += parameter_bytes(reader, bindings, WeightId{index});
-         }
-     }
--    // A resident Vision tower sits on the primary device too. An overlay tower is pinned on the
--    // host and borrows the head's evictable tail, which `head_bytes` already counts.
--    if (config.vision && options.vision && !options.host_staged_vision()) {
--        const std::size_t first = bindings.weights.size();
--        (void)loading::bind_vision(bindings, *config.vision, text.hidden_size, artifact::Residency::Device);
--        for (std::size_t index = first; index < bindings.weights.size(); ++index) {
--            head_bytes += parameter_bytes(reader, bindings, WeightId{index});
--        }
--    }
--
-     std::vector<StageBudget> budgets;
-     budgets.reserve(free_bytes.size());
-     for (std::size_t stage = 0; stage < free_bytes.size(); ++stage) {
 diff --git a/tests/models/qwen3_5/test_loading.cpp b/tests/models/qwen3_5/test_loading.cpp
 index 409789727f4cfe986db35a1bd3b2322b95595019..9b1ac1a215b70098ad41cf8ce2fb43380cf6e864 100644
 --- a/tests/models/qwen3_5/test_loading.cpp

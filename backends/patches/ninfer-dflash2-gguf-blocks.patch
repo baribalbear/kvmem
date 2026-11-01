@@ -56,10 +56,10 @@ index 9514df13fd4f2648f7bb9993fe7e1faa2a61dce4..0ed8c6723ebe2e0b264767e3949f4b5d
                                           finish_delta, residual, scratch, execution.device.stream);
  }
 diff --git a/src/models/qwen3_5/program/planning/startup.cpp b/src/models/qwen3_5/program/planning/startup.cpp
-index 02a8bacd954bc3f8b4a0f8be4c9161234c443363..ef17a9eae3a39dad3b61426793bf2c39e5cf1e3e 100644
+index 5b8de3f1bc5d65570d36e775629819c7bd9acea0..0dd511f207d6561c2698c466d23d2d58577f5d88 100644
 --- a/src/models/qwen3_5/program/planning/startup.cpp
 +++ b/src/models/qwen3_5/program/planning/startup.cpp
-@@ -882,10 +882,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& source_plan) {
+@@ -957,10 +957,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& source_plan) {
                                               dimension(draft->attention.num_key_value_heads)},
                                              dimension(draft->sliding_window.value_or(0)),
                                              {0, plan.capacity}, width, width, batch));
@@ -76,7 +76,7 @@ index 02a8bacd954bc3f8b4a0f8be4c9161234c443363..ef17a9eae3a39dad3b61426793bf2c39
                      }
                      {
                          auto mlp = layout.scope();
-@@ -899,10 +901,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& source_plan) {
+@@ -974,10 +976,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& source_plan) {
                                                      p.weight.qtype, p.weight.n, p.weight.k,
                                                      p.policy, tokens, tokens)));
                          }
@@ -204,10 +204,10 @@ index 626c93361039db8f7e5cbd3c4d453191dcebd29c..125622fc8b1cbe68cd91726e57a556a4
  
  void linear_dynamic_grouped_conv_add(const Tensor& x, const Weight& projection_weight,
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 2499048d9f7ae636d00cef53e0ff127ab9b7b548..b85aaf670d33685c100a96b11d73f849548fb4f8 100644
+index 9fb2084125aa3d4d1dea77a6564b34854f3b5bd1..c50a2c2a516351f76276485d7cc7156e2a7abfb1 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -23,6 +23,12 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_dflash2_tests_PROGRAMS
+@@ -24,6 +24,12 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_dflash2_tests_PROGRAMS
  ninfer_finalize_bundle(ninfer_dflash2_tests)
  ninfer_stage_runtime_dlls(ninfer_dflash2_tests)
  

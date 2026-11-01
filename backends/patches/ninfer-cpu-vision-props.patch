@@ -1,8 +1,8 @@
 diff --git a/docs/serving.md b/docs/serving.md
-index bb4c5486..9a6f8a68 100644
+index 667543192a17d397d3b0eddb83f983a859bc68d3..7774d6c475fa09637882a9d3dd76572d16237194 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
-@@ -152,7 +152,10 @@ retried. An on-demand read failure returns an unavailable error for that image r
+@@ -166,7 +166,10 @@ retried. An on-demand read failure returns an unavailable error for that image r
  continues serving other requests. The artifact must remain available at its original entry path. This policy applies to the
  Qwen3.5-family CPU tower; Gemma 4 retains its separate CPU implementation.
  
@@ -15,7 +15,7 @@ index bb4c5486..9a6f8a68 100644
  identify actual transitions. Weight bytes exclude vector spare capacity and allocator overhead;
  OS working set and private memory can differ from this logical count.
 diff --git a/include/ninfer/engine.h b/include/ninfer/engine.h
-index 541ab647..19843b50 100644
+index 541ab6473268df732d821d98e1267e800ac3cd31..19843b5013fb1aa61e2022da036fa0081e29f272 100644
 --- a/include/ninfer/engine.h
 +++ b/include/ninfer/engine.h
 @@ -188,6 +188,8 @@ public:
@@ -28,7 +28,7 @@ index 541ab647..19843b50 100644
      [[nodiscard]] MediaCacheSummary media_cache_summary() const;
      [[nodiscard]] bool is_available() const;
 diff --git a/include/ninfer/observability/resources.h b/include/ninfer/observability/resources.h
-index ab7361ea..3a5af1f3 100644
+index ab7361ea54ae04dedcaf89aaff88cb833cae038f..3a5af1f39dc6ea146ec39ffe9726cfd25f000b1a 100644
 --- a/include/ninfer/observability/resources.h
 +++ b/include/ninfer/observability/resources.h
 @@ -37,6 +37,17 @@ struct ArenaMemorySummary {
@@ -50,10 +50,10 @@ index ab7361ea..3a5af1f3 100644
  // within workspace.capacity_bytes; CPU/overlay Host weights are separate allocations.
  struct VisionWorkspaceMemorySummary {
 diff --git a/include/ninfer/types_fwd.h b/include/ninfer/types_fwd.h
-index 6e13d21a..8785a142 100644
+index d36b120c592edce7b8a9f7e2de25463dac88af93..325e54a4366a53e3232b08e3296f303f65ba32be 100644
 --- a/include/ninfer/types_fwd.h
 +++ b/include/ninfer/types_fwd.h
-@@ -129,6 +129,7 @@ struct NgramArchiveStats;
+@@ -131,6 +131,7 @@ struct NgramArchiveStats;
  // ninfer/observability/resources.h
  struct MediaCacheSummary;
  struct ArenaMemorySummary;
@@ -62,7 +62,7 @@ index 6e13d21a..8785a142 100644
  struct DeviceMemorySummary;
  struct KvmemMemorySummary;
 diff --git a/src/runtime/engine/engine.cpp b/src/runtime/engine/engine.cpp
-index c3362ba0..76237c0d 100644
+index 3806615aac04b765010894b7829e49da61ee935c..ac53cd923c0c25e5d7474346c694fb1f65a52d2e 100644
 --- a/src/runtime/engine/engine.cpp
 +++ b/src/runtime/engine/engine.cpp
 @@ -2,6 +2,7 @@
@@ -73,7 +73,7 @@ index c3362ba0..76237c0d 100644
  #include "core/device.h"
  #include "core/gpu_clock_floor.h"
  #include "core/nvtx.h"
-@@ -1167,6 +1168,21 @@ MediaCacheSummary Engine::media_cache_summary() const {
+@@ -1248,6 +1249,21 @@ MediaCacheSummary Engine::media_cache_summary() const {
      return impl_->frontend().media_cache_summary();
  }
  
@@ -96,7 +96,7 @@ index c3362ba0..76237c0d 100644
      if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
      RuntimeStats summary = std::visit(
 diff --git a/src/serve/generation_service.h b/src/serve/generation_service.h
-index f3a3880a..30ff7050 100644
+index f3a3880aca9a81c533f6613f992a9761395c9cdc..30ff7050eac05a052ca1661e240e785e6dc6d52a 100644
 --- a/src/serve/generation_service.h
 +++ b/src/serve/generation_service.h
 @@ -195,6 +195,10 @@ public:
@@ -111,10 +111,10 @@ index f3a3880a..30ff7050 100644
  
      [[nodiscard]] bool is_available() const { return engine_->is_available(); }
 diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
-index 571c4e63..dc814d7b 100644
+index c153f201161907db16b69a490325a93a439e724c..16a45c49c3b86d4082c041af24c1ea017a1351b3 100644
 --- a/src/serve/http_server.cpp
 +++ b/src/serve/http_server.cpp
-@@ -1115,14 +1115,14 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
+@@ -1119,14 +1119,14 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
          {"devices", execution.devices.empty() ? std::vector<int>{execution.device} : execution.devices},
          {"stage_layers", execution.stage_layers}, {"monitor_devices", facts.monitor_devices}};
      if (options.enable_vision && options.vision_residency == VisionResidency::Cpu) {

@@ -71,6 +71,7 @@ jobs:
           python -m unittest discover -s tests -p "test_launcher_process.py"
           python -m unittest discover -s tests -p "test_launcher_services.py"
           python -m unittest discover -s tests -p "test_launcher_package.py"
+          python -m unittest discover -s tests -p "test_radiance_launcher.py"
           python tests/test_local_console.py
           python -m unittest discover -s tests -p "test_auto_budget.py"
           python -m unittest discover -s tests -p "test_console_memory.py"
@@ -435,6 +436,40 @@ jobs:
             polystrata-hip-*.log
             build-polystrata-hip/CMakeCache.txt
             build-polystrata-hip/CMakeFiles/CMakeConfigureLog.yaml
+  radiance-host-contracts:
+    needs: changes
+    if: needs.changes.outputs.run_native == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare the complete pinned Radiance patch chain
+        shell: bash
+        run: |
+          python backends/radiance/tools/prepare_native.py --destination "$RUNNER_TEMP/radiance-native"
+          python -c 'import pathlib,sys; sys.path.insert(0,"backends/radiance/tools"); from source_identity import source_revision; print(source_revision(pathlib.Path(sys.argv[1])))' "$RUNNER_TEMP/radiance-native"
+      - name: Test platform, source identity and evidence adapters
+        run: python -m unittest discover -s backends/radiance/tests -p "*test.py"
+      - name: Build and run portable C++ contracts without HIP
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cmake -S . -B build-radiance-host -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DKVMEM_BUILD_LLAMA=OFF -DKVMEM_BUILD_SERVER_TESTS=OFF \
+            -DKVMEM_BUILD_RADIANCE=ON -DRADIANCE_SOURCE_DIR="$RUNNER_TEMP/radiance-native"
+          ninja -C build-radiance-host -n -d explain
+          cmake --build build-radiance-host --parallel 8
+          ctest --test-dir build-radiance-host --output-on-failure --no-tests=error
   ninfer-pinned-sources:
     needs: changes
     if: needs.changes.outputs.run_ci == 'true'
@@ -459,7 +494,7 @@ jobs:
   # Keep required status names; only verified documentation changes may skip builds.
   host-and-server-units-linux:
     if: ${{ always() }}
-    needs: [changes, console, host-linux, host-windows, cuda-build-linux, polystrata-cuda-build-linux, polystrata-hip-build-linux, ninfer-pinned-sources]
+    needs: [changes, console, host-linux, host-windows, cuda-build-linux, polystrata-cuda-build-linux, polystrata-hip-build-linux, radiance-host-contracts, ninfer-pinned-sources]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -475,6 +510,7 @@ jobs:
           CUDA_RESULT: ${{ needs.cuda-build-linux.result }}
           POLYSTRATA_CUDA_RESULT: ${{ needs.polystrata-cuda-build-linux.result }}
           POLYSTRATA_HIP_RESULT: ${{ needs.polystrata-hip-build-linux.result }}
+          RADIANCE_RESULT: ${{ needs.radiance-host-contracts.result }}
           NINFER_RESULT: ${{ needs.ninfer-pinned-sources.result }}
         run: |
           test "$CHANGES_RESULT" = success
@@ -488,11 +524,13 @@ jobs:
             test "$LINUX_RESULT" = success
             test "$WINDOWS_RESULT" = success
             test "$POLYSTRATA_HIP_RESULT" = success
+            test "$RADIANCE_RESULT" = success
           else
             test "$RUN_NATIVE" = false
             test "$LINUX_RESULT" = skipped
             test "$WINDOWS_RESULT" = skipped
             test "$POLYSTRATA_HIP_RESULT" = skipped
+            test "$RADIANCE_RESULT" = skipped
           fi
           if [ "$RUN_CUDA" = true ]; then
             test "$CUDA_RESULT" = success
