@@ -77,6 +77,25 @@ jobs:
             python tests/test_model_health.py &&
             python tests/test_ci_changes.py
           } 2>&1 | tee check.log
+      - name: Require SYNC_TOKEN for upstream workflow changes
+        if: steps.merge.outputs.state != 'current'
+        env:
+          HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
+        run: |
+          changed=$(git diff --name-only origin/master HEAD -- .github/workflows)
+          if [ "$HAS_SYNC_TOKEN" != true ] && [ -n "$changed" ]; then
+            {
+              echo "### Upstream sync blocked: SYNC_TOKEN is missing"
+              echo
+              echo "Upstream changed these workflows, which GITHUB_TOKEN cannot push:"
+              echo; echo "$changed" | sed 's/^/- `/; s/$/`/'
+              echo
+              echo "Add a fine-grained token for this repository (Contents, Pull requests and Workflows:"
+              echo "read and write) as the SYNC_TOKEN Actions secret, then rerun. See docs/upstream-sync.md."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Upstream changed .github/workflows; add the SYNC_TOKEN secret (see the run summary)."
+            exit 1
+          fi
       - name: Push the branch and open the pull request
         if: steps.merge.outputs.state != 'current'
         env:
