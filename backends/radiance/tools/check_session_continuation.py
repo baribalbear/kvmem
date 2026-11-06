@@ -16,6 +16,8 @@ def main():
     p.add_argument("--context", type=int, default=8192)
     p.add_argument("--replay-tokens", type=int, default=1024)
     p.add_argument("--budget", type=int, default=256)
+    p.add_argument("--batch", type=int, default=256,
+                   help="native prefill chunk tokens; record explicit overrides in comparisons")
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=False)
     messages = [
@@ -28,7 +30,6 @@ def main():
         # After the dense run the candidate is held to its EXACT chosen answer.
         next_call = ("<tool_call>\n<function=read_report>\n<parameter=index>\n" +
                      str(index) + "\n</parameter>\n</function>\n</tool_call>")
-        cases.append({"messages": copy.deepcopy(messages), "expected": ["OK", next_call]})
         messages += [
             {"role": "assistant", "content": "", "tool_calls": [{"id": f"report-{index}", "type": "function",
                 "function": {"name": "read_report", "arguments": json.dumps({"index": index})}}]},
@@ -36,12 +37,16 @@ def main():
                 f"Report {index} row {line}: inspection completed; everything is normal."
                 for line in range(a.tool_lines)) +
                 "\nReport complete. No further tool calls are needed. Acknowledge with only OK."}]
+        # Start with an actual report so the first request has a proven native
+        # input checkpoint. Generated replies never enter this fixed history.
+        cases.append({"messages": copy.deepcopy(messages), "expected": ["OK", next_call]})
     casefile = a.output / "cases.json"
     casefile.write_text(json.dumps(cases, indent=2))
     cmd = [sys.executable, str(Path(__file__).with_name("smoke_server.py"))]
     for name in ("exe", "home", "model", "sdk"):
         cmd += ["--" + name, str(getattr(a, name))]
     cmd += ["--cases", str(casefile), "--rounds", "5", "--context", str(a.context),
+            "--batch", str(a.batch),
             "--replay-tokens", str(a.replay_tokens), "--embedding-placement", "ram",
             "--observe-statistics", "--disable-thinking"]
     dense = subprocess.run(cmd + ["--output", str(a.output / "dense")], check=False).returncode

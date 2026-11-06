@@ -11,6 +11,8 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 from launcher.plan import build_plan,token_settings
 from console_hardware import parse_rocr_agents
+sys.path.insert(0,str(ROOT/'backends/radiance/tests'))
+from draft_control_test import container
 
 
 class RadiancePlanTest(unittest.TestCase):
@@ -18,7 +20,8 @@ class RadiancePlanTest(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name).resolve()
         self.worker=self.root/'radiance-kvmem-server';self.worker.write_text('worker');self.worker.chmod(0o755)
-        self.model=self.root/'model.rad';self.model.touch()
+        self.model=self.root/'model.rad'
+        container(self.model,['mtp.fc.weight'],[('mtp_num_hidden_layers',1)])
         self.home=self.root/'radiance_home'
         for name in ('kernels','architectures'):(self.home/name).mkdir(parents=True)
         (self.home/'kernels.rkb').touch()
@@ -28,6 +31,30 @@ class RadiancePlanTest(unittest.TestCase):
             RadianceHome=str(self.home),Gpu='GPU-65471d75ce486b4f')
         parameters.update(settings)
         return build_plan(dict(schema_version=1,parameters=parameters))
+
+    def test_prefill_default_and_explicit_override(self):
+        for settings, expected in (({}, 256), ({'Prefill': 512}, 512)):
+            with self.subTest(settings=settings):
+                plan=self.plan(**settings)
+                self.assertEqual(plan['effective_parameters']['Prefill'],expected)
+                args=plan['argv']
+                self.assertEqual(args[args.index('--max-num-batched-tokens')+1],str(expected))
+
+    def test_cpu_threads_and_image_cache_budget(self):
+        plan=self.plan(CpuThreads=8,VisionCacheMiB=64)
+        self.assertEqual(plan['environment']['OMP_NUM_THREADS'],'8')
+        self.assertEqual(plan['environment']['KVMEM_RAD_VISION_CACHE_MIB'],'64')
+        self.assertEqual(self.plan(VisionCacheMiB=0)['effective_parameters']['VisionCacheMiB'],0)
+        for values in [dict(CpuThreads=0),dict(CpuThreads=257),dict(VisionCacheMiB=65537)]:
+            with self.subTest(values=values),self.assertRaises(ValueError):self.plan(**values)
+
+    def test_packed_kv_and_recurrent_state(self):
+        for kv in ('fp8','bf16','fp8_v4','k6_v4'):
+            for state in ('f32','f16'):
+                args=self.plan(KvType=kv,StateCacheType=state)['argv']
+                self.assertEqual(args[args.index('--kv-cache-dtype')+1],kv)
+                self.assertEqual(args[args.index('--state-cache-dtype')+1],state)
+        with self.assertRaises(ValueError):self.plan(StateCacheType='bf16')
 
     def test_units_identity_scoring_and_backend_flags(self):
         p=self.plan(Concurrency=8,SpeculativeMode='mtp',DraftTokens=3,RetainedSessions=0,
@@ -43,12 +70,14 @@ class RadiancePlanTest(unittest.TestCase):
         self.assertEqual(p['resolved_scoring']['top_frac'],.75)
         self.assertNotIn('local-secret',json.dumps(p))
         self.assertNotIn('--default-max-tokens',args)
+        self.assertEqual(args[args.index('--prefix-cache-mib')+1],'0')
+        self.assertNotIn('--prefix-cache-host-mib',args)
 
     def test_unsupported_features_are_rejected_before_launch(self):
         for values in [dict(Vision=True),dict(DiskPath=str(self.root),DiskMiB=0),dict(DiskMiB=2),dict(StageLayers=[64]),
             dict(Gpu='GPU-65471d75ce486b4f,GPU-0000000000000001,GPU-0000000000000002'),
             dict(Gpu='GPU-65471d75ce486b4f,GPU-65471d75ce486b4f'),dict(KvType='nvfp4'),
-            dict(FastPrefill=True),dict(Reserve=640),dict(Prefill=1024),dict(SpeculativeMode='dflash2'),
+            dict(FastPrefill=True),dict(Reserve=640,Prefill=512),dict(Prefill=1024),dict(SpeculativeMode='dflash2'),
             dict(SpeculativeMode='none',DraftPolicy='adaptive'),dict(RetainedSessions=1025)]:
             with self.subTest(values=values),self.assertRaises(ValueError):self.plan(**values)
 
@@ -84,16 +113,70 @@ class RadiancePlanTest(unittest.TestCase):
             with self.subTest(values=values),self.assertRaises(ValueError):
                 self.plan(SpeculativeMode='mtp',**values)
 
+    def test_embedded_dflash_uses_its_trained_depth(self):
+        container(self.model,['dflash.fc.weight'],[
+            ('draft.architectures','DFlash2Model'),('draft.dflash_config.block_size',8)])
+        for settings in ({},{'DraftTokens':7}):
+            plan=self.plan(SpeculativeMode='dflash2',**settings)
+            args=plan['argv']
+            self.assertEqual(plan['effective_parameters']['DraftTokens'],7)
+            self.assertEqual(args[args.index('--num-speculative-tokens')+1],'7')
+            self.assertEqual(args[args.index('--kvmem-drafter')+1],'dflash2')
+        for settings in ({'DraftTokens':5},{'DraftPolicy':'adaptive'},{'DraftModel':str(self.model)}):
+            with self.subTest(settings=settings),self.assertRaises(ValueError):
+                self.plan(SpeculativeMode='dflash2',**settings)
+        with self.assertRaises(ValueError):self.plan(SpeculativeMode='mtp')
+        args=self.plan(SpeculativeMode='none')['argv']
+        self.assertEqual(args[args.index('--num-speculative-tokens')+1],'0')
+        self.assertEqual(args[args.index('--kvmem-drafter')+1],'off')
+
+    def test_embedded_drafters_accept_case_insensitive_rad_extension(self):
+        # The shared launch contract and native magic reader accept .RAD too.
+        # Metadata preflight must not newly reject that existing model path.
+        self.model=self.root/'embedded.RAD'
+        for mode,names,metadata,depth in [
+            ('mtp',['mtp.fc.weight'],[('mtp_num_hidden_layers',1)],3),
+            ('dflash2',['dflash.fc.weight'],[
+                ('draft.architectures','DFlash2Model'),('draft.dflash_config.block_size',8)],7),
+        ]:
+            with self.subTest(mode=mode):
+                container(self.model,names,metadata)
+                args=self.plan(SpeculativeMode=mode)['argv']
+                self.assertEqual(args[args.index('--num-speculative-tokens')+1],str(depth))
+
+    def test_dflash_metadata_without_weights_and_truncation_are_rejected(self):
+        container(self.model,['mtp.fc.weight'],[
+            ('draft.architectures','DFlash2Model'),('draft.dflash_config.block_size',8),
+            ('mtp_num_hidden_layers',1)])
+        for mode in ('mtp','dflash2'):
+            with self.subTest(mode=mode),self.assertRaises(ValueError):
+                self.plan(SpeculativeMode=mode)
+        self.model.write_bytes(self.model.read_bytes()[:-1])
+        with self.assertRaises(ValueError):self.plan(SpeculativeMode='dflash2')
+
     def test_native_image_geometry_and_residency(self):
         with mock.patch('launcher.radiance.vision_geometry',return_value=(16,2)):
             args=self.plan(Vision=True,VisionTokens=1024)['argv']
             self.assertEqual(args[args.index('--mm-max-patches')+1],'4096')
             self.assertEqual(args[args.index('--image-max-pixels')+1],'1048576')
-            for values in (dict(VisionResidency='cpu'),dict(VisionTokens=63),dict(VisionTokens=16385)):
+            for residency in ('cpu','resident'):
+                plan=self.plan(Vision=True,VisionResidency=residency)
+                argv=plan['argv']
+                self.assertEqual(argv[argv.index('--vision-residency')+1],residency)
+                self.assertEqual(plan['effective_parameters']['VisionResidency'],residency)
+            for values in (dict(VisionResidency='invalid'),dict(VisionTokens=63),dict(VisionTokens=16385)):
                 with self.subTest(values=values),self.assertRaises(ValueError):self.plan(Vision=True,**values)
         args=self.plan(Vision=False)['argv']
         self.assertEqual(args[args.index('--mm-max-patches')+1],'0')
         self.assertNotIn('--image-max-pixels',args)
+        self.assertNotIn('--vision-residency',args)
+
+    def test_text_embedding_placement(self):
+        for placement in ('ram','vram'):
+            plan=self.plan(EmbeddingPlacement=placement)
+            self.assertEqual(plan['argv'][plan['argv'].index('--embedding-placement')+1],placement)
+            self.assertEqual(plan['effective_parameters']['EmbeddingPlacement'],placement)
+        with self.assertRaises(ValueError):self.plan(EmbeddingPlacement='disk')
 
     def test_mtp_default_and_legacy_alias(self):
         for values in (dict(SpeculativeMode='mtp'),dict(MtpDrafts=3)):

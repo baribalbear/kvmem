@@ -12,12 +12,28 @@ int main(int argc, char** argv) {
         std::cout << kvmem_radiance_capabilities << '\n'; return 0;
     }
     kvmem::radiance::SelectionOptions options;
+    options.max_draft_tokens=kvmem_radiance_max_draft_tokens;
     bool aggregation_set = false, alpha_set = false, lrfu_set = false;
     std::vector<char*> engine_args{argv[0]};
     try {
     for (int i = 1; i < argc; ++i) {
         std::string_view flag(argv[i]);
+#ifdef KVMEM_RADIANCE_ARGV_PARSE_TEST
+        // config_parse gives help precedence over errors. The parser test removes its trailing
+        // help marker so every preceding option is validated, then exits before model startup.
+        if (flag=="--help") {
+            if(i!=argc-1)throw std::invalid_argument("parser test requires --help at the end");
+            continue;
+        }
+#endif
         if (flag=="--kvmem") continue;
+        if (flag=="--kvmem-drafter") {
+            if (++i>=argc) throw std::invalid_argument("missing native drafter mode");
+            options.drafter_mode=argv[i];
+            if (options.drafter_mode!="off" && options.drafter_mode!="mtp" && options.drafter_mode!="dflash2")
+                throw std::invalid_argument("native drafter mode must be off, mtp or dflash2");
+            continue;
+        }
         if (flag=="--kvmem-gen-reserve") flag="--kvmem-replay-tokens";
         if (flag=="--kvmem-sessions") flag="--kvmem-cache-sessions";
         if (flag=="--kvmem-query-max-tokens") flag="--kvmem-query-tokens";
@@ -53,14 +69,16 @@ int main(int argc, char** argv) {
             else options.recent_tokens = value;
             continue;
         }
-        if (flag == "--kvmem-cache-sessions") {
-            if (++i>=argc) { std::cerr << "missing cache session count\n"; return 2; }
+        if (flag == "--kvmem-cache-sessions" || flag == "--kvmem-cache-records") {
+            if (++i>=argc) { std::cerr << "missing cache group/record count\n"; return 2; }
             uint32_t value=0; const std::string_view text(argv[i]);
             const auto parsed=std::from_chars(text.data(),text.data()+text.size(),value);
             if (parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size() || value>1024) {
-                std::cerr << "cache session count must be between 0 and 1024\n"; return 2;
+                std::cerr << "cache group/record count must be between 0 and 1024\n"; return 2;
             }
-            options.cache_sessions=value; continue;
+            if(flag == "--kvmem-cache-records")options.cache_records=value;
+            else options.cache_sessions=value;
+            continue;
         }
         if (flag == "--kvmem-budget" || flag == "--kvmem-block-tokens" || flag == "--kvmem-host-mib" || flag=="--kvmem-disk-mib" ||
             flag == "--kvmem-replay-tokens" || flag == "--kvmem-query-tokens" || flag == "--kvmem-query-replay-tokens") {
@@ -96,7 +114,8 @@ int main(int argc, char** argv) {
         std::cout << "Query: --kvmem-query-scorer page-softmax|meanq-cosine --kvmem-score-agg mean|max --kvmem-graph-alpha [0,1]\n";
         std::cout << "Bounds: --kvmem-query-tokens 512 --kvmem-query-replay-tokens 2048; generation reserve: --kvmem-replay-tokens\n";
         std::cout << "History: --kvmem-lrfu|--no-kvmem-lrfu --kvmem-lrfu-lambda [0,1] --kvmem-lrfu-top-fraction (0,1]\n";
-        std::cout << "Retained conversations: --kvmem-cache-sessions N (default 8; 0 disables), sharing --kvmem-host-mib\n";
+        std::cout << "Retained content groups: --kvmem-cache-sessions N (default 8; 0 disables), sharing --kvmem-host-mib\n";
+        std::cout << "Retained records: --kvmem-cache-records N (default 0: follow group limit; each record has up to 3 restore points)\n";
         std::cout << "Optional SSD: --kvmem-disk-path DIR --kvmem-disk-mib MiB (shared native KV and retained state)\n";
         return 0;
     }
@@ -109,9 +128,14 @@ int main(int argc, char** argv) {
                   << " speculative draft tokens; larger GDN deployment windows are not supported\n";
         return 2;
     }
+#ifdef KVMEM_RADIANCE_ARGV_PARSE_TEST
+    std::cout << "KVMEM_NATIVE_ARGV_VALID\n";
+    return 0;
+#else
     if (!rad::resolve_hf_model(cfg)) return 1;
     rad::Engine engine(std::move(cfg), std::make_unique<kvmem::radiance::BatchedStatisticsObserver>(options));
     if (engine.start() < 0) return 1;
     if (engine.config().debug_graph) return engine.dump();
     return engine.serve() < 0 ? 1 : 0;
+#endif
 }

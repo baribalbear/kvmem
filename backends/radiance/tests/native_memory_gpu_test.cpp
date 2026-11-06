@@ -21,6 +21,9 @@ using namespace kvmem;
 using namespace kvmem::radiance;
 #define CHECK(x) do { if (!(x)) throw std::runtime_error(#x); } while (false)
 
+// Exercise bytewise archival/checkpoints for both packed widths and f16 state.
+static unsigned packed_row_half = 8;
+static uint32_t state_type = RAD_F32;
 struct Engine {
     rad::Pools pools;
     rad::KVManager kv;
@@ -37,14 +40,14 @@ struct Engine {
             auto& info = infos[g];
             info.name = "full-" + std::to_string(g);
             info.decl.kind = RAD_KV_FULL; info.decl.dtype = dtype;
-            info.decl.n_head_kv = 1; info.decl.head_dim = 8;
+            info.decl.n_head_kv = 1; info.decl.head_dim = packed_row_half;
             info.block_size = 16 * g; info.layers = {3 * g};
         }
         if (hybrid) {
             infos.resize(5);
             auto& linear = infos[3];
             linear.name = "linear"; linear.layers = {1, 4};
-            linear.decl.kind = RAD_KV_LINEAR; linear.decl.dtype = RAD_F32;
+            linear.decl.kind = RAD_KV_LINEAR; linear.decl.dtype = state_type;
             linear.decl.n_head_kv = 2; linear.decl.state_dim[0] = 8; linear.decl.state_dim[1] = 8;
             auto& conv = infos[4];
             conv.name = "conv"; conv.layers = {1, 4};
@@ -54,7 +57,7 @@ struct Engine {
         if (speculative) {
             infos.resize(6);
             auto& draft = infos[5];
-            draft.name = "drafter-window"; draft.layers = {8};
+            draft.name = "drafter-window"; draft.layers = {8}; draft.drafter = true;
             draft.decl.kind = RAD_KV_WINDOW; draft.decl.dtype = dtype;
             draft.decl.n_head_kv = 1; draft.decl.head_dim = 8;
             draft.decl.window = 64; draft.block_size = 16;
@@ -123,16 +126,136 @@ int main(int argc, char** argv) {
             CHECK(follower->kv.seq_tokens(29)==32 && follower->kv.plan(1)->base==base);
             std::cout<<"rank metadata mirror: index ownership, allocation order, slot reuse, local bytes and shape rejection PASS\n";
         }
+        // Split prefill collects trunk statistics before the DFlash sidecars.
+        // The native manager's frontier includes RESERVED lookahead, while a
+        // NativeMemory transaction owns only accepted trunk history. Pressure
+        // must start after the sidecars drain and their future rows are trimmed.
+        {
+            auto sidecar=std::make_shared<Engine>(true,2,RAD_BF16,true);
+            auto& kv=sidecar->kv;
+            kv.clear_state_clears();
+            for(const auto& group:kv.plans())if(group.base && group.pool_bytes)
+                CHECK(rad_memset_async(group.base,37+group.index,group.pool_bytes,sidecar->stream)==RAD_OK);
+            CHECK(rad_stream_sync(sidecar->stream)==RAD_OK);
+            kv.trim_window(17,128);
+            const auto epoch=kv.window_epoch(17);
+            const auto floor=kv.window_floor(17);
+            const auto window=kv.block_table(17,5);
+            const auto window_begin=kv.first_block_pos(17,5);
+            auto read_pages=[&](uint64_t sequence,int group) {
+                const auto& plan=*kv.plan(group);
+                const auto& table=kv.block_table(sequence,group);
+                std::vector<CopySpan> spans;
+                for(size_t index=0;index<table.size();++index)
+                    spans.push_back({group,uint64_t(table[index]*plan.layer_bytes_per_block()),
+                        uint64_t(index*plan.layer_bytes_per_block()),uint64_t(plan.layer_bytes_per_block())});
+                PageTransfer read(device,table.size()*plan.layer_bytes_per_block(),sidecar->stream);
+                read.spill(spans,{{group,plan.base,uint64_t(plan.pool_bytes)}},sidecar->stream);
+                CHECK(read.drain());return read.payload();
+            };
+            const auto full1=read_pages(17,1),full2=read_pages(17,2),accepted_window=read_pages(17,5);
+            std::vector<int32_t> tokens(128,9);
+            CHECK(WindowCheckpoint::required_bytes(kv,17,128)==accepted_window.size());
+            auto anchor=std::make_unique<PrefixLease>(sidecar,kv,17,tokens,device,sidecar->stream);
+            const MemoryStamp mark{true,{17,444},1,0,128,1};
+            std::vector<BlockDescriptor> catalog;
+            for(uint64_t index=0;index<4;++index)catalog.push_back({mark.session,index,index*32,32,1,0});
+            auto memory=std::make_shared<NativeMemory>(MemoryBinding{sidecar,&kv,sidecar->stream,device,1},
+                sidecar->infos,BackendIdentity{"radiance","unit","sidecar-boundary","test"},
+                mark,catalog,32,256,1024*1024);
+            MemorySession transaction(memory);
+            transaction.prepare(memory->stamp(),{0,3},{3},{64,32,128,1024*1024});
+            CHECK(kv.ensure(17,136,128)==RAD_OK && kv.seq_tokens(17)==136);
+            bool refused=false;
+            try{(void)memory->snapshot();}
+            catch(const MemoryError& error){
+                refused=error.code()==MemoryErrorCode::Stale &&
+                    std::string(error.what()).find("engine frontier changed outside the memory boundary")!=std::string::npos;
+            }
+            CHECK(refused); // Do not weaken the transaction's accepted-frontier guard.
+            CHECK(rad_stream_sync(sidecar->stream)==RAD_OK); // no-row prefill has no collect_step fence
+            CHECK(kv.rollback(17,128)==RAD_OK);
+            CHECK(transaction.abort()==AbortResult::PreviousViewPreserved);
+            CHECK(memory->snapshot().stamp.frontier==128);
+            CHECK(read_pages(17,1)==full1 && read_pages(17,2)==full2);
+            CHECK(kv.block_table(17,5)==window && kv.first_block_pos(17,5)==window_begin);
+            CHECK(read_pages(17,5)==accepted_window);
+            CHECK(kv.window_epoch(17)==epoch && kv.window_floor(17)==floor);
+            // Correct boundary: the trunk accepted 32 rows; the sidecar reserves
+            // 8 more, finishes, and trims those 8 BEFORE preparing Pressure.
+            CHECK(kv.ensure(17,160,128)==RAD_OK);
+            CHECK(kv.ensure(17,168,128)==RAD_OK);
+            CHECK(rad_stream_sync(sidecar->stream)==RAD_OK);
+            CHECK(kv.rollback(17,160)==RAD_OK);
+            memory->accept_append(160,{{mark.session,4,128,32,2,2}});
+            const auto window160=kv.block_table(17,5);
+            const auto bytes160=read_pages(17,5);
+            transaction.prepare(memory->stamp(),{0,4},{4},{64,32,128,1024*1024});
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+            while(transaction.phase()!=MemoryPhase::Ready){
+                CHECK(std::chrono::steady_clock::now()<deadline);transaction.advance();
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+            CHECK(transaction.publish().visible_tokens==64);
+            CHECK(kv.seq_tokens(17)==160 && memory->snapshot().stamp.frontier==160);
+            CHECK(kv.window_epoch(17)==epoch && kv.window_floor(17)==floor);
+            CHECK(kv.block_table(17,5)==window160 && read_pages(17,5)==bytes160);
+            for(int group=1;group<=2;++group)
+                for(auto byte:read_pages(17,group))CHECK(byte==uint8_t(37+group));
+            CHECK(kv.add_sequence(29)==RAD_OK && kv.ensure(29,1)==RAD_OK);
+            kv.clear_state_clears();
+            tokens.push_back(10);anchor->restore(kv,29,tokens,device,sidecar->stream);
+            CHECK(kv.seq_tokens(29)==128 && read_pages(29,1)==full1 && read_pages(29,2)==full2);
+            CHECK(kv.first_block_pos(29,5)==window_begin && read_pages(29,5)==accepted_window);
+            CHECK(kv.window_epoch(29)>0 && kv.window_floor(29)==window_begin);
+            // Tiered/forked prefixes must retain their own immutable draft bytes.
+            anchor->demote(device,sidecar->stream,1024*1024);
+            auto window_storage=std::make_shared<HostKvStorage>(1024*1024);
+            anchor->park(window_storage,{});
+            auto forked=anchor->fork();
+            auto payload=forked->load_cpu();
+            kv.free_sequence(29);
+            CHECK(kv.add_sequence(31)==RAD_OK && kv.ensure(31,1)==RAD_OK);
+            kv.clear_state_clears();
+            auto truncated=payload;
+            truncated.window.pop_back();
+            bool truncated_refused=false;
+            try{forked->restore(kv,31,tokens,device,sidecar->stream,&truncated);}
+            catch(const std::runtime_error&){truncated_refused=true;}
+            CHECK(truncated_refused && kv.seq_tokens(31)==1 && kv.window_epoch(31)==0);
+            forked->restore(kv,31,tokens,device,sidecar->stream,&payload);
+            CHECK(kv.seq_tokens(31)==128 && read_pages(31,5)==accepted_window);
+            WindowCheckpoint query_window;
+            query_window.save(kv,31,128,device,sidecar->stream);
+            std::vector<rad::KVManager::FullTable> query_tables;
+            for(int group=1;group<=2;++group)query_tables.push_back({group,kv.block_table(31,group)});
+            CHECK(kv.ensure(31,160,128)==RAD_OK);
+            CHECK(kv.rewind_full_tables(31,160,128,128,query_tables)==RAD_OK);
+            CHECK(kv.block_table(31,5).empty() && kv.window_floor(31)==128);
+            query_window.restore(kv,31,device,sidecar->stream);
+            CHECK(read_pages(31,5)==accepted_window && kv.window_floor(31)==window_begin);
+            const auto restored_epoch=kv.window_epoch(31);
+            auto duplicate=kv.block_table(31,5);
+            CHECK(duplicate.size()>1);
+            duplicate[1]=duplicate[0];
+            CHECK(kv.restore_window_tables(31,128,window_begin,{{5,window_begin,duplicate}})==RAD_E_INVAL);
+            CHECK(kv.window_epoch(31)==restored_epoch && read_pages(31,5)==accepted_window);
+            std::cout<<"DFlash split-prefill boundary: stale reserved lookahead rejected; drained trim, Pressure, window bytes/epoch and immutable anchor PASS\n";
+        }
         const auto disk_directory=std::filesystem::temp_directory_path()/
             ("kvmem-radiance-native-"+std::to_string(std::random_device{}()));
         CHECK(std::filesystem::create_directory(disk_directory));
         for (bool disk_backed : {false,true})
-        for (uint32_t dtype : {uint32_t(RAD_BF16), uint32_t(RAD_F8E4M3)})
+        for (unsigned format : {0u,1u,2u,3u})
         for (bool hybrid : {false, true})
         for (bool speculative : {false, true}) {
+        const uint32_t dtype = format ? RAD_F8E4M3 : RAD_BF16;
+        packed_row_half = format==2 ? 200 : format==3 ? 176 : 8;
+        state_type = format>=2 ? RAD_F16 : RAD_F32;
         if (speculative && !hybrid) continue; // This fixture's drafter follows its recurrent groups.
         auto engine = std::make_shared<Engine>(hybrid, 1, dtype, speculative);
         const auto initial_window = speculative ? engine->kv.block_table(17, 5) : std::vector<int32_t>{};
+        const auto initial_window_epoch = engine->kv.window_epoch(17);
         std::vector<GroupPool> state_pools;
         std::vector<CopySpan> state_spans;
         std::vector<uint8_t> state_expected;
@@ -263,6 +386,7 @@ int main(int argc, char** argv) {
             CHECK(view.visible_tokens == selected.size() * 32);
             verify(selected);
             if (speculative) CHECK(engine->kv.block_table(17, 5) == initial_window);
+            CHECK(engine->kv.window_epoch(17) == initial_window_epoch);
         }
         // Roll back a transaction after GPU restore has completed, before publication.
         session.prepare(backend->stamp(), {0, 3}, {3}, budget(64)); finish(); session.publish();
@@ -401,7 +525,10 @@ int main(int argc, char** argv) {
         // pre-query pages, and changes execution identity. New bytes at reused
         // logical block IDs must never restore an old query's host payload.
         const auto before_rewind = backend->stamp();
+        const auto before_window_epoch = engine->kv.window_epoch(17);
         backend->rewind(128);
+        CHECK(engine->kv.window_epoch(17) == before_window_epoch + (speculative ? 1 : 0));
+        if (speculative) CHECK(engine->kv.window_floor(17) == 128);
         if (speculative) CHECK(engine->kv.block_table(17, 5).empty());
         CHECK(backend->stamp().execution_history == before_rewind.execution_history + 1);
         CHECK(backend->snapshot().blocks.size() == 4);
@@ -463,6 +590,8 @@ int main(int argc, char** argv) {
                 sparse.push_back({g, selected});
             }
             CHECK(kv.publish_full_tables(17, 133, 69, sparse) == RAD_OK);
+            const auto saved_window_first = speculative ? std::max<int64_t>(kv.first_block_pos(17, 5),
+                (133 / kv.plan(5)->block_size - (kv.plan(5)->window_blocks - 1)) * kv.plan(5)->block_size) : 0;
             std::vector<int32_t> prefix(133);
             for (size_t i = 0; i < prefix.size(); ++i) prefix[i] = int32_t(i);
             auto lease = std::make_unique<PrefixLease>(leased_engine, kv, 17, prefix, device, leased_engine->stream);
@@ -478,9 +607,9 @@ int main(int argc, char** argv) {
                 for (const auto& t : sparse) for (auto page : t.blocks) CHECK(kv.block_refcount(t.group, page) == 2);
                 lease->demote(device, leased_engine->stream, 1024 * 1024);
                 if(disk_backed) {
-                    auto storage=std::make_shared<HostKvStorage>(512,std::make_shared<SpillFile>(disk_directory,1024*1024));
+                    auto storage=std::make_shared<HostKvStorage>(std::max<uint64_t>(512,pages.layout().record_bytes),std::make_shared<SpillFile>(disk_directory,1024*1024));
                     lease->park(storage,shared_io);
-                    CHECK(storage->charged_bytes()<=512 && storage->disk_bytes()>0);
+                    CHECK(storage->charged_bytes()<=storage->capacity_bytes() && storage->disk_bytes()>0);
                 }
                 CHECK(lease->host_bytes() > 0);
                 for (const auto& t : sparse) {
@@ -497,7 +626,20 @@ int main(int argc, char** argv) {
             catch (const std::exception&) { refused_prefix = true; }
             CHECK(refused_prefix && kv.seq_tokens(29) == 1);
             lease->restore(kv, 29, next, device, leased_engine->stream);
-            if (speculative) CHECK(kv.block_table(29, 5).empty());
+            if (speculative) {
+                CHECK(!kv.block_table(29, 5).empty());
+                CHECK(kv.first_block_pos(29, 5) == saved_window_first);
+                CHECK(kv.window_epoch(29) == 2 && kv.window_floor(29) == saved_window_first);
+                const auto& p = *kv.plan(5);
+                for (auto page : kv.block_table(29, 5)) {
+                    PageTransfer read(device, p.layer_bytes_per_block(), leased_engine->stream);
+                    read.spill({{5, uint64_t(page) * p.layer_bytes_per_block(), 0,
+                                 uint64_t(p.layer_bytes_per_block())}},
+                               {{5, p.base, uint64_t(p.pool_bytes)}}, leased_engine->stream);
+                    CHECK(read.drain());
+                    for (auto value : read.payload()) CHECK(value == 47);
+                }
+            }
             CHECK(kv.seq_tokens(29) == 133 && !kv.canonical(29));
             for (const auto& t : sparse) {
                 const auto& actual = kv.block_table(29, t.group);
@@ -619,7 +761,7 @@ int main(int argc, char** argv) {
             for(const auto& p:kv.plans())if(p.base && p.pool_bytes)
                 CHECK(rad_memset_async(p.base,61,p.pool_bytes,branched->stream)==RAD_OK);
             CHECK(rad_stream_sync(branched->stream)==RAD_OK);kv.clear_state_clears();
-            auto storage=std::make_shared<HostKvStorage>(disk_backed ? 4096 : 1024*1024,
+            auto storage=std::make_shared<HostKvStorage>(disk_backed ? std::max<uint64_t>(4096,pages.layout().record_bytes) : 1024*1024,
                 disk_backed ? std::make_shared<SpillFile>(disk_directory,1024*1024) : nullptr);
             const MemoryStamp mark{true,{17,333},1,0,128,1};
             std::vector<BlockDescriptor> blocks;
@@ -635,12 +777,22 @@ int main(int argc, char** argv) {
                 }
                 transaction.publish();
             };
-            select_branch(root,{0,3});root->retain_view();const auto root_stamp=root->stamp();
+            select_branch(root,{0,3});const auto root_stamp=root->stamp();
             std::vector<int32_t> prompt(128,7);
-            auto prefix=std::make_unique<PrefixLease>(branched,kv,17,prompt,device,branched->stream);
+            auto capture=root->prefix_capture();
+            auto foreign_capture=capture;foreign_capture.engine_lifetime=std::make_shared<int>(0);
+            bool wrong_owner=false;
+            try {PrefixLease bad(branched,kv,17,prompt,device,branched->stream,AcceptedState{},&foreign_capture);}
+            catch(const std::exception&){wrong_owner=true;}
+            CHECK(wrong_owner && kv.seq_tokens(17)==128);
+            auto prefix=std::make_unique<PrefixLease>(branched,kv,17,prompt,device,branched->stream,AcceptedState{},&capture);
             prefix->demote(device,branched->stream,1024*1024);prefix->park(storage,shared_io);
+            root->refresh_captured();root->retain_view();
+            const auto original_prefix_bytes=prefix->load_cpu().kv;
             const auto charged=storage->charged_bytes()+storage->disk_bytes();
             auto a=root->fork_retained({29,334}),c=root->fork_retained({41,335});
+            CHECK(root->shared_archive_bytes(*a)==root->archive_bytes());
+            CHECK(a->shared_archive_bytes(*c)==root->archive_bytes());
             auto pa=prefix->fork(),pc=prefix->fork();
             CHECK(storage->charged_bytes()+storage->disk_bytes()==charged);
             kv.free_sequence(17);prompt.push_back(9);
@@ -659,6 +811,7 @@ int main(int argc, char** argv) {
             CHECK(refused && kv.seq_tokens(29)==1);
             pa->restore(kv,29,prompt,device,branched->stream,&prepared);a->rebind_sequence(29,true);
             pc->restore(kv,41,prompt,device,branched->stream);c->rebind_sequence(41,true);
+            a->refresh_captured();c->refresh_captured();
             pa.reset();pc.reset();
             for(int g=1;g<=2;++g)for(auto page:kv.block_table(29,g))
                 CHECK(std::find(kv.block_table(41,g).begin(),kv.block_table(41,g).end(),page)==kv.block_table(41,g).end());
@@ -668,7 +821,38 @@ int main(int argc, char** argv) {
             CHECK(kv.ensure(29,145)==RAD_OK);
             a->accept_append(145,{{a->stamp().session,4,128,17,2,2}});
             CHECK(c->stamp()==c_before.stamp && kv.seq_tokens(41)==128);
-            kv.free_sequence(29);a.reset();prefix.reset();root.reset();
+            // Preserve an input checkpoint while a second, later accepted
+            // endpoint gets different recurrent bytes. Restore both after the
+            // producing sequence is gone; neither frontier may borrow the other.
+            for(const auto& p:kv.plans())if(p.stateful())for(int layer=0;layer<p.n_layers;++layer)
+                CHECK(rad_memset_async(kv.state_ptr(p.index,layer,kv.state_slot(29,p.index)),73,
+                    p.layer_bytes_per_state(),branched->stream)==RAD_OK);
+            CHECK(rad_stream_sync(branched->stream)==RAD_OK);
+            std::vector<int32_t> terminal_tokens(145,7);
+            auto next_capture=a->prefix_capture();
+            size_t fresh_bytes=0;
+            for(const auto& b:next_capture.blocks)if(!b.origin->ready())fresh_bytes+=b.origin->size();
+            CHECK(fresh_bytes>0); // partial tail is a private immutable version
+            auto terminal=std::make_unique<PrefixLease>(branched,kv,29,terminal_tokens,device,branched->stream,AcceptedState{},&next_capture);
+            auto oracle=std::make_unique<PrefixLease>(branched,kv,29,terminal_tokens,device,branched->stream);
+            oracle->demote(device,branched->stream,1024*1024);
+            a->retain_view();terminal->demote(device,branched->stream,1024*1024);terminal->park(storage,shared_io);
+            CHECK(terminal->copied_bytes()==fresh_bytes && fresh_bytes<terminal->page_bytes());
+            CHECK(terminal->load_cpu().kv==oracle->load_cpu().kv);
+            CHECK(prefix->load_cpu().kv==original_prefix_bytes);oracle.reset();
+            kv.free_sequence(29);
+            CHECK(kv.add_sequence(53)==RAD_OK && kv.ensure(53,1)==RAD_OK);kv.clear_state_clears();
+            terminal_tokens.push_back(9);terminal->restore(kv,53,terminal_tokens,device,branched->stream);
+            a->rebind_sequence(53,true);CHECK(a->stamp().frontier==145 && c->stamp().frontier==128);
+            for(const auto& p:kv.plans())if(p.stateful())for(int layer=0;layer<p.n_layers;++layer) {
+                const auto* ptr=static_cast<char*>(kv.state_ptr(p.index,layer,kv.state_slot(53,p.index)));
+                PageTransfer read(device,p.layer_bytes_per_state(),branched->stream);
+                read.spill({{p.index,uint64_t(ptr-static_cast<char*>(p.base)),0,uint64_t(p.layer_bytes_per_state())}},
+                    {{p.index,p.base,uint64_t(p.pool_bytes)}},branched->stream);
+                CHECK(read.drain());for(auto byte:read.payload())CHECK(byte==73);
+            }
+            terminal.reset();kv.free_sequence(53);
+            a.reset();prefix.reset();root.reset();
             select_branch(c,{0,3}); // source and sibling no longer exist
             const SessionIdentity expected_branch{41,335};CHECK(c->stamp().session==expected_branch);
             for(const auto& p:kv.plans())if(p.stateful())for(int layer=0;layer<p.n_layers;++layer) {
@@ -692,6 +876,16 @@ int main(int argc, char** argv) {
             for (uint64_t i=0;i<4;++i) blocks.push_back({mark.session,i,i*32,32,1,0});
             auto memory = std::make_shared<NativeMemory>(MemoryBinding{partial_engine,&kv,partial_engine->stream,device,1},
                 partial_engine->infos,BackendIdentity{"radiance","unit","partial","test"},mark,blocks,32,256,1024*1024);
+            // Reusing a logical id/version after Query replay is NOT proof
+            // of equal bytes. Keep the old origins alive to catch stale lookup.
+            const auto original_capture=memory->prefix_capture();
+            memory->rewind(96);
+            CHECK(kv.ensure(17,128)==RAD_OK);
+            memory->accept_append(128,{{mark.session,3,96,32,1,0}});
+            const auto replay_capture=memory->prefix_capture();
+            CHECK(replay_capture.blocks.size()==original_capture.blocks.size());
+            CHECK(replay_capture.blocks.front().origin==original_capture.blocks.front().origin);
+            CHECK(replay_capture.blocks.back().origin!=original_capture.blocks.back().origin);
             memory->rewind(123);
             CHECK(memory->snapshot().blocks.back().block.valid_tokens==27);
             CHECK(memory->snapshot().blocks.back().block.content_version==2);
@@ -731,9 +925,9 @@ int main(int argc, char** argv) {
             StateCheckpoint retained;
             retained.save(continuation.kv, 17, device, continuation.stream);
             if(disk_backed) {
-                auto storage=std::make_shared<HostKvStorage>(512,std::make_shared<SpillFile>(disk_directory,1024*1024));
+                auto storage=std::make_shared<HostKvStorage>(std::max<uint64_t>(512,pages.layout().record_bytes),std::make_shared<SpillFile>(disk_directory,1024*1024));
                 retained.park(storage,shared_io);
-                CHECK(storage->charged_bytes()<=512);
+                CHECK(storage->charged_bytes()<=storage->capacity_bytes());
             }
             bool strict_refused = false, other_engine_refused = false;
             try { retained.restore(continuation.kv, 29, device, continuation.stream); }

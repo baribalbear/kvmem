@@ -1,11 +1,13 @@
 #pragma once
 #include "kvmem/memory_contract.hpp"
 #include "rad_device.h"
+#include "prefix_capture.hpp"
 #include <memory>
 
 namespace rad { class KVManager; struct KVGroupInfo; }
 namespace kvmem { class HostKvStorage; class StorageIoQueue; }
 namespace kvmem::radiance {
+class SharedPayloadAccounting;
 
 // First engine boundary: one rank, FULL attention. Incomplete accepted tail
 // blocks stay resident and unarchived until they close.
@@ -54,6 +56,9 @@ public:
     // Save metadata matching a separately owned PrefixLease. Later bounded
     // prefill may change the live view; no native page/host payload is duplicated.
     void retain_view();
+    PrefixCapture prefix_capture();
+    // Scheduler boundary only. Completed CPU captures become archive aliases.
+    void refresh_captured();
     // Fork only an immutable retained catalog. The caller independently restores
     // its prefix/state before rebind_sequence; no device page references are copied.
     std::shared_ptr<NativeMemory> fork_retained(SessionIdentity branch) const;
@@ -62,6 +67,8 @@ public:
     // Caller proves token/query identity and restores recurrent state first.
     void rebind_sequence(uint64_t sequence, bool relocated_prefix = false);
     uint64_t archive_bytes() const noexcept;
+    void account_archive(SharedPayloadAccounting&) const;
+    uint64_t shared_archive_bytes(const NativeMemory&) const noexcept;
     bool needs_unleased_pages(const std::vector<uint64_t>& selected,
                               const std::vector<uint64_t>& mandatory, const MemoryBudget&) const;
     void invalidate() noexcept override;

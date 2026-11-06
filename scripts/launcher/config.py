@@ -109,15 +109,15 @@ ENGINE_DEFAULTS = {'ninfer': {'Context': 262144,
 ENGINE_DEFAULTS['radiance'] = dict(Backend='radiance', Context=65536, Budget=4096, Reserve=1024,
     HostMiB=8192, SinkTokens=128, RecentTokens=512, Concurrency=1, RetainedSessions=8,
     QueryScorer='page-softmax', ScoreAggregation='mean', GraphAlpha=.2, Lrfu=False,
-    QueryMaxTokens=512, QueryReplayMaxTokens=2048, KvType='fp8', Prefill=512,
+    QueryMaxTokens=512, QueryReplayMaxTokens=2048, KvType='fp8', StateCacheType='f32', Prefill=256,
     SpeculativeMode='none', DraftTokens=0, DraftPolicy='fixed', Vision=False, MaxTokens=0,
     ThinkingMode='default', ThinkingBudget=0, VramReserveMiB=1024,
-    VisionTokens=1024, VisionResidency='resident')
-STRINGS = {'RadianceHome', 'RocmPath', 'Tokenizer','PolystrataSource','Python','VisionWorker','Mmproj','QueryScorer','Backend', 'Model', 'Worker', 'Gpu', 'ListenHost', 'KvType', 'KvTypeK', 'KvTypeV', 'DiskPath',
+    VisionTokens=1024, VisionResidency='resident', EmbeddingPlacement='vram', CpuThreads=2, VisionCacheMiB=256)
+STRINGS = {'StateCacheType', 'EmbeddingPlacement', 'RadianceHome', 'RocmPath', 'Tokenizer','PolystrataSource','Python','VisionWorker','Mmproj','Lora','QueryScorer','Backend', 'Model', 'Worker', 'Gpu', 'ListenHost', 'KvType', 'KvTypeK', 'KvTypeV', 'DiskPath',
            'VisionResidency',
            'DeviceProfile', 'ScoreAggregation', 'QueryScorer', 'ApiKey', 'ModelAlias', 'LogLevel',
            'ChatTemplateFile', 'ThinkingMode', 'ReasoningEffort', 'SpeculativeMode', 'DraftPolicy', 'DraftModel'}
-INTEGERS = {'BlockTokens', 'VramReserveMiB', 'Context', 'Budget', 'Reserve', 'HostMiB', 'Prefill', 'MaxTokens', 'Port',
+INTEGERS = {'CpuThreads', 'VisionCacheMiB', 'BlockTokens', 'VramReserveMiB', 'Context', 'Budget', 'Reserve', 'HostMiB', 'Prefill', 'MaxTokens', 'Port',
             'MtpDrafts', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions',
             'VisionTokens', 'ThinkingBudget', 'SinkTokens', 'RecentTokens', 'DiskMiB', 'DraftTokens',
             'QueryMaxTokens', 'QueryReplayMaxTokens', 'ReplayMaxTokens', 'CheckpointExtraRecomputeTokens'}
@@ -142,12 +142,18 @@ def normalize(data, backends):
     params = data.get('parameters')
     if not isinstance(params, dict):
         raise ValueError('parameters must be an object')
-    allowed = STRINGS | INTEGERS | BOOLEANS | DECIMALS | {'StageLayers', 'TensorSplit', 'WorkerArgs'}
+    allowed = STRINGS | INTEGERS | BOOLEANS | DECIMALS | {'LoraScale', 'StageLayers', 'TensorSplit', 'WorkerArgs'}
     if set(params) - allowed:
         raise ValueError('Unknown parameters: ' + ', '.join(sorted(set(params) - allowed)))
     p = copy.deepcopy(params)
     if p.get('Backend') not in NATIVE or p.get('Backend') not in backends:
         raise ValueError('This backend is not installed in the selected backend checkout')
+    if {'Lora', 'LoraScale'} & p.keys() and p['Backend'] != 'llamacpp':
+        raise ValueError('Lora configures llama.cpp only')
+    if 'LoraScale' in p:
+        scale = p['LoraScale']
+        if not p.get('Lora') or type(scale) not in (int, float) or not -3.4028234663852886e38 <= scale <= 3.4028234663852886e38:
+            raise ValueError('LoraScale requires Lora and a finite float scale')
     if p['Backend'] == 'polystrata':
         p.setdefault('BlockTokens', 32)
         if type(p['BlockTokens']) is not int or p['BlockTokens'] not in (32, 64):
@@ -185,6 +191,8 @@ def normalize(data, backends):
     for key in ('QueryMaxTokens', 'QueryReplayMaxTokens'):
         if key in p and p[key] <= 0:
             raise ValueError(f'{key} must be positive')
+    if p['Backend'] != 'radiance' and {'CpuThreads','VisionCacheMiB'} & p.keys():
+        raise ValueError('CpuThreads and VisionCacheMiB currently configure Radiance only')
     if 'CheckpointExtraRecomputeTokens' in p and p['Backend'] != 'ninfer':
         raise ValueError('CheckpointExtraRecomputeTokens configures NInfer only')
     history = p.get('Lrfu', p.get('QueryScorer') == 'meanq-cosine')
@@ -253,7 +261,7 @@ def normalize(data, backends):
             if draft and (Path(draft).suffix.lower() != '.gguf' or not Path(draft).is_file()):
                 raise ValueError('DraftModel must be an existing GGUF file')
     if p['Backend']=='polystrata':
-        if p.get('KvType','f16') not in {'f16','q8_0'}: raise ValueError('PolyStrata KV format must be f16 or q8_0')
+        if p.get('KvType','f16') not in {'f16','q8_0','int8','int8k'}: raise ValueError('PolyStrata KV: Qwen supports f16/q8_0; Gemma supports f16/int8/int8k')
         if ',' in p.get('Gpu',''): raise ValueError('PolyStrata currently supports one GPU')
         if p.get('ReasoningEffort') not in (None,'none','low','medium','high','xhigh'): raise ValueError('PolyStrata reasoning effort must be none, low, medium or high')
         if p.get('ThinkingMode')=='on' and p.get('ReasoningEffort')=='none': raise ValueError('ThinkingMode conflicts with ReasoningEffort none')

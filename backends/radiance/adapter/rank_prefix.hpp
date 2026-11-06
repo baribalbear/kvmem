@@ -16,6 +16,7 @@ class RankPrefix {
         if(b>UINT64_MAX-a)throw std::runtime_error("rank prefix size overflow");return a+b;
     }
 public:
+    void account(SharedPayloadAccounting& out) const {for(const auto& r:ranks_)r.lease->account(out);}
     struct Payload {std::vector<PrefixLease::Payload> ranks;};
     void add_rank(int device,RadStream stream,rad::KVManager& kv,std::unique_ptr<PrefixLease> lease) {
         if(!lease || (!ranks_.empty() && lease->frontier()!=frontier()))throw std::runtime_error("rank prefix frontiers differ");
@@ -29,6 +30,9 @@ public:
     size_t frontier() const {if(ranks_.empty())throw std::runtime_error("empty rank prefix");return ranks_[0].lease->frontier();}
     uint64_t host_bytes() const {uint64_t n=0;for(const auto& r:ranks_)n=add(n,r.lease->host_bytes());return n;}
     uint64_t state_bytes() const {uint64_t n=0;for(const auto& r:ranks_)n=add(n,r.lease->state_bytes());return n;}
+    uint64_t metadata_bytes() const {uint64_t n=0;for(const auto& r:ranks_)n=add(n,r.lease->metadata_bytes());return n;}
+    uint64_t staging_bytes() const {uint64_t n=0;for(const auto& r:ranks_)n=add(n,r.lease->staging_bytes());return n;}
+    uint64_t copied_bytes() const {uint64_t n=0;for(const auto& r:ranks_)n=add(n,r.lease->copied_bytes());return n;}
     uint64_t page_bytes() const {uint64_t n=0;for(const auto& r:ranks_)n=add(n,r.lease->page_bytes());return n;}
     Payload load_cpu() const {
         Payload out;for(const auto& r:ranks_)out.ranks.push_back(r.lease->load_cpu());return out;
@@ -52,18 +56,24 @@ public:
     }
 };
 class RankCheckpoint {
-    struct Item {int device;RadStream stream;rad::KVManager* kv;StateCheckpoint state;};
+    struct Item {int device;RadStream stream;rad::KVManager* kv;StateCheckpoint state;WindowCheckpoint window;};
     std::vector<Item> ranks_;
 public:
-    void save_rank(rad::KVManager& kv,uint64_t sequence,int device,RadStream stream) {
-        Item item{device,stream,&kv,{}};item.state.save(kv,sequence,device,stream);ranks_.push_back(std::move(item));
+    void save_rank(rad::KVManager& kv,uint64_t sequence,int device,RadStream stream,int64_t frontier) {
+        Item item{device,stream,&kv,{},{}};
+        item.state.save(kv,sequence,device,stream);
+        item.window.save(kv,sequence,frontier,device,stream);
+        ranks_.push_back(std::move(item));
     }
     void restore(uint64_t sequence) const {
-        for(const auto& r:ranks_)r.state.restore(*r.kv,sequence,r.device,r.stream);
+        for(const auto& r:ranks_) {
+            r.state.restore(*r.kv,sequence,r.device,r.stream);
+            r.window.restore(*r.kv,sequence,r.device,r.stream);
+        }
     }
     uint64_t bytes() const {
         uint64_t total=0;for(const auto& r:ranks_) {
-            const auto bytes=r.state.bytes();if(bytes>UINT64_MAX-total)throw std::runtime_error("rank checkpoint size overflow");total+=bytes;
+            const auto bytes=r.state.bytes()+r.window.bytes();if(bytes>UINT64_MAX-total)throw std::runtime_error("rank checkpoint size overflow");total+=bytes;
         }return total;
     }
 };

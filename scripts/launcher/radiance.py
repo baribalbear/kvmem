@@ -5,6 +5,15 @@ from pathlib import Path
 import json
 
 
+def draft_selection(model, mode, depth):
+    import importlib.util
+    tools=Path(__file__).resolve().parents[2]/'backends/radiance/tools'
+    # Use the same container checks as the standalone Radiance launch tools.
+    spec=importlib.util.spec_from_file_location('radiance_draft_control',tools/'draft_control.py')
+    reader=importlib.util.module_from_spec(spec);spec.loader.exec_module(reader)
+    return reader.resolve(Path(model), 'dflash' if mode=='dflash2' else mode, depth)
+
+
 def vision_geometry(model):
     import importlib.util
     source=Path(__file__).resolve().parents[2]/'backends/radiance/tools/inspect_rad.py'
@@ -44,9 +53,11 @@ def build_radiance_plan(supplied, root, platform, reveal_secrets, capability):
         raise ValueError('Radiance requires one or two distinct AMD GPUs by ROCr UUID')
     if p.get('StageLayers') or p.get('FastPrefill') or p.get('DeviceProfile','off')!='off':
         raise ValueError('Radiance does not implement NInfer layer splitting or CUDA fast-prefill/device profiles')
+    if p['EmbeddingPlacement'] not in ('ram','vram'):
+        raise ValueError('Radiance EmbeddingPlacement must be ram or vram')
     if p.get('Vision'):
-        if p.get('VisionResidency')!='resident':
-            raise ValueError('Radiance native vision currently requires GPU-resident encoder weights')
+        if p.get('VisionResidency') not in ('resident','cpu'):
+            raise ValueError('Radiance VisionResidency must be resident or cpu')
         if not 64<=p['VisionTokens']<=16384:raise ValueError('VisionTokens must be in [64,16384]')
     p.setdefault('DiskMiB',4096)
     if not 0<=p['DiskMiB']<=1048576:
@@ -57,18 +68,25 @@ def build_radiance_plan(supplied, root, platform, reveal_secrets, capability):
         raise ValueError('SSD storage requires a nonempty DiskPath')
     if p.get('NgramDrafts'):
         raise ValueError('Radiance KVMem n-gram drafts are not implemented yet')
-    for key,low,high in [('Context',256,2147483647),('Budget',256,2147483647),('Reserve',256,2147483647),
+    for key,low,high in [('CpuThreads',1,256),('VisionCacheMiB',0,65536),('Context',256,2147483647),('Budget',256,2147483647),('Reserve',256,2147483647),
         ('HostMiB',1,1048576),('Prefill',1,2147483647),('Concurrency',1,8),('RetainedSessions',0,1024),
         ('VramReserveMiB',256,65536)]:
         if not low<=p[key]<=high:raise ValueError(f'{key} must be in [{low},{high}]')
-    if p.get('KvType') not in ('fp8','bf16'):
-        raise ValueError('Radiance KV format must be fp8 or bf16')
+    if p.get('KvType') not in ('fp8','bf16','fp8_v4','k6_v4'):
+        raise ValueError('Radiance KV format must be fp8, bf16, fp8_v4 or k6_v4')
+    if p.get('StateCacheType','f32') not in ('f32','f16'):
+        raise ValueError('Radiance recurrent state format must be f32 or f16')
     tokens=token_settings('radiance',p);p.update(tokens['effective'])
-    _speculative(p,supplied)
     suffix='.exe' if platform=='windows' else ''
     p['Worker']=_existing_file(p['Worker'] or root/'workers/radiance'/('radiance-kvmem-server'+suffix),'Worker')
     p['Model']=_existing_file(p['Model'],'Model')
     if Path(p['Model']).suffix.lower()!='.rad':raise ValueError('Radiance requires a .rad model')
+    mode=p['SpeculativeMode']
+    if mode in ('mtp','dflash2'):
+        explicit_depth=p['DraftTokens'] if {'DraftTokens','MtpDrafts'} & supplied.keys() else None
+        selection=draft_selection(p['Model'],mode,explicit_depth)
+        p['DraftTokens']=selection['depth']
+    _speculative(p,supplied)
     if platform=='linux' and os.name!='nt' and not os.access(p['Worker'],os.X_OK):
         raise ValueError('Worker is not executable')
     home=Path(p.get('RadianceHome') or Path(p['Worker']).parent/'radiance_home').resolve()
@@ -82,12 +100,14 @@ def build_radiance_plan(supplied, root, platform, reveal_secrets, capability):
         ('--max-model-len','Context'),('--max-num-seqs','Concurrency'),('--max-num-batched-tokens','Prefill'),
         ('--kvmem-budget','Budget'),('--kvmem-gen-reserve','Reserve'),('--kvmem-host-mib','HostMiB'),
         ('--kvmem-sink-tokens','SinkTokens'),('--kvmem-recent-tokens','RecentTokens'),('--kvmem-sessions','RetainedSessions'),
-        ('--kv-cache-dtype','KvType'),('--gpu-headroom-mib','VramReserveMiB'),('--num-speculative-tokens','MtpDrafts')]:pair(flag,p[key])
-    argv+=['--tp',str(len(gpu_ids)),'--tp-wire','exact','--no-prefix-cache','--host-pool-mib','0','--prefix-cache-host-mib','0',
-           '--placement','all_vram','--embedding-placement','vram',
+        ('--kv-cache-dtype','KvType'),('--state-cache-dtype','StateCacheType'),('--gpu-headroom-mib','VramReserveMiB'),('--num-speculative-tokens','MtpDrafts')]:pair(flag,p[key])
+    argv+=['--tp',str(len(gpu_ids)),'--tp-wire','exact','--no-prefix-cache','--host-pool-mib','0','--prefix-cache-mib','0',
+           '--placement','all_vram','--embedding-placement',p['EmbeddingPlacement'],
            '--draft-window',p['DraftPolicy'],'--kvmem','--kvmem-block-tokens','128']
+    pair('--kvmem-drafter','off' if mode=='none' else mode)
     if p.get('Vision'):
         patch,merge=vision_geometry(p['Model'])
+        pair('--vision-residency',p['VisionResidency'])
         pair('--mm-max-patches',p['VisionTokens']*merge*merge)
         pair('--image-max-pixels',p['VisionTokens']*(patch*merge)**2)
     else:pair('--mm-max-patches',0)
@@ -109,7 +129,7 @@ def build_radiance_plan(supplied, root, platform, reveal_secrets, capability):
     elif level!='info':raise ValueError('Radiance LogLevel currently supports info, debug or trace')
     argv+=scoring_args(supplied)+p.get('WorkerArgs',[])
     env={'ROCR_VISIBLE_DEVICES':p['Gpu'],'HIP_VISIBLE_DEVICES':','.join(str(i) for i in range(len(gpu_ids))),
-         'KVMEM_RAD_MTP_HEAD':'shared','OMP_NUM_THREADS':'2'}
+         'KVMEM_RAD_MTP_HEAD':'shared','OMP_NUM_THREADS':str(p['CpuThreads']),'KVMEM_RAD_VISION_CACHE_MIB':str(p['VisionCacheMiB'])}
     if p.get('RocmPath'):
         rocm=Path(p['RocmPath']).resolve()
         runtime=rocm/('bin/amdhip64_7.dll' if platform=='windows' else 'lib/libamdhip64.so')

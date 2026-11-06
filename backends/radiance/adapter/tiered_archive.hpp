@@ -1,5 +1,6 @@
 #pragma once
 #include "kvmem/native_kv_payload.hpp"
+#include "shared_payload_accounting.hpp"
 #include "kvmem/host_kv_storage.hpp"
 #include <cstring>
 #include <map>
@@ -78,6 +79,13 @@ public:
         }
     }
     std::shared_ptr<HostKvStorage> storage() const noexcept { return storage_; }
+    // Native-proven capture in this exact layout: no copy or extra charge.
+    void import(const BlockDescriptor& block,const HostKvRecord& record) {
+        if(record.size()!=layout_.record_bytes)
+            fail(MemoryErrorCode::InvalidPlan,"captured archive layout size differs");
+        Prepared next;next.backend=backend_;next.layout=layout_;next.block=block;
+        next.record=record.fork();publish(std::move(next));
+    }
     TieredArchive fork(SessionIdentity branch,const MemorySnapshot& snapshot) const {
         if(branch==session_)fail(MemoryErrorCode::InvalidPlan,"archive branch needs a distinct session identity");
         TieredArchive next(backend_,branch,layout_,capacity_,storage_);
@@ -142,6 +150,20 @@ public:
     }
     void erase(uint64_t id) { if(entries_.erase(id))bytes_-=layout_.record_bytes; }
     uint64_t bytes() const noexcept { return bytes_; }
+    void account(SharedPayloadAccounting& out) const {
+        for(const auto& [id,entry]:entries_)out.add(entry.record.storage_identity(),entry.record.size());
+    }
+    // Only identical sealed allocations are aliases. Equal logical block IDs
+    // or equal byte counts do not prove shared storage after a branch changes.
+    uint64_t shared_bytes(const TieredArchive& other) const noexcept {
+        uint64_t shared = 0;
+        for (const auto& [id, entry] : entries_) {
+            const auto it = other.entries_.find(id);
+            if (it != other.entries_.end() && entry.record.storage_identity() == it->second.record.storage_identity())
+                shared += entry.record.size();
+        }
+        return shared;
+    }
     const PayloadLayout& layout() const noexcept { return layout_; }
 };
 } // namespace kvmem::radiance
