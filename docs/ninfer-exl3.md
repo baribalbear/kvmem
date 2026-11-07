@@ -114,5 +114,5 @@ git write-tree
 Update the `exl3` entry's `sha256` and `after_tree` and the backend's `patched_tree` in
 `backends/versions.json`.
 
-After an upstream NInfer change, `scripts/rebase-ninfer-exl3.py` re-appends the patch; see
+After an upstream NInfer change, `scripts/rebase-ninfer-fork-patches.py` re-appends the patch; see
 [upstream-sync.md](upstream-sync.md).

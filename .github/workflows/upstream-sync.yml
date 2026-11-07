@@ -3,8 +3,8 @@ name: Upstream sync
 # Merges kvmem/kvmem master into this fork's master on the sync/upstream branch and opens (or
 # updates) a pull request into master. The merge is checked first: every backend patch series must
 # apply and reproduce its recorded trees, which is what an upstream NInfer change breaks for the
-# fork's EXL3 patch (see docs/upstream-sync.md). When upstream only adds or regenerates NInfer
-# patches, scripts/rebase-ninfer-exl3.py re-appends the EXL3 patch with a three-way apply and the
+# fork's NInfer patches (see docs/upstream-sync.md). When upstream only adds or regenerates NInfer
+# patches, scripts/rebase-ninfer-fork-patches.py re-appends them with a three-way apply and the
 # merge goes ahead. A failed run means the pull request needs work.
 #
 # GITHUB_TOKEN cannot push commits that change .github/workflows, and pull requests it opens do not
@@ -57,22 +57,21 @@ jobs:
           git log --oneline "HEAD..$upstream" > upstream-commits.txt
           git checkout -B "$BRANCH"
           previous=$(git rev-parse HEAD)
-          # Re-append the EXL3 patch to upstream's NInfer series (scripts/rebase-ninfer-exl3.py).
-          rebase_exl3() {
-            python scripts/rebase-ninfer-exl3.py --previous "$previous" > exl3.log 2>&1 || {
-              cat exl3.log; return 1; }
-            cat exl3.log
-            git add backends/versions.json backends/patches/ninfer-exl3.patch \
-              scripts/model_health_ninfer/PROVENANCE.json
+          # Re-append the fork's patches to upstream's NInfer series (scripts/rebase-ninfer-fork-patches.py).
+          rebase_fork_patches() {
+            python scripts/rebase-ninfer-fork-patches.py --previous "$previous" > fork-patches.log 2>&1 || {
+              cat fork-patches.log; return 1; }
+            cat fork-patches.log
+            git add backends/versions.json backends/patches scripts/model_health_ninfer/PROVENANCE.json
           }
           if git merge --no-ff --no-edit -m "Merge kvmem/kvmem master (${upstream:0:7})" "$upstream"; then
-            # A clean merge can still leave the EXL3 entry behind a changed upstream series.
+            # A clean merge can still leave the fork's entries behind a changed upstream series.
             if ! git diff --quiet "$previous" HEAD -- backends/versions.json; then
-              if rebase_exl3; then
+              if rebase_fork_patches; then
                 git diff --cached --quiet || git commit --amend --no-edit
-                echo "exl3=rebased" >> "$GITHUB_OUTPUT"
+                echo "fork_patches=rebased" >> "$GITHUB_OUTPUT"
               else
-                echo "exl3=failed" >> "$GITHUB_OUTPUT"
+                echo "fork_patches=failed" >> "$GITHUB_OUTPUT"
               fi
             fi
             echo "state=merged" >> "$GITHUB_OUTPUT"
@@ -80,12 +79,12 @@ jobs:
             git diff --name-only --diff-filter=U > conflicts.txt
             # Upstream adding or regenerating NInfer patches conflicts only in versions.json.
             if [ "$(cat conflicts.txt)" = backends/versions.json ] &&
-               git checkout --theirs backends/versions.json && rebase_exl3; then
+               git checkout --theirs backends/versions.json && rebase_fork_patches; then
               git commit --no-edit
-              echo "exl3=rebased" >> "$GITHUB_OUTPUT"
+              echo "fork_patches=rebased" >> "$GITHUB_OUTPUT"
               echo "state=merged" >> "$GITHUB_OUTPUT"
             else
-              [ -s exl3.log ] && echo "exl3=failed" >> "$GITHUB_OUTPUT"
+              [ -s fork-patches.log ] && echo "fork_patches=failed" >> "$GITHUB_OUTPUT"
               git merge --abort
               # Offer upstream itself; the pull request then shows the conflicts to resolve.
               git checkout -B "$BRANCH" "$upstream"
@@ -129,7 +128,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
           STATE: ${{ steps.merge.outputs.state }}
-          EXL3: ${{ steps.merge.outputs.exl3 }}
+          FORK_PATCHES: ${{ steps.merge.outputs.fork_patches }}
           CHECK: ${{ steps.check.outcome }}
           UPSTREAM_SHA: ${{ steps.merge.outputs.upstream }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -138,22 +137,22 @@ jobs:
           {
             echo "Merges [kvmem/kvmem master](https://github.com/kvmem/kvmem/commit/$UPSTREAM_SHA) (\`${UPSTREAM_SHA:0:7}\`) into master."
             echo
-            if [ "$EXL3" = failed ]; then
-              echo "**The EXL3 patch could not be re-appended automatically:**"
-              echo; echo '```'; tail -n 40 exl3.log; echo '```'; echo
-            elif [ "$EXL3" = rebased ]; then
-              echo "Upstream's NInfer series changed; the EXL3 patch was re-appended automatically: $(tail -n 1 exl3.log)"
-              echo
+            if [ "$FORK_PATCHES" = failed ]; then
+              echo "**The fork's NInfer patches could not be re-appended automatically:**"
+              echo; echo '```'; tail -n 40 fork-patches.log; echo '```'; echo
+            elif [ "$FORK_PATCHES" = rebased ]; then
+              echo "Upstream's NInfer series changed; the fork's patches were re-appended automatically:"
+              echo; sed 's/^/- /' fork-patches.log; echo
             fi
             if [ "$STATE" = conflict ]; then
               echo "**The merge conflicts.** This branch is upstream itself; resolve these files against master:"
               echo; sed 's/^/- `/; s/$/`/' conflicts.txt
               echo
-              echo "If \`backends/versions.json\` or a NInfer patch conflicts, regenerate the EXL3 patch as described in docs/upstream-sync.md."
+              echo "If \`backends/versions.json\` or a NInfer patch conflicts, regenerate the fork's NInfer patches as described in docs/upstream-sync.md."
             elif [ "$CHECK" = success ]; then
               echo "The merge is clean. Every backend patch series applies and reproduces its recorded trees, and the Python tests pass."
             else
-              echo "**The merge is clean, but the checks failed.** Usually an upstream NInfer change means the EXL3 patch must be regenerated; see docs/upstream-sync.md."
+              echo "**The merge is clean, but the checks failed.** Usually an upstream NInfer change means a fork NInfer patch must be regenerated; see docs/upstream-sync.md."
               echo; echo '```'; tail -n 40 check.log; echo '```'
             fi
             echo

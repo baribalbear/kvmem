@@ -1,0 +1,151 @@
+diff --git a/src/ops/linear/gguf/gguf_linear.cpp b/src/ops/linear/gguf/gguf_linear.cpp
+index 780a936f10a6025e619ee87adbe9cd1dfdf621aa..bb237cd0ffaae2a51e16804712c18c5cd44edf58 100644
+--- a/src/ops/linear/gguf/gguf_linear.cpp
++++ b/src/ops/linear/gguf/gguf_linear.cpp
+@@ -112,7 +112,14 @@ std::int64_t row_bytes(const Weight& w) {
+     return std::int64_t(w.k / block.elements) * block.bytes;
+ }
+ 
+-bool matrix_kernel(const Weight& w) { return gguf::has_matrix_kernel(gguf_type(w.qtype)); }
++// The integer matrix kernel tiles whole 128-row blocks (ggml_bridge_mmq.cuh). Another row count,
++// such as a vocabulary-pruned output head, takes the routes of a type without that kernel: the
++// vector kernel up to kDequantizedVectorColumns columns, then dequantize and GEMM.
++bool matrix_kernel(gguf::GgmlType type, std::int64_t rows) {
++    return gguf::has_matrix_kernel(type) && rows % 128 == 0;
++}
++
++bool matrix_kernel(const Weight& w) { return matrix_kernel(gguf_type(w.qtype), w.n); }
+ 
+ gguf::Epilogue bridge_epilogue(GgufEpilogue epilogue) {
+     switch (epilogue) {
+@@ -310,7 +317,7 @@ static std::size_t gguf_project_workspace_impl(std::span<const GgufShape> shapes
+             throw std::invalid_argument("gguf workspace: unsupported product geometry");
+         }
+         const auto type = gguf_type(shape.qtype);
+-        if (gguf::has_matrix_kernel(type)) {
++        if (matrix_kernel(type, shape.rows)) {
+             const int layout = gguf::matrix_activation_layout(type);
+             if (std::find(layouts.begin(), layouts.end(), layout) == layouts.end()) {
+                 layouts.push_back(layout);
+@@ -354,8 +361,8 @@ static std::size_t gguf_project_workspace_impl(std::span<const GgufShape> shapes
+                     choices.push_back(r);
+                     if (r.q8 || r.lt) plane_rows=std::max(plane_rows,std::size_t(shape.rows));
+                     if (r.q8) {
+-                        fixup |= gguf::has_matrix_kernel(gguf_type(shape.qtype));
+-                        decode |= !gguf::has_matrix_kernel(gguf_type(shape.qtype));
++                        fixup |= matrix_kernel(gguf_type(shape.qtype), shape.rows);
++                        decode |= !matrix_kernel(gguf_type(shape.qtype), shape.rows);
+                     }
+                     // The public capacity query has no output pointer. Even a
+                     // whole-BF16 shape needs the FP32 fallback when its base
+@@ -375,9 +382,10 @@ static std::size_t gguf_project_workspace_impl(std::span<const GgufShape> shapes
+                     const auto r=choices[i];
+                     if (r.tile) (void)layout.alloc_bytes(gguf::mxfp8::tile_activation_bytes(k,t));
+                     if (r.lt) (void)layout.alloc_bytes(gguf::mxfp8::activation_bytes(k,t));
+-                    if (r.q8 && gguf::has_matrix_kernel(type))
++                    const bool matrix=matrix_kernel(type,shapes[i].rows);
++                    if (r.q8 && matrix)
+                         (void)layout.alloc_bytes(gguf::matrix_activation_bytes(gguf::matrix_padded_k(k),t));
+-                    if (r.q8 && !gguf::has_matrix_kernel(type) && t>kDequantizedVectorColumns)
++                    if (r.q8 && !matrix && t>kDequantizedVectorColumns)
+                         (void)layout.alloc_bytes(std::size_t(k)*t*2);
+                 }
+             }
+@@ -611,7 +619,7 @@ void gguf_project(const Tensor& x, std::span<const GgufProduct> products,
+             if(!direct)gguf::store_plane(plane,w.n,w.n,t,output(p,0),stream);
+             continue;
+         }
+-        if (gguf::has_matrix_kernel(type)) {
++        if (matrix_kernel(w)) {
+             const int layout = gguf::matrix_activation_layout(type);
+             auto found = std::find_if(activations.begin(), activations.end(), [&](const Activation& a) {
+                 return a.layout == layout && a.columns == w.input_columns;
+diff --git a/tests/ops/linear/test_gguf.cpp b/tests/ops/linear/test_gguf.cpp
+index 8566abb65405dfa221ffb5186865d18e2f3ea5b9..745ffc4460470ed02bebe8be8fe692af056c9667 100644
+--- a/tests/ops/linear/test_gguf.cpp
++++ b/tests/ops/linear/test_gguf.cpp
+@@ -390,6 +390,68 @@ int run_type(const TypeCase& c, std::uint32_t seed, std::int32_t k,
+ // device (`--embedding-residency host`), at the Qwen3.8-27B width: the rows must be bit for bit the
+ // ones the same gather reads from a device copy, which are the exact weights rounded to BF16, in a
+ // direct launch and in a replayed CUDA graph. `vocabulary` rows tile a random 4096-row block.
++// A row count that is no whole number of the matrix kernel's 128-row tiles, as a vocabulary-pruned
++// output head has (129006 rows), over widths past the vector kernel's 8 columns and the dequantized
++// vector loop's 64: such a matrix takes the routes of a type without the matrix kernel.
++int run_ragged_rows(const TypeCase& c, std::uint32_t seed) {
++    constexpr std::int32_t kRows = 200, kK = 1536;
++    std::mt19937 rng(seed);
++    const auto host_blocks = random_blocks(c, kRows, kK, rng);
++    DeviceBuffer blocks(host_blocks.size() + 4096);
++    blocks.fill(0);
++    blocks.copy_from_host(host_blocks.data(), host_blocks.size());
++    const auto block             = gguf_block_shape(c.qtype);
++    const std::int64_t row_bytes = std::int64_t(kK / block.elements) * block.bytes;
++    const Weight w               = gguf_weight(c.qtype, blocks.p, kRows, kK);
++
++    DeviceBuffer exact_device(std::size_t(kRows) * kK * sizeof(float));
++    ops::gguf::dequantize_rows(ops::detail::gguf_type(c.qtype), blocks.p, row_bytes, kK, nullptr,
++                               kRows, static_cast<float*>(exact_device.p), kK, nullptr);
++    check(cudaDeviceSynchronize(), "dequantize");
++    std::vector<float> exact(std::size_t(kRows) * kK);
++    exact_device.copy_to_host(exact.data(), exact.size() * sizeof(float));
++
++    const std::vector<std::int32_t> widths{4, 9, 35, 64, 65, 130};
++    const std::int32_t max_t = widths.back();
++    std::normal_distribution<float> normal(0.0f, 1.0f);
++    std::vector<__nv_bfloat16> x_host(std::size_t(kK) * max_t);
++    for (auto& v : x_host) { v = __float2bfloat16(normal(rng)); }
++    const auto x_float = to_float(x_host);
++    DeviceBuffer x_device(x_host.size() * sizeof(__nv_bfloat16));
++    x_device.copy_from_host(x_host.data(), x_host.size() * sizeof(__nv_bfloat16));
++    WorkspaceArena workspace(ops::linear_workspace_capacity_bytes(
++                                 c.qtype, kRows, kK, ops::LinearPolicy::A16Only, 1, max_t) +
++                             (1U << 20));
++
++    int failures = 0;
++    for (const std::int32_t t : widths) {
++        Tensor x(x_device.p, DType::BF16, {kK, t});
++        DeviceBuffer out_device(std::size_t(kRows) * t * sizeof(float));
++        Tensor out(out_device.p, DType::FP32, {kRows, t});
++        ops::linear(x, w, out, ops::LinearPolicy::A16Only, workspace, nullptr);
++        check(cudaDeviceSynchronize(), "ragged linear");
++        std::vector<float> got(std::size_t(kRows) * t);
++        out_device.copy_to_host(got.data(), got.size() * sizeof(float));
++        std::vector<double> want(got.size());
++        for (std::int32_t col = 0; col < t; ++col) {
++            for (std::int32_t r = 0; r < kRows; ++r) {
++                double acc = 0;
++                for (std::int32_t i = 0; i < kK; ++i) {
++                    acc += double(exact[std::size_t(r) * kK + i]) * x_float[std::size_t(col) * kK + i];
++                }
++                want[std::size_t(col) * kRows + r] = acc;
++            }
++        }
++        const Error e = compare(got, want);
++        if (e.relative_rms >= 2e-2 || e.relative_max >= 8e-2) {
++            std::cerr << "FAIL " << c.name << " ragged rows T=" << t << " rms=" << e.relative_rms
++                      << " max=" << e.relative_max << '\n';
++            ++failures;
++        }
++    }
++    return failures;
++}
++
+ int run_mapped_table(const TypeCase& c, std::uint32_t seed, std::int32_t vocabulary) {
+     constexpr std::int32_t kK       = 5120;
+     constexpr std::int32_t kDistinct = 4096;
+@@ -625,6 +687,15 @@ int main(int argc, char** argv) {
+                 }
+             }
+         }
++        for (const auto& c : cases()) {
++            if (c.qtype != QType::GGUF_Q6_K && c.qtype != QType::GGUF_Q8_0 &&
++                c.qtype != QType::GGUF_IQ4_XS) {
++                continue;
++            }
++            const int f = run_ragged_rows(c, seed++);
++            std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name << " ragged rows\n";
++            failures += f;
++        }
+         // The local Qwen3.8-27B artifact's IQ2_S table at its full vocabulary; the other formats
+         // a 27B GGUF conversion may store its table in, over a smaller one.
+         for (const auto& c : cases()) {

@@ -62,6 +62,12 @@ a `.ninfer` artifact for kvmem's NInfer backend.
 MTP uses the coupled acceptance path, which takes the token count from the tokenizer, and the
 troed GGUF includes the MTP block (`blk.64.nextn.*`).
 
+The pruned output head has 129,006 rows, no multiple of the GGUF matrix kernel's 128-row tiles.
+Upstream NInfer sends a product wider than 8 columns to that kernel, so a verify batch with n-gram
+drafts (`-NgramDrafts 31` with MTP 3) stopped startup with `gguf matrix product: unsupported
+geometry`. The fork's `gguf-ragged-rows` NInfer patch sends such a matrix to the vector kernel up to
+64 columns and to dequantize-and-GEMM beyond, so n-gram drafts work on pruned models.
+
 ## What `scripts/build-pruned-vocab-resources.py` does
 
 * Maps every GGUF token string to its id in the base `tokenizer.json`. It fails if a token is
