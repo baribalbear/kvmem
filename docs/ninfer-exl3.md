@@ -75,7 +75,7 @@ artifact writer (`tensor_output.py`) and Flash-Next expert offload (`ops/offload
 
 Done without a GPU:
 
-* `prepare-backends.py`'s `verify_patch_series` replays all 28 NInfer patches from the base commit
+* `prepare-backends.py`'s `verify_patch_series` replays all 45 NInfer patches from the base commit
   and reproduces every recorded tree.
 * `tests/artifact/test_exl3_layout.py`: 26 passed. The existing CPU-only artifact tests still pass.
 * `tests/test_model_health.py`: 24 passed.
@@ -102,11 +102,11 @@ this NInfer worker.
 ## Regenerating the patch
 
 Apply the series in `backends/ninfer`, edit, then diff against the tree the previous patch
-(`input-reuse`) produces, not against `HEAD`, which is the upstream base:
+(`span-construction`) produces, not against `HEAD`, which is the upstream base:
 
 ```bash
 git add -A
-git diff --cached --full-index 1e7a5d621c341f2c257b81b9a5632dd19b17b07f > ../patches/ninfer-exl3.patch
+git diff --cached --full-index 311f51f5a2e4951ea95bccfe157f6d3e147d27c6 > ../patches/ninfer-exl3.patch
 git write-tree
 ```
 

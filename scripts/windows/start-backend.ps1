@@ -9,6 +9,8 @@ param(
     [string]$Python,
     [string]$VisionWorker,
     [string]$Mmproj,
+    [string]$Lora,
+    [double]$LoraScale = 1,
     [ValidateRange(256,65536)][int]$VramReserveMiB=256,
     [ValidateRange(1,65536)][int]$ReplayMaxTokens=2048,
     [string]$Gpu = $env:CUDA_VISIBLE_DEVICES,
@@ -112,13 +114,14 @@ if ($Backend -eq 'ninfer') {
 if ($Backend -eq 'polystrata') {
     $capabilities.block_tokens = @{default=32;supported=@(32,64);startup_fixed=$true}
     $capabilities.supported_combinations=@{
-        text=@{architectures=@('qwen35moe');kv=@('f16','q8_0');max_concurrency=8;max_devices=1}
+        text=@{architectures=@('qwen35moe','gemma4');kv=@('f16','q8_0','int8','int8k');max_concurrency=8;max_devices=1}
         mtp=@{drafts=@(0..3);solo=$true;batch=$false;batch_fallback='ordinary_decode'}
         storage=@{scope='process';shared_active_idle_quota=$true;ssd_persistence='process'}
         query=@{scorers=@('page-softmax','meanq-cosine');bounded_replay=$true;tool_continuation='resident_pressure'}
     }
 }
 if ($Describe) { $capabilities | ConvertTo-Json -Depth 4; return }
+if ($Backend -ne 'llamacpp' -and ($Lora -or $PSBoundParameters.ContainsKey('LoraScale'))) { throw 'Lora configures llama.cpp only' }
 if ($Backend -ne 'ninfer' -and $PSBoundParameters.ContainsKey('CheckpointExtraRecomputeTokens')) {
     throw '-CheckpointExtraRecomputeTokens configures NInfer only'
 }
@@ -199,6 +202,7 @@ foreach ($setting in @(
     @('MaxTokens', '^(-n|--n-predict|--predict|--default-max-tokens)(=|$)'),
     @('Vision', '^--(mmproj|mmproj-offload|no-mmproj-offload|mmproj-device|image-max-tokens)(=|$)'),
     @('Mmproj', '^--mmproj(=|$)'),
+    @('Lora', '^--lora(-scale)?(=|$)'),
     @('PreserveThinking', '^--(preserve-thinking|chat-template-kwargs)(=|$)'),
     @('CpuVisionIdleSeconds', '^--cpu-vision-idle-seconds(=|$)'),
     @('Concurrency', '^(-np|--parallel|--max-concurrency)(=|$)')
@@ -206,6 +210,13 @@ foreach ($setting in @(
     if ($PSBoundParameters.ContainsKey($setting[0]) -and @($WorkerArgs | Where-Object { $_ -match $setting[1] }).Count) {
         throw "Use -$($setting[0]) without a conflicting native option in WorkerArgs"
     }
+}
+if ($Lora -or $PSBoundParameters.ContainsKey('LoraScale')) {
+    if (!$Lora -or !(Test-Path -LiteralPath $Lora -PathType Leaf) -or [IO.Path]::GetExtension($Lora) -ne '.gguf') {
+        throw 'Lora requires an existing adapter GGUF'
+    }
+    if ([double]::IsNaN($LoraScale) -or [math]::Abs($LoraScale) -gt [float]::MaxValue) { throw 'LoraScale must be a finite float' }
+    $Lora = (Resolve-Path -LiteralPath $Lora).Path
 }
 if ($ChatTemplateFile) {
     if (!(Test-Path -LiteralPath $ChatTemplateFile -PathType Leaf)) { throw 'ChatTemplateFile must be an existing template file' }
@@ -358,6 +369,9 @@ if ($Backend -eq 'ninfer') {
     if ($PSBoundParameters.ContainsKey('PreserveThinking')) {
         $nativeArgs += @('--chat-template-kwargs', (@{preserve_thinking=[bool]$PreserveThinking} | ConvertTo-Json -Compress))
     }
+    if ($Lora) {
+        $nativeArgs += @('--lora', $Lora, '--lora-scale', $LoraScale.ToString('R', [Globalization.CultureInfo]::InvariantCulture))
+    }
     if ($Vision) {
         if (!$Mmproj) {
             $folder = Split-Path -Parent $Model
@@ -404,7 +418,7 @@ if ($DryRun) {
         ConvertTo-Json -Depth 6
     return
 }
-if ($TensorParallel -or $CheckpointExtraRecomputeTokens -gt 0) {
+if ($Lora -or $TensorParallel -or $CheckpointExtraRecomputeTokens -gt 0) {
     $probeInfo = New-KVMemProcessInfo $Worker @('--kvmem-capabilities')
     $probeInfo.RedirectStandardOutput = $true
     $probeInfo.RedirectStandardError = $true
@@ -419,6 +433,10 @@ if ($TensorParallel -or $CheckpointExtraRecomputeTokens -gt 0) {
         $contract = $stdout.Result | ConvertFrom-Json
         $revision = if ($contract) { $contract.PSObject.Properties['heads_tensor_parallel_revision'] } else { $null }
         if ($probe.ExitCode -ne 0) { throw 'NInfer capability probe failed' }
+        $loraCapability = if ($contract) { $contract.PSObject.Properties['fixed_lora'] } else { $null }
+        if ($Lora -and (!$loraCapability -or $loraCapability.Value -isnot [bool] -or !$loraCapability.Value)) {
+            throw 'Worker does not support fixed LoRA; update the llama.cpp worker'
+        }
         if ($TensorParallel -and (!$revision -or
             ($revision.Value -isnot [int] -and $revision.Value -isnot [long]) -or $revision.Value -lt 1)) {
             throw 'Worker does not support KVMem heads tensor parallelism; update the complete NInfer package'

@@ -5,6 +5,7 @@
 #include "kvmem/native_kv_payload.hpp"
 #include "tiered_archive.hpp"
 #include "storage_work.hpp"
+#include "storage_wait.hpp"
 #include "kvmem/spill_io.hpp"
 #include "mem/kv.h"
 #include <algorithm>
@@ -48,11 +49,22 @@ struct NativeMemory::State {
     uint64_t native_sequence = 0;
     bool pending = false;
     NativeMemory::ReuseStats reuse;
+    struct Captured {
+        uint64_t start, version;
+        uint32_t valid;
+        std::weak_ptr<SealedKvBlock> origin;
+        bool matches(const BlockDescriptor& b) const {
+            return start==b.original_start && version==b.content_version && valid==b.valid_tokens;
+        }
+    };
+    using Captures=std::map<uint64_t,Captured>;
+    Captures captures;
     struct RetainedView {
         MemorySnapshot snapshot;
         Bindings resident;
         std::vector<rad::KVManager::FullTable> tables;
         uint64_t visible;
+        Captures captures;
     };
     std::unique_ptr<RetainedView> retained;
 
@@ -88,10 +100,11 @@ struct NativeMemory::State {
         : binding(source.binding),pages(source.pages),descriptor(source.descriptor),
           current(source.retained->snapshot),archive(source.archive.fork(branch,current)),io(source.io),
           host_capacity(source.host_capacity),resident(source.retained->resident),tables(source.retained->tables),
-          pools(source.pools),state_slots(source.state_slots),visible(source.retained->visible),native_sequence(source.native_sequence) {
+          pools(source.pools),state_slots(source.state_slots),visible(source.retained->visible),native_sequence(source.native_sequence),
+          captures(source.retained->captures) {
         current.stamp.session=branch;
         for(auto& item:current.blocks)item.block.session=branch;
-        retained=std::make_unique<RetainedView>(RetainedView{current,resident,tables,visible});
+        retained=std::make_unique<RetainedView>(RetainedView{current,resident,tables,visible,captures});
     }
     void check() const {
         if (!current.stamp.valid) fail(MemoryErrorCode::InvalidSession, "native sequence invalidated");
@@ -121,7 +134,7 @@ struct NativeMemory::State {
     }
 };
 
-class NativeMemory::Transaction final : public MemoryTransfer {
+class NativeMemory::Transaction final : public MemoryTransfer, public StorageWaiter {
     std::shared_ptr<State> s_;
     WorkingSetPlan plan_;
     MemorySnapshot next_;
@@ -393,6 +406,31 @@ public:
         phase_ = Phase::Published;
         release();
     }
+    bool awaiting_storage() const noexcept override {
+        return (phase_==Phase::Spilling && captured_ && !storage_done_) ||
+               (phase_==Phase::Restoring && rollback_work_ && !restore_issued_);
+    }
+    bool cpu_io_pending() const noexcept override {
+        return (storage_ticket_ && !storage_ticket_.ready()) || (rollback_ticket_ && !rollback_ticket_.ready());
+    }
+    bool storage_quiescent() override {
+        for(const auto* ticket:{&storage_ticket_,&rollback_ticket_})
+            if(*ticket && !ticket->ready())return false;
+        // CPU jobs never touch a device. Other ranks may still have their
+        // pre-I/O copy in flight; query its fence before abort may drain it.
+        for(auto* copy:{phase_!=Phase::Prepared ? spill_.get() : nullptr,
+                        restore_may_have_written_ ? restore_.get() : nullptr})if(copy) {
+            const auto result=copy->poll();
+            if(result.status==TransferStatus::Failed)
+                fail(MemoryErrorCode::TransferFailed,"device failed during storage drain");
+            if(result.status!=TransferStatus::Complete)return false;
+        }
+        return true;
+    }
+    void cancel_queued_storage() noexcept override {
+        for(const auto* ticket:{&storage_ticket_,&rollback_ticket_})if(*ticket)
+            try{ticket->cancel();}catch(...){}
+    }
     AbortResult abort() noexcept override {
         if (phase_ == Phase::Published || phase_ == Phase::Aborted)
             return s_->current.stamp.valid ? AbortResult::PreviousViewPreserved : AbortResult::SessionInvalidated;
@@ -601,8 +639,8 @@ void NativeMemory::rewind(uint64_t frontier) {
     if (s.binding.manager->rewind_full_tables(s.native_sequence, old.frontier, frontier, visible, tables) < 0)
         fail(MemoryErrorCode::Stale, "engine refused replay table publication");
     // All allocation/validation was above the atomic engine publication.
-    for (auto id : dropped) s.archive.erase(id);
-    if (partial_id != UINT64_MAX) s.archive.erase(partial_id);
+    for (auto id : dropped) {s.archive.erase(id);s.captures.erase(id);}
+    if (partial_id != UINT64_MAX) {s.archive.erase(partial_id);s.captures.erase(partial_id);}
     std::swap(s.current, next); s.resident.swap(bindings); s.tables.swap(tables); s.visible = visible;
     s.check();
 }
@@ -612,7 +650,66 @@ void NativeMemory::retain_view() {
     if (s.pending)
         fail(MemoryErrorCode::InvalidPlan, "retained memory view requires a drained boundary");
     s.retained = std::make_unique<State::RetainedView>(State::RetainedView{
-        s.current, s.resident, s.tables, s.visible});
+        s.current, s.resident, s.tables, s.visible,s.captures});
+}
+PrefixCapture NativeMemory::prefix_capture() {
+    auto& s=*state_;s.check();
+    if(s.pending)fail(MemoryErrorCode::Pending,"prefix capture during native transfer");
+    PrefixCapture out;out.engine_lifetime=s.binding.engine_lifetime;out.stamp=s.current.stamp;out.manager=s.binding.manager;out.sequence=s.native_sequence;
+    auto captures=s.captures;
+    for(const auto& item:s.current.blocks) {
+        const auto& b=item.block;
+        const auto resident=s.resident.find(b.id);
+        if(resident==s.resident.end())continue;
+        PrefixCaptureBlock entry;
+        const bool full=b.valid_tokens==s.descriptor.layout.block_tokens;
+        if(full) {
+            entry.spans=s.spans({b},s.resident);
+            const auto known=captures.find(b.id);
+            if(known!=captures.end() && known->second.matches(b))entry.origin=known->second.origin.lock();
+            if(!entry.origin) {
+                auto record=s.archive.previous(b);
+                entry.origin=record ? std::make_shared<SealedKvBlock>(record) :
+                    std::make_shared<SealedKvBlock>(s.descriptor.layout.record_bytes);
+            }
+            captures.insert_or_assign(b.id,State::Captured{b.original_start,b.content_version,b.valid_tokens,entry.origin});
+        } else {
+            uint64_t bytes=0;
+            for(const auto& table:s.tables) {
+                const auto* p=s.binding.manager->plan(table.group);
+                const auto group=std::find_if(resident->second.begin(),resident->second.end(),
+                    [&](const GroupPages& g){return g.group==table.group;});
+                if(group==resident->second.end())fail(MemoryErrorCode::Stale,"missing partial capture group");
+                for(int32_t layer=0;layer<p->n_layers;++layer)for(auto page:group->pages) {
+                    const uint64_t n=p->layer_bytes_per_block();
+                    if(n>uint64_t(SIZE_MAX)-bytes)fail(MemoryErrorCode::InvalidPlan,"partial capture size overflow");
+                    entry.spans.push_back({table.group,uint64_t(layer)*p->layer_stride()+uint64_t(page)*n,bytes,n});bytes+=n;
+                }
+            }
+            // Partial tails never inherit a full archive origin.
+            entry.origin=std::make_shared<SealedKvBlock>(size_t(bytes));
+        }
+        out.blocks.push_back(std::move(entry));
+    }
+    // Append never mutates full blocks, and rewind erases every changed/dropped
+    // origin at its publication boundary. Only expired weak entries remain here.
+    for(auto it=captures.begin();it!=captures.end();) {
+        if(it->second.origin.expired())it=captures.erase(it);
+        else ++it;
+    }
+    s.captures.swap(captures);return out;
+}
+void NativeMemory::refresh_captured() {
+    auto& s=*state_;s.check();
+    if(s.pending)fail(MemoryErrorCode::Pending,"archive capture import during transfer");
+    for(auto& item:s.current.blocks) {
+        if(item.host_version==item.block.content_version || item.block.valid_tokens!=s.descriptor.layout.block_tokens)continue;
+        const auto found=s.captures.find(item.block.id);
+        if(found==s.captures.end() || !found->second.matches(item.block))continue;
+        if(auto origin=found->second.origin.lock())if(auto record=origin->record()) {
+            s.archive.import(item.block,record);item.host_version=item.block.content_version;
+        }
+    }
 }
 std::shared_ptr<NativeMemory> NativeMemory::fork_retained(SessionIdentity branch) const {
     const auto& source=*state_;
@@ -622,6 +719,10 @@ std::shared_ptr<NativeMemory> NativeMemory::fork_retained(SessionIdentity branch
     return std::shared_ptr<NativeMemory>(new NativeMemory(std::make_shared<State>(source,branch)));
 }
 uint64_t NativeMemory::archive_bytes() const noexcept { return state_->archive.bytes(); }
+void NativeMemory::account_archive(SharedPayloadAccounting& out) const {state_->archive.account(out);}
+uint64_t NativeMemory::shared_archive_bytes(const NativeMemory& other) const noexcept {
+    return state_->archive.shared_bytes(other.state_->archive);
+}
 bool NativeMemory::needs_unleased_pages(const std::vector<uint64_t>& selected,
                                       const std::vector<uint64_t>& mandatory, const MemoryBudget& budget) const {
     const auto& s = *state_;
@@ -693,6 +794,7 @@ void NativeMemory::rebind_sequence(uint64_t sequence, bool relocated_prefix) {
         s.resident.swap(saved.resident);
         s.tables.swap(saved.tables);
         s.visible = saved.visible;
+        s.captures.swap(saved.captures);
         s.retained.reset();
     }
     ++s.current.stamp.view_version;

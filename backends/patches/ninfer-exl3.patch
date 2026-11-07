@@ -244,7 +244,7 @@ index cd4b8fd49837ca4fe103cb7155bbc4bb18f6fa7f..ca9f417234f59fb069d7f3414214596c
  
  struct ResourceObject {
 diff --git a/src/core/weight.h b/src/core/weight.h
-index f557db4e11906a9046c4b759e6381a20d7eb9d92..b338937625847ede0628a5758d769a4c015e5511 100644
+index 167400bc07f0d8d2a793b8c64a3f5430d064e117..759a9bae25061c2b2c1e84fff989ad710989a8b4 100644
 --- a/src/core/weight.h
 +++ b/src/core/weight.h
 @@ -56,6 +56,9 @@ enum class QType : std::uint16_t {
@@ -410,10 +410,10 @@ index debac5eaddc8fa01f0000dc71062dcac57789fd6..a802e59d5bac9ce74613493e289bb306
  
  // RowSplitPanel is a permutation of RowSplit's bytes, so every byte-counting question about the
 diff --git a/src/models/qwen3_5/execution/parameters.cpp b/src/models/qwen3_5/execution/parameters.cpp
-index 607fca9b54140fe1e2ee7db3801eb4ab8b28e490..ea9f4913766706a6e6647516d68b3a6872a6106e 100644
+index 7123f66b00c97a041fda83c44aedab8bfc279ee7..8ed85d1390d13b976a6267acddda5cab0d33f2fb 100644
 --- a/src/models/qwen3_5/execution/parameters.cpp
 +++ b/src/models/qwen3_5/execution/parameters.cpp
-@@ -580,7 +580,11 @@ public:
+@@ -685,7 +685,11 @@ public:
              nvfp4_w4a16_route(out.projection.packed, 14336, 5120);
              nvfp4_int8_route(out.projection.packed, 14336, 5120);
          }
@@ -1524,7 +1524,7 @@ index 0000000000000000000000000000000000000000..21cac8791963accf7e3b021cec6ba094
 +  "${CMAKE_CURRENT_LIST_DIR}/exl3_dispatch.cu"
 +)
 diff --git a/src/ops/linear/linear.cpp b/src/ops/linear/linear.cpp
-index 9fe9c66067f7daeb2c44e825ddb4d7ee29b3f133..a368729db322c9580563b595a826ba7c869686c4 100644
+index aaf13d245f16dfde4d2120273b70de73deb80551..43f7cbf413a0e9ce7a2c57383ebda4467cb00837 100644
 --- a/src/ops/linear/linear.cpp
 +++ b/src/ops/linear/linear.cpp
 @@ -4,6 +4,7 @@
@@ -1535,7 +1535,7 @@ index 9fe9c66067f7daeb2c44e825ddb4d7ee29b3f133..a368729db322c9580563b595a826ba7c
  #include "ops/linear/fp8/fp8_dispatch.h"
  #include "ops/linear/gguf/gguf_linear.h"
  #include "ops/linear/nvfp4/nvfp4_dispatch.h"
-@@ -160,6 +161,13 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
+@@ -163,6 +164,13 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
      case QType::FP8_E4M3FN_ROW_BF16:
          detail::fp8_dispatch(x, w, out, policy, workspace, stream);
          return;
@@ -1549,7 +1549,7 @@ index 9fe9c66067f7daeb2c44e825ddb4d7ee29b3f133..a368729db322c9580563b595a826ba7c
      case QType::FP32:
      case QType::INT32:
      default:
-@@ -209,6 +217,17 @@ std::size_t linear_route_workspace_bytes(QType qtype, std::int32_t output_rows,
+@@ -212,6 +220,17 @@ std::size_t linear_route_workspace_bytes(QType qtype, std::int32_t output_rows,
      case QType::FP8_E4M3FN_ROW_BF16:
          return detail::fp8_linear_workspace_capacity_bytes(output_rows, input_rows, policy,
                                                             min_tokens, max_tokens);
@@ -1580,10 +1580,10 @@ index 29c06080385a2945b410fc0f49e8067853bb4432..9334a05e658ba8e9d913a6913a9b37ca
  include("${CMAKE_CURRENT_LIST_DIR}/nvfp4/sources.cmake")
  include("${CMAKE_CURRENT_LIST_DIR}/q4/sources.cmake")
 diff --git a/src/ops/weight_input.cpp b/src/ops/weight_input.cpp
-index 565781d547a5d04d576dc94c926cc0c3b544a334..74958a4e6d7cd7610f67dce2e97e053a411f503e 100644
+index 3a9ae81b94992779a09eee9552140efec3919770..28a46d08f2f8175b3c9718bfd6b60bab299a8b63 100644
 --- a/src/ops/weight_input.cpp
 +++ b/src/ops/weight_input.cpp
-@@ -226,7 +226,7 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool
+@@ -232,7 +232,7 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool
          const bool supported =
              (moe && format == QType::Q8_G32_FP16) ||
              (dense && (format == QType::NVFP4 || format == QType::FP8_E4M3FN_ROW_BF16 ||
@@ -1849,7 +1849,7 @@ index e8e732e240220302d23eddb232e0edaffc46a972..287d17140bf89291eee9916fcf87bf93
          parent_rows == detail::Fp8N16384K5120::kOutputRows &&
          input_rows == detail::Fp8N16384K5120::kInputRows) {
 diff --git a/src/ops/wrapper/linear_add.cpp b/src/ops/wrapper/linear_add.cpp
-index 3c6685b6b96335343e2c424c86e41f32cca8ac59..e4b56ecc7aa81a6b1616221153755b8d1ef18cb4 100644
+index 23a0d98c56d2aa30b272bd4de5d02949ae325c36..a6cf22e8db2a917500073c3b978bf80940d703dd 100644
 --- a/src/ops/wrapper/linear_add.cpp
 +++ b/src/ops/wrapper/linear_add.cpp
 @@ -5,6 +5,7 @@
@@ -1893,7 +1893,7 @@ index 3c6685b6b96335343e2c424c86e41f32cca8ac59..e4b56ecc7aa81a6b1616221153755b8d
          auto scope            = ws.scope();
          const auto activation = detail::sm70::prepare_for(
 diff --git a/src/ops/wrapper/linear_swiglu.cpp b/src/ops/wrapper/linear_swiglu.cpp
-index ae15278ab4125de67861eb09a21aa1f667090b9d..f0c4fcea5b646515ae3f6cc14d9e530ed2542f26 100644
+index 9903322d701f304c84710b669ac1ea538ac06a22..6620eed7a6eea4ee4a7f083ae1a7491bad948537 100644
 --- a/src/ops/wrapper/linear_swiglu.cpp
 +++ b/src/ops/wrapper/linear_swiglu.cpp
 @@ -6,6 +6,7 @@
@@ -3096,10 +3096,10 @@ index 0000000000000000000000000000000000000000..3a347604a3494becb438ecd161566364
 +    }
 +}
 diff --git a/tests/ops/linear/tests.cmake b/tests/ops/linear/tests.cmake
-index 29c8adda31edc90e79350b345ddf3ca1220babe7..78f5ac498a4c25b260fd5136b3ee5fbbb2af2734 100644
+index e0b6133da59d08539ca36f7dfb4341b20757b9ef..4a52f638e90831283d8577655a4ee04ef519dbe0 100644
 --- a/tests/ops/linear/tests.cmake
 +++ b/tests/ops/linear/tests.cmake
-@@ -118,3 +118,11 @@ ninfer_add_op_test(ninfer_linear_stq_test
+@@ -150,3 +150,11 @@ ninfer_add_op_test(ninfer_linear_stq_test
  ninfer_add_op_test(ninfer_linear_t5_test STANDALONE
    SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_t5.cpp" LIBRARIES ninfer_ops)
  ninfer_stage_runtime_dlls(ninfer_linear_t5_test)
