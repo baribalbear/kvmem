@@ -21,12 +21,23 @@ struct PageTransfer::State {
     RadStream stream = nullptr, compute = nullptr;
     RadEvent ready = nullptr, done = nullptr;
     bool started = false, out = false, failed = false, owns_stream = false;
+    bool complete = false, event_armed = false;
+    bool drain() noexcept {
+        if (complete) return true;
+        if (rad_dev_set(device) < 0) return false;
+        if (event_armed && rad_event_sync(done) >= 0) { complete = true; return true; }
+        // An enqueue failure may have left only the source fence or part of the
+        // copies queued. Drain both producers before releasing their resources.
+        if ((compute && rad_stream_sync(compute) < 0) ||
+            (stream && stream != compute && rad_stream_sync(stream) < 0)) return false;
+        complete = true;
+        return true;
+    }
     ~State() {
         // On an unrecoverable device error it is unsafe to release memory still
         // referenced by a queue. Retain it until process teardown; the owning
         // engine must treat drain()==false as fatal, not continue the request.
-        if (rad_dev_set(device) < 0 || (compute && rad_stream_sync(compute) < 0) ||
-            (stream && rad_stream_sync(stream) < 0)) return;
+        if (!drain() || rad_dev_set(device) < 0) return;
         if (ready) rad_event_destroy(ready);
         if (done) rad_event_destroy(done);
         if (stream && owns_stream) rad_stream_destroy(stream);
@@ -55,11 +66,12 @@ PageTransfer::~PageTransfer() = default;
 
 void PageTransfer::begin(bool out, const std::vector<CopySpan>& spans,
                          const std::vector<GroupPool>& pools, RadStream compute,
-                         const std::vector<uint8_t>* payload) {
+                         std::span<const uint8_t> payload) {
     auto& s = *state_;
-    if (s.started || s.failed)
-        throw MemoryError(MemoryErrorCode::InvalidPlan, "transfer handles are single-use");
-    if (!compute || (!out && (!payload || payload->size() != s.bytes)) || spans.empty())
+    if (s.failed || (s.started && (out || s.out || !s.complete)))
+        throw MemoryError(MemoryErrorCode::InvalidPlan, "transfer is not reusable");
+    const uint64_t bytes=out ? s.bytes : payload.size();
+    if (!compute || !bytes || bytes>s.bytes || spans.empty())
         throw MemoryError(MemoryErrorCode::InvalidPlan, "invalid transfer input");
     // Validate the whole batch before a fence or copy can be enqueued.
     std::map<int32_t, GroupPool> by_group;
@@ -73,8 +85,8 @@ void PageTransfer::begin(bool out, const std::vector<CopySpan>& spans,
     std::map<int32_t, std::vector<std::pair<uint64_t, uint64_t>>> device_ranges;
     for (auto span : spans) {
         auto p = by_group.find(span.group);
-        if (p == by_group.end() || !span.bytes || span.record_offset > s.bytes ||
-            span.bytes > s.bytes - span.record_offset || span.pool_offset > p->second.bytes ||
+        if (p == by_group.end() || !span.bytes || span.record_offset > bytes ||
+            span.bytes > bytes - span.record_offset || span.pool_offset > p->second.bytes ||
             span.bytes > p->second.bytes - span.pool_offset)
             throw MemoryError(MemoryErrorCode::InvalidPlan, "transfer span outside pool or record");
         ranges.emplace_back(span.record_offset, span.record_offset + span.bytes);
@@ -87,7 +99,7 @@ void PageTransfer::begin(bool out, const std::vector<CopySpan>& spans,
             throw MemoryError(MemoryErrorCode::InvalidPlan, "record has overlapping or missing bytes");
         end = r.second;
     }
-    if (end != s.bytes) throw MemoryError(MemoryErrorCode::InvalidPlan, "incomplete native record");
+    if (end != bytes) throw MemoryError(MemoryErrorCode::InvalidPlan, "incomplete native record");
     for (auto& item : device_ranges) {
         auto& rs = item.second;
         std::sort(rs.begin(), rs.end());
@@ -95,11 +107,14 @@ void PageTransfer::begin(bool out, const std::vector<CopySpan>& spans,
             throw MemoryError(MemoryErrorCode::InvalidPlan, "overlapping physical transfer spans");
     }
     require_ok(rad_dev_set(s.device), "select transfer device");
-    if (!out) std::memcpy(s.host, payload->data(), size_t(s.bytes));
-    s.started = true; s.out = out; s.compute = compute;
+    if (!out) std::memcpy(s.host, payload.data(), size_t(bytes));
+    s.started = true; s.complete = false; s.out = out; s.compute = compute;
+    s.event_armed = false; // a prior chunk's completed event cannot fence this one
     try {
-        require_ok(rad_event_record(s.ready, compute), "record compute fence");
-        require_ok(rad_event_wait(s.stream, s.ready), "order transfer after compute");
+        if (s.stream != compute) {
+            require_ok(rad_event_record(s.ready, compute), "record compute fence");
+            require_ok(rad_event_wait(s.stream, s.ready), "order transfer after compute");
+        }
         for (auto span : spans) {
             auto* dev = static_cast<uint8_t*>(by_group.at(span.group).base) + span.pool_offset;
             auto* host = static_cast<uint8_t*>(s.host) + span.record_offset;
@@ -107,15 +122,16 @@ void PageTransfer::begin(bool out, const std::vector<CopySpan>& spans,
                                        int64_t(span.bytes), s.stream), "native page copy");
         }
         require_ok(rad_event_record(s.done, s.stream), "record transfer completion");
+        s.event_armed = true;
         // The transaction publishes only after poll() is Complete. Do not queue
         // a wait in compute here: event lifetime would then outlive this handle.
     } catch (...) { s.failed = true; throw; }
 }
 void PageTransfer::spill(const std::vector<CopySpan>& spans, const std::vector<GroupPool>& pools,
-                         RadStream compute) { begin(true, spans, pools, compute, nullptr); }
+                         RadStream compute) { begin(true, spans, pools, compute, {}); }
 void PageTransfer::restore(const std::vector<CopySpan>& spans, const std::vector<GroupPool>& pools,
-                           RadStream compute, const std::vector<uint8_t>& payload) {
-    begin(false, spans, pools, compute, &payload);
+                           RadStream compute, std::span<const uint8_t> payload) {
+    begin(false, spans, pools, compute, payload);
 }
 TransferPoll PageTransfer::poll() {
     auto& s = *state_;
@@ -126,18 +142,21 @@ TransferPoll PageTransfer::poll() {
     }
     const int rc = rad_event_query(s.done);
     if (rc < 0) { s.failed = true; return {TransferStatus::Failed, "query transfer completion"}; }
+    if (rc) s.complete = true;
     return {rc ? TransferStatus::Complete : TransferStatus::Pending, {}};
 }
-std::vector<uint8_t> PageTransfer::payload() {
+std::span<const uint8_t> PageTransfer::payload_view() {
     if (!state_->out || poll().status != TransferStatus::Complete)
         throw MemoryError(MemoryErrorCode::Pending, "spill has not completed");
-    const auto* p = static_cast<const uint8_t*>(state_->host);
-    return {p, p + state_->bytes};
+    return {static_cast<const uint8_t*>(state_->host), size_t(state_->bytes)};
+}
+std::vector<uint8_t> PageTransfer::payload() {
+    const auto view=payload_view();
+    return {view.begin(), view.end()};
 }
 bool PageTransfer::drain() noexcept {
     auto& s = *state_;
-    if (rad_dev_set(s.device) < 0 || (s.compute && rad_stream_sync(s.compute) < 0) ||
-        rad_stream_sync(s.stream) < 0) {
+    if (!s.drain()) {
         s.failed = true; return false;
     }
     return true;

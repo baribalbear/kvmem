@@ -75,8 +75,8 @@ artifact writer (`tensor_output.py`) and Flash-Next expert offload (`ops/offload
 
 Done without a GPU:
 
-* `prepare-backends.py`'s `verify_patch_series` replays all 45 NInfer patches from the base commit
-  and reproduces every recorded tree.
+* `prepare-backends.py`'s `verify_patch_series` replays every NInfer patch from the base commit and
+  reproduces every recorded tree.
 * `tests/artifact/test_exl3_layout.py`: 26 passed. The existing CPU-only artifact tests still pass.
 * `tests/test_model_health.py`: 24 passed.
 * The published `qwen3_8_27b_exl3_4bpw.ninfer` directory (1,054 tensors, 262 of them EXL3 at 8, 10
@@ -101,16 +101,18 @@ this NInfer worker.
 
 ## Regenerating the patch
 
-Apply the series in `backends/ninfer`, edit, then diff against the tree the previous patch
-(`span-construction`) produces, not against `HEAD`, which is the upstream base:
+Apply the series in `backends/ninfer`, edit, then diff against the `after_tree` of the patch before
+`exl3` in `backends/versions.json` (the one `exl3` requires), not against `HEAD`, which is the
+upstream base:
 
 ```bash
 git add -A
-git diff --cached --full-index 311f51f5a2e4951ea95bccfe157f6d3e147d27c6 > ../patches/ninfer-exl3.patch
+git diff --cached --full-index <previous patch's after_tree> > ../patches/ninfer-exl3.patch
 git write-tree
 ```
 
 Update the `exl3` entry's `sha256` and `after_tree` and the backend's `patched_tree` in
 `backends/versions.json`.
 
-After an upstream NInfer change, follow [upstream-sync.md](upstream-sync.md) instead.
+After an upstream NInfer change, `scripts/rebase-ninfer-exl3.py` re-appends the patch; see
+[upstream-sync.md](upstream-sync.md).
