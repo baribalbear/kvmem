@@ -62,7 +62,7 @@
     "base_commit": "6cc1f9fa438b7094685ae417dfa40e1ca324e617",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "dfe696b5be0a8ddb40d66bf398b871a256de4788",
+    "patched_tree": "2d20fe38c09cbb04570421a22a1249294388ebc5",
     "patches": [
       {
         "id": "kvmem",
@@ -540,6 +540,16 @@
         ],
         "after_tree": "dfe696b5be0a8ddb40d66bf398b871a256de4788",
         "source": "giveen/ninfer-ext@b6886f67: EXL3 mul1 / trellis_t16_v1 dense runtime (format, geometry, A16 kernels, linear and fused input-projection, SwiGLU and residual consumers), artifact reader and tests; quantizer and Flash-Next expert offload not ported"
+      },
+      {
+        "id": "gguf-ragged-rows",
+        "path": "backends/patches/ninfer-gguf-ragged-rows.patch",
+        "sha256": "8e2f4d7e6c5a56927abd68703ad0078d9a6ee65b41ec639af3a01af6cb2e2dc4",
+        "requires": [
+          "exl3"
+        ],
+        "after_tree": "2d20fe38c09cbb04570421a22a1249294388ebc5",
+        "source": "This fork: GGUF matrices whose row count is no multiple of the matrix kernel's 128-row tiles (vocabulary-pruned output heads) take the vector and dequantized routes instead of failing with unsupported geometry; regression test in tests/ops/linear/test_gguf.cpp"
       }
     ]
   },

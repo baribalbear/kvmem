@@ -1,15 +1,16 @@
 # Syncing this fork with kvmem/kvmem
 
-`master` is kvmem/kvmem plus this fork's additions: the EXL3 NInfer patch, the pruned-vocabulary
-tools and the Windows release workflow. `.github/workflows/upstream-sync.yml` keeps it current.
-Every Monday, or from **Actions → Upstream sync → Run workflow**, it does the following:
+`master` is kvmem/kvmem plus this fork's additions: two NInfer patches (`exl3`, then
+`gguf-ragged-rows`), the pruned-vocabulary tools and the Windows release workflow.
+`.github/workflows/upstream-sync.yml` keeps it current. Every Monday, or from
+**Actions → Upstream sync → Run workflow**, it does the following:
 
 1. Merges kvmem/kvmem `master` into this fork's `master` on the `sync/upstream` branch.
-2. If upstream changed its NInfer series, re-appends the EXL3 patch to it (below).
+2. If upstream changed its NInfer series, re-appends the fork's NInfer patches to it (below).
 3. Applies every backend patch series, checks that each reproduces its recorded trees, and runs the
    Python tests.
 4. Opens a pull request into `master`, or updates the open one. Its description says whether the
-   merge was clean, whether the EXL3 patch was re-appended, and whether the checks passed.
+   merge was clean, whether the fork's patches were re-appended, and whether the checks passed.
 
 A green run's pull request can be merged as it is. A run fails when the merge conflicts or the
 checks fail. It still opens the pull request, which lists the conflicting files or the check log.
@@ -17,38 +18,44 @@ Do not use GitHub's **Sync fork** button: it merges into `master` without these 
 
 Before merging, run **KVMem Windows release** on `sync/upstream`; the sync checks no C++.
 
-## The EXL3 patch after an upstream NInfer change
+## The fork's NInfer patches after an upstream NInfer change
 
-`backends/patches/ninfer-exl3.patch` is the last patch in the NInfer series. It must apply to the
-tree that upstream's last patch produces, so it breaks whenever upstream changes the NInfer pin or
-its patches. Upstream's `backends/versions.json` then has a new series without `exl3`, and the
-merge conflicts in that file alone.
+The fork's patches come last in the NInfer series, in the order of `FORK_PATCHES` in
+`scripts/rebase-ninfer-fork-patches.py`:
 
-`scripts/rebase-ninfer-exl3.py --previous master` handles this. It takes the working tree's
-`versions.json` (upstream's), replays its NInfer series, applies the EXL3 patch from `master` on top
-with `git apply --3way`, and records the regenerated patch as the last entry, updating
+| Patch | What it does |
+|---|---|
+| `exl3` | EXL3 weights ([ninfer-exl3.md](ninfer-exl3.md)) |
+| `gguf-ragged-rows` | GGUF matrices whose rows are no multiple of 128, such as a pruned output head ([ninfer-pruned-vocab.md](ninfer-pruned-vocab.md)) |
+
+They must apply to the tree that upstream's last patch produces, so they break whenever upstream
+changes the NInfer pin or its patches. Upstream's `backends/versions.json` then has a new series
+without them, and the merge conflicts in that file alone.
+
+`scripts/rebase-ninfer-fork-patches.py --previous master` handles this. It takes the working tree's
+`versions.json` (upstream's), replays its NInfer series, applies each fork patch from `master` on top
+in order with `git apply --3way`, and records the regenerated patches as the last entries, updating
 `PROVENANCE.json` too. It replays in temporary indexes and leaves `backends/ninfer` alone. The sync
 runs it whenever `versions.json` is the only conflict, or a clean merge changed `versions.json`.
 
-When the three-way apply fails, upstream changed code the EXL3 patch edits. The run then offers
-upstream itself with the script's log, and the patch needs regenerating by hand. On `sync/upstream`:
+When a three-way apply fails, upstream changed code that patch edits. The run then offers upstream
+itself with the script's log, and the patches need regenerating by hand. On `sync/upstream`:
 
-1. Resolve `backends/versions.json` to upstream's NInfer entry, without the `exl3` patch. Its
+1. Resolve `backends/versions.json` to upstream's NInfer entry, without the fork's patches. Its
    `patched_tree` is then upstream's last `after_tree`.
-2. Apply upstream's series and the old EXL3 patch on top:
+2. Apply upstream's series, then each old fork patch in order. For each one:
 
    ```bash
-   python scripts/prepare-backends.py --backend ninfer
+   python scripts/prepare-backends.py --backend ninfer      # once, for upstream's series
    cd backends/ninfer
    git apply --3way ../patches/ninfer-exl3.patch    # resolve any conflicts in the sources
    git add -A
-   git diff --cached --full-index <upstream's last after_tree> > ../patches/ninfer-exl3.patch
-   git write-tree                                   # the new after_tree
+   git diff --cached --full-index <previous after_tree> > ../patches/ninfer-exl3.patch
+   git write-tree                                   # this patch's new after_tree
    ```
 
-3. Add the `exl3` entry back as the last patch, with the new `sha256` (of the patch file),
-   `requires` (upstream's last patch id) and `after_tree`. Set the backend's `patched_tree` to the
-   same tree.
+3. Add each entry back in order, with its new `sha256` (of the patch file), `requires` (the
+   previous patch id) and `after_tree`. Set the backend's `patched_tree` to the last tree.
 4. Run `python scripts/prepare-backends.py --check` and `python tests/test_prune_ninfer_vocab.py`.
 
 If upstream changed NInfer's `tools/artifact` reader, also refresh `scripts/model_health_ninfer`
