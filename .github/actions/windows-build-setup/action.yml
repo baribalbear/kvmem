@@ -45,12 +45,18 @@ runs:
       run: |
         # NInfer logs `<version>+<build id>`. Without these it reports its nearest release tag, or
         # `untagged` in a shallow checkout, and the pinned upstream revision, marked dirty by the
-        # uncommitted patch series. Name kvmem's VERSION, the kvmem commit, the prepared NInfer
-        # tree and the architectures, as kvmem's releases do.
+        # uncommitted patch series. Name kvmem's release version, the kvmem commit, the prepared
+        # NInfer tree and the architectures, as kvmem's releases do. Upstream tags releases
+        # without always bumping VERSION, so the version is the newer of VERSION and its latest
+        # release tag in this commit; VERSION is rewritten so the package records the same one.
+        $version = (python scripts/release-version.py).Trim()
+        if ($LASTEXITCODE -ne 0 -or !$version) { throw 'Release version lookup failed' }
+        Set-Content -LiteralPath VERSION -Value $version -NoNewline
         $tree = (Get-Content backends/versions.json -Raw | ConvertFrom-Json).ninfer.patched_tree.Substring(0, 8)
         $commit = (git rev-parse --short=7 HEAD).Trim()
         $archs = $env:ARCHS -replace '[^0-9A-Za-z]+', '-'
-        "NINFER_VERSION=$((Get-Content VERSION -Raw).Trim())" >> $env:GITHUB_ENV
+        "KVMEM_VERSION=$version" >> $env:GITHUB_ENV
+        "NINFER_VERSION=$version" >> $env:GITHUB_ENV
         "NINFER_BUILD_ID=kvmem-$commit-ninfer-$tree-sm$archs" >> $env:GITHUB_ENV
     - name: Install the official CUDA Toolkit
       shell: pwsh

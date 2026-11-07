@@ -53,6 +53,11 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The commit history, without files, lets scripts/release-version.py find
+          # upstream's release tags in this commit.
+          fetch-depth: 0
+          filter: tree:0
       - id: setup
         uses: ./.github/actions/windows-build-setup
         with:
@@ -89,6 +94,9 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: tree:0
       - uses: ./.github/actions/windows-build-setup
         with:
           cuda: ${{ env.CUDA_VERSION }}
@@ -167,6 +175,9 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: tree:0
       - uses: ./.github/actions/windows-build-setup
         with:
           cuda: ${{ env.CUDA_VERSION }}
@@ -208,7 +219,7 @@ jobs:
           Invoke-WebRequest -Uri $env:PSUTIL_URL -OutFile $psutil
           $ninfer = @(Get-ChildItem backends/ninfer/build-release -Recurse -File -Filter ninfer-serve.exe)
           if ($ninfer.Count -ne 1) { throw "Expected one ninfer-serve.exe, found $($ninfer.Count)" }
-          $version = (Get-Content VERSION -Raw).Trim()
+          $version = $env:KVMEM_VERSION
           $archs = $env:CUDA_ARCHS -replace '[^0-9A-Za-z]+', '-'
           $name = "KVMem-$version-windows-x64-cuda$env:CUDA_VERSION-sm$archs"
           "PACKAGE_NAME=$name" >> $env:GITHUB_ENV
