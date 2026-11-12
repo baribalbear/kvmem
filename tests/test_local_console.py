@@ -98,6 +98,24 @@ class ConsoleTests(unittest.TestCase):
                      ['--elastic-headroom-mib','512','--elastic-headroom-mib','256'],
                      ['--threads'], ['--threads','--elastic-experts'], ['--unknown']):
             with self.assertRaises(ValueError): validate(args)
+
+    def test_reasoning_loop_native_option_is_ninfer_only_with_fixed_values(self):
+        def validate(args, backend='ninfer', **extra):
+            return console.normalize({'schema_version':1,'parameters':{'Backend':backend,'WorkerArgs':args,**extra}},
+                                     ['polystrata','ninfer','llamacpp'])
+        for args in (['--reasoning-loop','conclude'], ['--reasoning-loop','stop'], ['--reasoning-loop','off'],
+                     ['--threads','8','--reasoning-loop','conclude'], ['--reasoning-loop','conclude','--threads','8']):
+            self.assertEqual(validate(args)['parameters']['WorkerArgs'],args)
+        self.assertEqual(validate(['--reasoning-loop','off'],ThinkingMode='off')['parameters']['WorkerArgs'],
+                         ['--reasoning-loop','off'])
+        for args in (['--reasoning-loop'], ['--reasoning-loop','8'], ['--reasoning-loop','Conclude'],
+                     ['--reasoning-loop','conclude; calc'], ['--reasoning-loop','stop','--reasoning-loop','stop']):
+            with self.subTest(args=args), self.assertRaises(ValueError): validate(args)
+        with self.assertRaisesRegex(ValueError,'ThinkingMode off'):
+            validate(['--reasoning-loop','conclude'],ThinkingMode='off')
+        for backend in ('llamacpp','polystrata'):
+            with self.subTest(backend=backend), self.assertRaises(ValueError):
+                validate(['--reasoning-loop','conclude'],backend)
         for backend in ('ninfer','llamacpp'):
             with self.assertRaises(ValueError): validate(['--elastic-experts'],backend)
             with self.assertRaises(ValueError): validate(['--elastic-headroom-mib','512'],backend)

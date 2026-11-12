@@ -136,6 +136,8 @@ NATIVE = {'llamacpp': {'--threads', '--threads-batch', '--n-gpu-layers', MCP_OPT
           'radiance': {'--http-threads'}, 'ninfer': {'--threads'},
           'polystrata': {'--threads', '--elastic-headroom-mib', '--elastic-physical-reserve-mib', MCP_OPTIONS['polystrata']}}
 NATIVE_SWITCHES = {'polystrata': {'--elastic-experts', '--elastic-experts-headroom'}}
+# Native options whose value is one of a fixed set of words.
+NATIVE_CHOICES = {'ninfer': {'--reasoning-loop': ('off', 'stop', 'conclude')}}
 
 
 def without_secrets(data):
@@ -322,6 +324,14 @@ def normalize(data, backends, *, path_root=None):
             if not path.is_file():
                 raise ValueError(f'{flag} requires an existing MCP configuration file')
             args[index] = str(path.resolve())
+            index += 1
+            continue
+        choices = NATIVE_CHOICES.get(p['Backend'], {}).get(flag)
+        if choices:
+            if index == len(args) or args[index] not in choices:
+                raise ValueError(f'{flag} must be one of: ' + ', '.join(choices))
+            if flag == '--reasoning-loop' and args[index] != 'off' and p.get('ThinkingMode') == 'off':
+                raise ValueError('--reasoning-loop requires thinking; it conflicts with ThinkingMode off')
             index += 1
             continue
         if (flag not in NATIVE[p['Backend']] or index == len(args)
