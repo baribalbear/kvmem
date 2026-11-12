@@ -90,7 +90,11 @@ def private_log(path, *, truncate=False):
 
 
 def prepare_state_directory(path):
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name == 'nt':
+        from console_state import prepare_windows_state_directory
+        prepare_windows_state_directory(path)
+    else:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name != 'nt':
         descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -199,6 +203,7 @@ class Controller:
         self.worker_cache = {}
         self.observed_scoring = {}
         self.observed_service = None
+        self.radiance_template_observation = None
         self.observed_offset = 0
         self.observed_pending = ''
         self.instance = secrets.token_hex(12)
@@ -287,6 +292,10 @@ class Controller:
 
     def parse_scoring(self, lines):
         for line in lines:
+            if "a request naming no reasoning_effort" in line:
+                match = re.fullmatch(r"I chat: a request naming no reasoning_effort renders as '([a-z]+)', the template's own default \(--reasoning-effort sets another\)", line.strip())
+                if match:
+                    self.radiance_template_observation = (self.instance, match[1])
             for marker in ('KVMEM_SCORING ', 'KVMEM_LIMITS ', 'KVMEM_BLOCKS ', 'KVMEM_RECALL ', 'KVMEM_RECALL_STRATEGY ', 'KVMEM_CHECKPOINT_RETENTION ', 'INFO '):
                 if marker not in line:
                     continue
@@ -362,7 +371,7 @@ class Controller:
         return {'schema_version': 1, 'parameters': {**DEFAULTS, **copy.deepcopy(ENGINE_DEFAULTS[backend])}}
 
     def save(self, data):
-        clean = without_secrets(normalize(data, self.backends))
+        clean = without_secrets(normalize(data, self.backends, path_root=self.backend_root))
         clean['parameters'] = self.prefer_packaged_worker(clean['parameters'])
         with self.lock:
             temp = self.draft_path.with_suffix('.tmp')
@@ -376,7 +385,7 @@ class Controller:
         return text
 
     def plan(self, data, *, reveal_secrets=False):
-        clean = normalize(data, self.backends)
+        clean = normalize(data, self.backends, path_root=self.backend_root)
         if not self.launcher_query_contract:
             raise ValueError('启动脚本版本不匹配，请完整更新控制台和启动脚本。 Launcher version mismatch; update the complete console package.')
         api_key = clean['parameters'].pop('ApiKey', '')
@@ -744,6 +753,9 @@ class Controller:
                       'active_config': without_secrets(self.active) if self.active else None,
                       'api_key_configured': bool(self.active and self.active['parameters'].get('ApiKey')), 'url': None}
             result['owner'] = 'temporary' if self.active else None
+            observation = self.radiance_template_observation
+            if running and observation and observation[0] == self.instance and (self.active or {}).get('parameters', {}).get('Backend') == 'radiance':
+                result['radiance_template_effort'] = observation[1]
             if self.service_selection:
                 result.update(owner='systemd', service=service, service_error=service_error,
                               pid=service['pid'] if service else None)
@@ -912,7 +924,7 @@ class Controller:
     def adjust_budget(self, data):
         if not AUTO_BUDGET_SUPPORTED:
             raise ValueError('自动调整暂支持 Windows 控制台 / Automatic budget adjustment currently requires Windows')
-        clean = normalize(data, self.backends)
+        clean = normalize(data, self.backends, path_root=self.backend_root)
         p = clean['parameters']
         if p.get('RecallStrategy', 'legacy') == 'layerwise':
             raise ValueError('分层召回尚无独立自动预算报告；请保留所选 KV 格式并手动设置预算 / Layerwise auto budget is not qualified; set its budget explicitly')
@@ -959,7 +971,7 @@ class Controller:
             status = self.status()
             if status['state'] != 'exited' or data['instance'] != self.instance:
                 raise ValueError('启动状态已改变，请刷新推荐。 / Launch changed; refresh recommendations.')
-            current = normalize(data['configuration'], self.backends)
+            current = normalize(data['configuration'], self.backends, path_root=self.backend_root)
             current['parameters'] = self.prefer_packaged_worker(current['parameters'])
             if without_secrets(current) != without_secrets(self.active):
                 raise ValueError('配置已改变，请使用当前配置重新启动；旧推荐已失效。 / Settings changed; old recommendations no longer apply.')
@@ -1016,7 +1028,7 @@ class Controller:
             raise ValueError('Expected a configuration and profile export settings')
         if type(data.get('store_api_key', False)) is not bool:
             raise ValueError('store_api_key must be boolean')
-        clean = normalize(data.get('config'), self.backends)
+        clean = normalize(data.get('config'), self.backends, path_root=self.backend_root)
         health = self.inspect_model(clean, for_launch=for_launch)
         if not health['can_start']:
             raise ValueError('Model inspection blocked export: ' + '; '.join(
@@ -1051,7 +1063,7 @@ class Controller:
                 raise ValueError('This generated version needs its API key. Re-enter it and generate a new version, or use a stored credential.')
             config['parameters']['ApiKey'] = key
             self.redactions.add(key)
-        config = normalize(config, self.backends)
+        config = normalize(config, self.backends, path_root=self.backend_root)
         return directory, manifest, plan, config
 
     def start_revision(self, data):
@@ -1114,7 +1126,7 @@ class Controller:
         if os.name != 'nt':
             exported = self.export_config({'config': data}, for_launch=True)
             return self.start_revision({key: exported[key] for key in ('profile_id', 'revision')})
-        clean = normalize(data, self.backends)
+        clean = normalize(data, self.backends, path_root=self.backend_root)
         clean['parameters'] = self.prefer_packaged_worker(clean['parameters'])
         # Never trust a cached browser report. Inspect this exact launch request.
         health = self.inspect_model(clean, for_launch=True)
@@ -1417,7 +1429,7 @@ class Handler(BaseHTTPRequestHandler):
                             snapshot=self.control.chat.get_json(state,'/api/monitor/snapshot')
                             if state.get('instance')!=self.control.status().get('instance'):
                                 raise ValueError('Service changed while reading runtime data')
-                            body=enrich_props(json.loads(body),info,snapshot)
+                            body=enrich_props(json.loads(body),info,snapshot,state.get('radiance_template_effort'))
                         self.reply(response.status, body)
                 except urllib.error.HTTPError as error:
                     self.reply(error.code, {'error': 'Inference endpoint unavailable'})
