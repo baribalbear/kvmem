@@ -72,7 +72,11 @@ runs:
         $process = Start-Process $installer -ArgumentList (@('-s') + $packages) -Wait -PassThru
         if ($process.ExitCode -ne 0) { throw "CUDA installer failed ($($process.ExitCode))" }
         $cuda = "${env:ProgramFiles}\NVIDIA GPU Computing Toolkit\CUDA\v$short"
-        foreach ($file in 'bin\nvcc.exe', 'bin\cuobjdump.exe', 'bin\nvprune.exe', 'include\cuda_runtime.h', 'lib\x64\cublas.lib') {
+        $required = @('bin\nvcc.exe', 'bin\cuobjdump.exe', 'bin\nvprune.exe', 'include\cuda_runtime.h', 'lib\x64\cublas.lib')
+        # The workers' GPU monitor compiles only with nvml.h: fail here, not with a build that
+        # silently reports no GPU readings.
+        if (($env:CUDA_PACKAGES | ConvertFrom-Json) -contains 'nvml_dev') { $required += 'include\nvml.h' }
+        foreach ($file in $required) {
           if (-not (Test-Path (Join-Path $cuda $file))) { throw "Missing CUDA component: $file" }
         }
         "CUDA_PATH=$cuda" >> $env:GITHUB_ENV

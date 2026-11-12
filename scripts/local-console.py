@@ -58,7 +58,7 @@ def media_type(name):
 
 
 from launcher.config import (SPECULATIVE_PROFILES, DEFAULTS, ENGINE_DEFAULTS,
-    STRINGS, INTEGERS, BOOLEANS, DECIMALS, NATIVE, NATIVE_SWITCHES, NATIVE_CHOICES,
+    STRINGS, INTEGERS, BOOLEANS, DECIMALS, NATIVE, NATIVE_SWITCHES, NATIVE_CHOICES, NATIVE_OUTPUT_FILES,
     without_secrets, normalize)
 from launcher.plan import build_plan, capabilities as launcher_capabilities, scoring_settings
 from launcher.export import export_profile, read_revision
@@ -1396,7 +1396,7 @@ class Handler(BaseHTTPRequestHandler):
                                 'backend_root': str(self.control.backend_root), 'gpus': self.server.gpus,
                                 'draft': self.control.draft(), 'status': self.runtime_status(),
                                 'workers': self.control.worker_defaults(),
-                                'native_options': {k: sorted(v | NATIVE_SWITCHES.get(k, set()) | set(NATIVE_CHOICES.get(k, {}))) for k, v in NATIVE.items()}})
+                                'native_options': {k: sorted(v | NATIVE_SWITCHES.get(k, set()) | set(NATIVE_CHOICES.get(k, {})) | NATIVE_OUTPUT_FILES.get(k, set())) for k, v in NATIVE.items()}})
             elif path == '/api/launcher/model-directories':
                 self.reply(200, self.control.model_directories())
             elif path == '/api/launcher/status':

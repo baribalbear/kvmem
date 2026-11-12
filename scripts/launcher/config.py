@@ -138,6 +138,8 @@ NATIVE = {'llamacpp': {'--threads', '--threads-batch', '--n-gpu-layers', MCP_OPT
 NATIVE_SWITCHES = {'polystrata': {'--elastic-experts', '--elastic-experts-headroom'}}
 # Native options whose value is one of a fixed set of words.
 NATIVE_CHOICES = {'ninfer': {'--reasoning-loop': ('off', 'stop', 'conclude')}}
+# Native options that name a file the worker writes; its directory must already exist.
+NATIVE_OUTPUT_FILES = {'ninfer': {'--request-log-jsonl'}}
 
 
 def without_secrets(data):
@@ -324,6 +326,20 @@ def normalize(data, backends, *, path_root=None):
             if not path.is_file():
                 raise ValueError(f'{flag} requires an existing MCP configuration file')
             args[index] = str(path.resolve())
+            index += 1
+            continue
+        if flag in NATIVE_OUTPUT_FILES.get(p['Backend'], set()):
+            value = args[index] if index < len(args) else ''
+            if not value.strip() or value.startswith('--') or any(c in value for c in '\x00\r\n'):
+                raise ValueError(f'{flag} requires a file path')
+            path = (Path(path_root or '.') / value).resolve()
+            if not path.parent.is_dir():
+                raise ValueError(f'{flag} requires an existing directory: {path.parent}')
+            if path.is_dir():
+                raise ValueError(f'{flag} must name a file, not a directory')
+            if p.get('Model') and path == (Path(path_root or '.') / p['Model']).resolve():
+                raise ValueError(f'{flag} must not be the model file')
+            args[index] = str(path)
             index += 1
             continue
         choices = NATIVE_CHOICES.get(p['Backend'], {}).get(flag)

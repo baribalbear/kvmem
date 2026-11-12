@@ -116,6 +116,30 @@ class ConsoleTests(unittest.TestCase):
         for backend in ('llamacpp','polystrata'):
             with self.subTest(backend=backend), self.assertRaises(ValueError):
                 validate(['--reasoning-loop','conclude'],backend)
+
+    def test_request_log_native_option_needs_an_existing_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            (root / 'logs').mkdir()
+            (root / 'model.ninfer').write_bytes(b'')
+            def validate(args, backend='ninfer'):
+                return console.normalize({'schema_version':1,'parameters':{
+                    'Backend':backend,'WorkerArgs':args,'Model':str(root/'model.ninfer')}},
+                    ['polystrata','ninfer','llamacpp'], path_root=root)
+            target = str((root/'logs'/'requests.jsonl').resolve())
+            for value in (str(root/'logs'/'requests.jsonl'), 'logs/requests.jsonl'):
+                with self.subTest(value=value):
+                    args = validate(['--request-log-jsonl',value,'--reasoning-loop','conclude'])['parameters']['WorkerArgs']
+                    self.assertEqual(args, ['--request-log-jsonl',target,'--reasoning-loop','conclude'])
+            for args in (['--request-log-jsonl'], ['--request-log-jsonl',''], ['--request-log-jsonl','--threads'],
+                         ['--request-log-jsonl',str(root/'missing'/'requests.jsonl')],
+                         ['--request-log-jsonl',str(root/'logs')], ['--request-log-jsonl',str(root/'model.ninfer')],
+                         ['--request-log-jsonl','logs/a\nb.jsonl'],
+                         ['--request-log-jsonl','logs/a.jsonl','--request-log-jsonl','logs/b.jsonl']):
+                with self.subTest(args=args), self.assertRaises(ValueError): validate(args)
+            for backend in ('llamacpp','polystrata'):
+                with self.subTest(backend=backend), self.assertRaises(ValueError):
+                    validate(['--request-log-jsonl','logs/requests.jsonl'],backend)
         for backend in ('ninfer','llamacpp'):
             with self.assertRaises(ValueError): validate(['--elastic-experts'],backend)
             with self.assertRaises(ValueError): validate(['--elastic-headroom-mib','512'],backend)
