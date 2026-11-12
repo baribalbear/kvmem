@@ -1,9 +1,41 @@
 # Radiance Windows / Linux AMD backend
 
-Radiance 1.17.0 / IQ3R-S v4 is qualified on Linux RX 9060 XT gfx1200 TP1/C1 with FP8 KV/F32 state for text, bounded RAM/SSD history and DFlash2 depth 7, including the 12K two-stage test. CPU PNG request/cache/placement checks pass; the original image suite is 21/22 because low-resolution OCR reads 5829 as 5029, also reproduced by ordinary native without the KVMem observer. The separate higher-resolution probe passes on both paths. JPEG model requests, Windows, TP2 and general-profile workloads remain unqualified. See the [integration record](../../docs/radiance-iqr-v4-integration-20261105.md) and [startup runbook](../../docs/radiance-iq3v4-runbook-20261105.md). The dated sections below describe earlier model/platform runs.
+For native Windows RX 9070 XT (gfx1201), start with the [console and chat quickstart](../../docs/radiance/CLIENT-QUICKSTART.md). The qualified text configuration uses Radiance 1.17.0, ordinary Qwen3.8-27B IQ3R v4, DFlash7, one GPU and one sequence, FP8 KV and F32 state. The full 256K Task 2 run and same-build comparisons are linked below.
+
+The Linux RX 9060 XT (gfx1200) IQ3R-S v4 qualification covers single-GPU text, bounded RAM/SSD history and DFlash7, including a 12K two-stage test. CPU PNG request/cache/placement checks pass. The original image suite scored 21/22 on low-resolution OCR; the separate higher-resolution probe passed. See the [Linux integration record](../../docs/radiance-iqr-v4-integration-20261105.md) for tested profiles and exclusions.
 
 Build and run with `tools/build.py --platform auto|windows|linux` and
 `tools/serve.py --platform auto|windows|linux` on the target OS.
+
+For the native Windows RX 9070 XT text worker, use an x64 Visual Studio
+developer PowerShell with CMake, Ninja and the Windows HIP SDK. From the
+repository root, set `ROCM_PATH` to the SDK directory and run:
+
+```powershell
+python backends/radiance/tools/prepare_native.py --destination build/radiance-native
+python backends/radiance/tools/build.py --platform windows --source build/radiance-native --build build/radiance-win-gfx1201 --rocm "$env:ROCM_PATH" --gpu-target gfx1201 --ffmpeg OFF --target radiance-kvmem-server --target qwen35_w8a8 --target libr4d --target libavx --target libref
+```
+
+The worker is in `build/radiance-win-gfx1201/bin` and its plugins are in
+`build/radiance-win-gfx1201/radiance_home`. Keep the SDK runtime DLLs
+beside the executable. If the CPU plugins link the Visual Studio LLVM
+OpenMP runtime, make the matching `libomp140.x86_64.dll` available to the
+Windows plugin loader on the development machine. The RX 9060 XT uses
+`--gpu-target gfx1200` (the default).
+
+On native Windows gfx1201, the single-rank, single-sequence Qwen35
+`w8a8_fwht128` text profile with DFlash7 and all-VRAM placement issues both
+logical compute lanes on one HIP stream. Stream order handles the GDN
+projection dependencies. The launcher records the statistics completion event
+after the last layer copy, so the CPU can collect the frame as soon as those
+bytes are ready. Set `KVMEM_RAD_HIP_SINGLE_STREAM=0` before launching the
+worker or the Windows supervisor to restore separate compute streams.
+The [RX 9070 XT measurements](../../docs/radiance/evidence/windows-gfx1201-dflash7-decode.json)
+include a fixed 256-token response and cached 32K and 49K Task 2 requests.
+On [the full 33-request Task 2 run](../../docs/radiance/evidence/windows-gfx1201-dflash7-task2-256k.json),
+the final request reached 257,958 prompt tokens and decoded 1,542 tokens at
+109.18 tok/s. The same-host historical run reached 43.39 tok/s. All 33 response
+bodies, reasoning texts and speculative token counts matched.
 
 The adapter implements native page ownership, shared RAM/SSD spill and restore,
 recurrent checkpoints, multiple retained conversations and concurrent prefix
@@ -79,9 +111,9 @@ Image content and native rotary layout participate in retained-prefix identity.
 Complete image pages remain required through Query and Prefill/Decode Pressure.
 KV/state reuse does not currently skip native image preprocessing/encoding.
 
-BF16/FP8 native memory contracts are tested separately. Windows AMD,
-other models/devices, configurable n-gram drafting and DFlash combinations
-still require qualification; their shared-launcher gates remain explicit.
+BF16/FP8 native memory contracts are tested separately. The native Windows
+hardware evidence above covers the specified text profile. Other Windows
+model, device, multimodal and multi-GPU combinations require separate qualification.
 Video/audio input is not enabled by this adapter.
 
 `VisionResidency=resident|cpu` selects the complete Qwen vision encoder's execution

@@ -211,6 +211,17 @@ def main():
     if args.host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get("STRATA_API_KEY"):
         parser.error("a non-loopback listener requires STRATA_API_KEY")
     extra = args.worker_args[1:] if args.worker_args[:1] == ["--"] else args.worker_args
+    # The console's native options cover both processes. Only serve.server owns MCP.
+    frontend_args = []
+    if "--mcp-config" in extra:
+        index = extra.index("--mcp-config")
+        if extra.count("--mcp-config") != 1 or index + 1 == len(extra):
+            parser.error("--mcp-config requires exactly one configuration file")
+        path = Path(extra[index + 1])
+        if extra[index + 1].startswith("--") or not path.is_file():
+            parser.error("--mcp-config requires an existing configuration file")
+        frontend_args = ["--mcp-config", str(path.resolve())]
+        del extra[index:index + 2]
     reserved = r"^--(kvmem-|model(?:=|$)|max-context(?:=|$)|prompt-batch(?:=|$)|window(?:=|$)|lookup(?:=|$)|draft-model(?:=|$)|prompt-cache|conversation-cache|batch(?:=|$)|slots(?:=|$)|kv(?:=|$)|layer-split|images|image-pad)"
     if any(re.match(reserved, option) for option in extra):
         parser.error("worker arguments may not override the wrapper's model, memory or M1 capability settings")
@@ -218,6 +229,10 @@ def main():
         parser.error("--no-draft conflicts with --mtp-drafts")
     if not any(option == "--vram-reserve-mib" or option.startswith("--vram-reserve-mib=") for option in extra):
         extra += ["--vram-reserve-mib", str(args.vram_reserve_mib)]
+    # Preserve the mapped-expert default used before poly.9. Its automatic RAM
+    # pool can reduce decode throughput; an explicit limit (or -2 for auto) wins.
+    if not any(re.match(r"^--ram-experts-mib(?:$|=|\s)", option) for option in extra):
+        extra += ["--ram-experts-mib", "-1"]
     worker_args = ["--model", str(args.model), "--max-context", str(args.context),
                    "--prompt-batch", str(args.prefill), "--window", str(1+args.mtp_drafts), "--lookup", "0",
                    "--prompt-cache", "0", "--conversation-cache-mib", "0", "--conversation-cache-slots", "0",
@@ -329,7 +344,7 @@ def main():
         path = Path(directory) / "strata-kvmem.json"
         path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         sys.argv = ["polystrata-server", "--engine", "strata", "--config", str(path),
-                    "--host", args.host, "--port", str(args.port)]
+                    "--host", args.host, "--port", str(args.port)] + frontend_args
         # The native worker writes to its private log. Forward only its verified
         # scoring contract so the supervising console can confirm the launch.
         stop = threading.Event()

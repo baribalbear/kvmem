@@ -107,13 +107,16 @@ ENGINE_DEFAULTS = {'ninfer': {'Context': 262144,
                                '128',
                                '--elastic-physical-reserve-mib',
                                '512']}}
-ENGINE_DEFAULTS['radiance'] = dict(Backend='radiance', Context=65536, Budget=4096, Reserve=1024,
+# Backward-compatible fallback for partial requests; the UI sends its full recipe.
+RADIANCE_LAUNCH_DEFAULTS = dict(Backend='radiance', Context=65536, Budget=4096, Reserve=1024,
     HostMiB=8192, SinkTokens=128, RecentTokens=512, Concurrency=1, RetainedSessions=8,
     QueryScorer='page-softmax', ScoreAggregation='mean', GraphAlpha=.2, Lrfu=False,
     QueryMaxTokens=512, QueryReplayMaxTokens=2048, KvType='fp8', StateCacheType='f32', Prefill=256,
     SpeculativeMode='none', DraftTokens=0, DraftPolicy='fixed', Vision=False, MaxTokens=0,
     ThinkingMode='default', ThinkingBudget=0, VramReserveMiB=1024,
     VisionTokens=1024, VisionResidency='resident', EmbeddingPlacement='vram', CpuThreads=2, VisionCacheMiB=256)
+ENGINE_DEFAULTS['radiance'] = {'Backend': 'radiance', 'Context': 262144, 'Budget': 36864, 'Reserve': 4096, 'HostMiB': 12288, 'SinkTokens': 12288, 'RecentTokens': 1024, 'Concurrency': 1, 'RetainedSessions': 1, 'QueryScorer': 'page-softmax', 'ScoreAggregation': 'mean', 'GraphAlpha': 0.2, 'Lrfu': False, 'QueryMaxTokens': 512, 'QueryReplayMaxTokens': 2048, 'KvType': 'fp8', 'StateCacheType': 'f32', 'Prefill': 256, 'SpeculativeMode': 'dflash2', 'DraftTokens': 7, 'DraftPolicy': 'fixed', 'Vision': True, 'MaxTokens': 0, 'ThinkingMode': 'default', 'ThinkingBudget': 0, 'VramReserveMiB': 256, 'EmbeddingPlacement': 'ram', 'CpuThreads': 8, 'VisionResidency': 'cpu', 'VisionTokens': 256, 'VisionCacheMiB': 64, 'ReasoningEffort': 'xhigh', 'PreserveThinking': True, 'NgramDrafts': 0, 'NgramMinMatch': 12}
+
 STRINGS = {'StateCacheType', 'EmbeddingPlacement', 'RadianceHome', 'RocmPath', 'Tokenizer','PolystrataSource','Python','VisionWorker','Mmproj','Lora','QueryScorer','Backend', 'Model', 'Worker', 'Gpu', 'ListenHost', 'KvType', 'KvTypeK', 'KvTypeV', 'DiskPath',
            'VisionResidency',
            'DeviceProfile', 'ScoreAggregation', 'QueryScorer', 'ApiKey', 'ModelAlias', 'LogLevel',
@@ -128,8 +131,10 @@ STRINGS.update(('RecallStrategy', 'LayerwiseMtpHistory'))
 INTEGERS.add("LayerwiseCheckpointTarget")
 INTEGERS.update(LAYERWISE_RESOURCES)
 # Deliberately limited native escape hatch. Common options must not be duplicated.
-NATIVE = {'llamacpp': {'--threads', '--threads-batch', '--n-gpu-layers'},
-          'radiance': {'--http-threads'}, 'ninfer': {'--threads'}, 'polystrata': {'--threads', '--elastic-headroom-mib', '--elastic-physical-reserve-mib'}}
+MCP_OPTIONS = {'llamacpp': '--mcp-servers-config', 'polystrata': '--mcp-config'}
+NATIVE = {'llamacpp': {'--threads', '--threads-batch', '--n-gpu-layers', MCP_OPTIONS['llamacpp']},
+          'radiance': {'--http-threads'}, 'ninfer': {'--threads'},
+          'polystrata': {'--threads', '--elastic-headroom-mib', '--elastic-physical-reserve-mib', MCP_OPTIONS['polystrata']}}
 NATIVE_SWITCHES = {'polystrata': {'--elastic-experts', '--elastic-experts-headroom'}}
 
 
@@ -139,7 +144,7 @@ def without_secrets(data):
     return clean
 
 
-def normalize(data, backends):
+def normalize(data, backends, *, path_root=None):
     if (not isinstance(data, dict) or type(data.get('schema_version')) is not int
             or data.get('schema_version') != 1 or set(data) != {'schema_version', 'parameters'}):
         raise ValueError('Unsupported configuration schema')
@@ -308,6 +313,16 @@ def normalize(data, backends):
         seen.add(flag)
         index += 1
         if flag in NATIVE_SWITCHES.get(p['Backend'], set()):
+            continue
+        if flag == MCP_OPTIONS.get(p['Backend']):
+            if (index == len(args) or not args[index].strip() or args[index].startswith('--')
+                    or any(c in args[index] for c in '\x00\r\n')):
+                raise ValueError(f'{flag} requires an existing MCP configuration file')
+            path = Path(path_root or '.') / args[index]
+            if not path.is_file():
+                raise ValueError(f'{flag} requires an existing MCP configuration file')
+            args[index] = str(path.resolve())
+            index += 1
             continue
         if (flag not in NATIVE[p['Backend']] or index == len(args)
                 or not re.fullmatch(r'\d{1,6}', args[index])):

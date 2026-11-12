@@ -14,6 +14,12 @@ Layerwise 在目标模型每层 attention 前使用本轮刚产生的当前层 Q
 Layerwise 文本、无草稿起点模板；套用模板不会启动服务。现有模板、保存的配置及显式用户值不自动迁移。
 Legacy 的评分器、聚合、graph alpha、LRFU 和 Query/replay 上限保存在草稿中，在新策略下不发送。
 
+界面按「召回方式 → 当前策略设置 → 历史保留」组织；经典评分细节与分层传输/元数据预算可展开编辑。
+页面加载及切换后端或程序时自动检测能力。不可用的策略在下拉选项中置灰，并标注「此推理后端暂不支持」。
+检测中或检测失败时也暂不可选；检测失败后重新聚焦策略选择框会自动重试。
+可选只代表程序声明了分层能力，模型、KV 格式或草稿组合仍需检查配置。
+旧配置中的不可用策略（包括旧版 NInfer）保持原值并阻止启动；可切回 Legacy，已填写的参数仍会保留。
+
 ## 资源与命令行
 
 结构化配置继续使用 `schema_version: 1`。原生参数统一使用 `--kvmem-*`，PowerShell 使用表中的配置名。
@@ -117,3 +123,27 @@ Legacy 自动预算建议尚未覆盖 Layerwise 的独立资源，当前新策�
 
 English: choose the independent `layerwise` strategy; old profiles remain Legacy. NInfer OWN MTP defaults to `first-layer`; explicit `upstream-global` remains available. Other workers require a choice unless they declare a default. DFlash2 keeps its native full window; PolyStrata Gemma Guess
 uses SharedTarget. All combinations are gated by the selected worker's explicit per-strategy capabilities.
+
+## NInfer 的 DFlash2 反馈回读
+
+使用 `--kvmem-recall-strategy layerwise` 时，单 GPU 的 DFlash2 CUDA Graph 路径自动按每个请求实际采样的行计算输出反馈，支持多个并发槽位。每个请求保留自己的批次行号、原生位置、接受前缀与 graph epoch 校验；其他执行路径沿用各自的反馈实现。
+
+回读使用已有的有限 pinned 暂存区。当前批次内的请求借用互不重叠的切片，按容量分组提交；只有对应 GPU 工作完成、结果校验并消费后才复用切片。部分草稿接受和没有采样行的情况仍校验原生控制信息。取消或异常会先排空已提交工作，再释放相关所有权。
+
+分层 KV 恢复复用已有暂存区，每批最多装入 64 个层片段，并按实际容量缩小批次。非诊断恢复在容量允许时把同一暂存区分为两半，打包下一批时可以上传上一批；复用某一半前等待它自己的完成事件。K/V 与量化 scale 原字节保留，固定暂存预算不增加。
+
+排障时可分别设置 `NINFER_SELECT_LAYER_FEEDBACK=0`（关闭采样行选择）、`NINFER_BATCH_LAYER_FEEDBACK=0`（关闭 mass 批量回读）或 `NINFER_BATCH_COHORT_FEEDBACK=0`（按请求分组回读），然后重新启动服务。清除这些变量即可恢复默认自动启用。它们不关闭独立的 KV 层片段批量搬运优化。
+
+性能取决于负载：PRO 6000 / NVFP4 27B + DFlash2 Q3 的单路 256k 任务2中，prefill 提升约 21.3%，decode 基本持平；每路约 64k 输入、固定 8k 输出的 4/8 并发测试中，完整并发 decode 分别下降约 0.7%/2.8%，提问批次输出吞吐分别提升约 3.0%/1.2%。两种负载与校验设置不同，不能作为只改变并发数的扩展性对照，也不构成通用 decode 提速或语义质量保证。[配置、计时口径与验证范围](benchmarks/ninfer-layerwise-performance-20261111.json)
+
+## NInfer 的驻留页 Pressure 整理
+
+Layerwise 的单 GPU 普通目标或 DFlash2 路径，默认在 GPU 内整理已经驻留的目标 KV。它仅接受原驻留页的有序子集；先保护共享页，再按不会覆盖未读源的顺序搬移各层原生字节。选页策略、完整 canonical 历史和 DFlash2 自身的滑动窗口保持原有语义。独立 MTP KV、多 rank、诊断 readback 和 import/probe 准备沿用原恢复路径。
+
+未完成的搬运持有自己的复制流、完成事件和已计费的元数据；该请求暂时让出执行，其他就绪请求仍可调度。原生地址在此期间不发布有效覆盖，完成后才校验请求版本和 lane epoch 并发布全部目标层。取消或失败先排空复制流，再使未完成的目标失效。部分 prefill 进度按实际切分累计服务预算，纯等待不消耗计算配额。
+
+归档新接受的 KV、选页和建立共享页写入保护仍发生在提交前；本改动没有把所有准备工作移到后台。当前公开的非滚动请求还会为声明的完整最大输出预留空间，因此“输出超过 gen reserve”本身不证明 decode 期间发生了 Pressure。分析刷新性能应核对实际刷新事件，并单独观察混合 prefill/decode。
+
+排障对照可设置 `NINFER_RESIDENT_LAYER_PRESSURE=0` 恢复 Host 搬运，或设置 `NINFER_ASYNC_LAYER_PRESSURE=0` 保留 GPU 搬运但等待完成。`NINFER_LAYER_RESTORE_PIPELINE=0` 关闭 Host 恢复的双缓冲。清除变量恢复默认；`NINFER_TIME_LAYER_REFRESH=1` 仅用于阶段计时，性能对照应关闭计时。
+
+PRO 6000 的频繁整理诊断中，平均刷新占用时间约从 75 ms 降至 39 ms；常用 16k reserve 的完整任务2总时间降低约 0.9%，decode 持平，4/8 路总体变化较小。[实现、计时口径及验证范围](ninfer-resident-pressure-20261111.md)
