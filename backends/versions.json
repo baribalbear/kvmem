@@ -62,7 +62,7 @@
     "base_commit": "6cc1f9fa438b7094685ae417dfa40e1ca324e617",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "83215ff4713cd25f46f0829945679d49119f0e75",
+    "patched_tree": "f775735fb8a1c29470f335ce9733962125d9df67",
     "patches": [
       {
         "id": "kvmem",
@@ -590,6 +590,16 @@
         ],
         "after_tree": "83215ff4713cd25f46f0829945679d49119f0e75",
         "source": "This fork: GGUF matrices whose row count is no multiple of the matrix kernel's 128-row tiles (vocabulary-pruned output heads) take the vector and dequantized routes instead of failing with unsupported geometry; regression test in tests/ops/linear/test_gguf.cpp"
+      },
+      {
+        "id": "qwen-vision-cpu-isa",
+        "path": "backends/patches/ninfer-qwen-vision-cpu-isa.patch",
+        "sha256": "6521cdb17ecb75a814d91d5d238220cdbc28c86851ad3ede38c23285c45b493e",
+        "requires": [
+          "gguf-ragged-rows"
+        ],
+        "after_tree": "f775735fb8a1c29470f335ce9733962125d9df67",
+        "source": "This fork: the NINFER_QWEN_VISION_CPU_ISA CMake option (empty, AVX2 or AVX512) compiles the Qwen3.5-family CPU Vision encoder, src/models/qwen3_5/execution/vision_cpu.cpp, for that instruction set with fused multiply-add allowed (/fp:contract on MSVC). Empty keeps upstream's baseline build"
       }
     ]
   },

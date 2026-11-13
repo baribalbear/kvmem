@@ -1,0 +1,47 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9f893f06f22a05bfec046b526935cf23fd094225..e91a512f514e201b5994b70770222361cb6886d0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -92,6 +92,16 @@ option(NINFER_SM120_NATIVE
+ if(NINFER_SM120_NATIVE AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
+   message(FATAL_ERROR "NINFER_SM120_NATIVE requires CMAKE_CUDA_ARCHITECTURES=120a")
+ endif()
++# kvmem: instruction set of the Qwen3.5-family CPU Vision encoder
++# (src/models/qwen3_5/execution/vision_cpu.cpp), whose loops rely on the compiler to vectorize.
++# Empty keeps the compiler's baseline (SSE2 on MSVC x64). AVX2 and AVX512 also allow fused
++# multiply-add. The whole file is compiled for that ISA, so the worker then needs a CPU that has it.
++set(NINFER_QWEN_VISION_CPU_ISA "" CACHE STRING
++    "Instruction set for the Qwen CPU Vision encoder: empty (baseline), AVX2 or AVX512")
++set_property(CACHE NINFER_QWEN_VISION_CPU_ISA PROPERTY STRINGS "" AVX2 AVX512)
++if(NOT NINFER_QWEN_VISION_CPU_ISA MATCHES "^(|AVX2|AVX512)$")
++  message(FATAL_ERROR "NINFER_QWEN_VISION_CPU_ISA must be empty, AVX2 or AVX512")
++endif()
+ if(NOT NINFER_SM120_NATIVE)
+   set(NINFER_COMPAT_PATH ON)
+   add_compile_definitions(NINFER_SM8X_COMPAT=1)
+diff --git a/src/models/qwen3_5/execution_sources.cmake b/src/models/qwen3_5/execution_sources.cmake
+index ceb369877bdd92ee0d1f2f0641e73e0c83192c75..85724d7995896742008439d8cd3adb34dc5ebfc4 100644
+--- a/src/models/qwen3_5/execution_sources.cmake
++++ b/src/models/qwen3_5/execution_sources.cmake
+@@ -13,3 +13,21 @@ target_sources(ninfer_model_runtime PRIVATE
+   "${CMAKE_CURRENT_LIST_DIR}/execution/draft.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/execution/visual_scatter.cpp"
+ )
++
++# kvmem: build the CPU Vision encoder for NINFER_QWEN_VISION_CPU_ISA (see CMakeLists.txt).
++# /fp:contract lets MSVC fuse multiply-adds, which its default /fp:precise does not.
++set(qwen3_5_vision_cpu "${CMAKE_CURRENT_LIST_DIR}/execution/vision_cpu.cpp")
++if(NINFER_QWEN_VISION_CPU_ISA STREQUAL "AVX2")
++  if(MSVC)
++    set_source_files_properties("${qwen3_5_vision_cpu}" PROPERTIES COMPILE_OPTIONS "/arch:AVX2;/fp:contract")
++  else()
++    set_source_files_properties("${qwen3_5_vision_cpu}" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
++  endif()
++elseif(NINFER_QWEN_VISION_CPU_ISA STREQUAL "AVX512")
++  if(MSVC)
++    set_source_files_properties("${qwen3_5_vision_cpu}" PROPERTIES COMPILE_OPTIONS "/arch:AVX512;/fp:contract")
++  else()
++    set_source_files_properties("${qwen3_5_vision_cpu}"
++      PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512vl;-mavx512bw;-mavx512dq;-mfma")
++  endif()
++endif()

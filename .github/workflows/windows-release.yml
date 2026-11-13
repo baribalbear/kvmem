@@ -17,6 +17,13 @@ on:
       archs:
         description: CMAKE_CUDA_ARCHITECTURES (default 120a, RTX 50 series; also 70, 75, 80, 86, 89)
         default: '120a'
+      vision_cpu_isa:
+        description: >-
+          Instruction set of NInfer's CPU Vision encoder. avx512 runs only on CPUs with AVX-512
+          (e.g. Ryzen 7000/9000); avx2 on any recent x64 CPU; baseline is upstream's build
+        type: choice
+        options: [avx512, avx2, baseline]
+        default: avx512
 
 permissions:
   contents: read
@@ -28,6 +35,7 @@ concurrency:
 env:
   CUDA_VERSION: ${{ inputs.cuda || '13.4.3' }}
   CUDA_ARCHS: ${{ inputs.archs || '120a' }}
+  VISION_CPU_ISA: ${{ inputs.vision_cpu_isa || 'avx512' }}
   # CUDA 13 installer packages, as in NInfer's native release (CUDA 12 has no crt/nvvm entries).
   # nvml_dev supplies nvml.h. Without it the workers compile out their GPU monitor
   # (kvmem/include/kvmem/monitor_hardware.hpp), and the console shows no GPU readings. The workers
@@ -67,6 +75,7 @@ jobs:
           cuda: ${{ env.CUDA_VERSION }}
           archs: ${{ env.CUDA_ARCHS }}
           packages: ${{ env.CUDA_PACKAGES }}
+          vision_cpu_isa: ${{ env.VISION_CPU_ISA }}
       - if: steps.setup.outputs.vcpkg-hit != 'true'
         uses: actions/cache/save@v4
         with:
@@ -105,6 +114,7 @@ jobs:
           cuda: ${{ env.CUDA_VERSION }}
           archs: ${{ env.CUDA_ARCHS }}
           packages: ${{ env.CUDA_PACKAGES }}
+          vision_cpu_isa: ${{ env.VISION_CPU_ISA }}
       - name: Compile object shard ${{ matrix.shard }}
         working-directory: backends/ninfer
         run: |
@@ -133,6 +143,7 @@ jobs:
           cuda: ${{ env.CUDA_VERSION }}
           archs: ${{ env.CUDA_ARCHS }}
           packages: ${{ env.CUDA_PACKAGES }}
+          vision_cpu_isa: ${{ env.VISION_CPU_ISA }}
           ninfer: 'false'
       - name: Build llama-kvmem-server
         run: |
@@ -186,6 +197,7 @@ jobs:
           cuda: ${{ env.CUDA_VERSION }}
           archs: ${{ env.CUDA_ARCHS }}
           packages: ${{ env.CUDA_PACKAGES }}
+          vision_cpu_isa: ${{ env.VISION_CPU_ISA }}
       - name: Restore every object shard
         uses: actions/download-artifact@v4
         with:
@@ -225,6 +237,7 @@ jobs:
           $version = $env:KVMEM_VERSION
           $archs = $env:CUDA_ARCHS -replace '[^0-9A-Za-z]+', '-'
           $name = "KVMem-$version-windows-x64-cuda$env:CUDA_VERSION-sm$archs"
+          if ($env:VISION_CPU_ISA -ne 'baseline') { $name += "-cpuvision-$env:VISION_CPU_ISA" }
           "PACKAGE_NAME=$name" >> $env:GITHUB_ENV
           ./scripts/windows/package-backends.ps1 -Backend all `
             -LlamaWorker workers-in/llamacpp/llama-kvmem-server.exe `
