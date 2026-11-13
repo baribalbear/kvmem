@@ -62,7 +62,7 @@
     "base_commit": "6cc1f9fa438b7094685ae417dfa40e1ca324e617",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "f775735fb8a1c29470f335ce9733962125d9df67",
+    "patched_tree": "ba602544b817f2594c10ecdb500bbfb37116361b",
     "patches": [
       {
         "id": "kvmem",
@@ -594,11 +594,11 @@
       {
         "id": "qwen-vision-cpu-isa",
         "path": "backends/patches/ninfer-qwen-vision-cpu-isa.patch",
-        "sha256": "6521cdb17ecb75a814d91d5d238220cdbc28c86851ad3ede38c23285c45b493e",
+        "sha256": "f9022fe12b0c851b079905f0edb2b9968816448a0084201ed06ba99abe5d27e2",
         "requires": [
           "gguf-ragged-rows"
         ],
-        "after_tree": "f775735fb8a1c29470f335ce9733962125d9df67",
+        "after_tree": "ba602544b817f2594c10ecdb500bbfb37116361b",
         "source": "This fork: the NINFER_QWEN_VISION_CPU_ISA CMake option (empty, AVX2 or AVX512) compiles the Qwen3.5-family CPU Vision encoder, src/models/qwen3_5/execution/vision_cpu.cpp, for that instruction set with fused multiply-add allowed (/fp:contract on MSVC). Empty keeps upstream's baseline build"
       }
     ]
