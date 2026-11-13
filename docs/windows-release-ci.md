@@ -26,7 +26,10 @@ so the jobs check out the commit history (`fetch-depth: 0`, `filter: tree:0`) fo
 `vision_cpu_isa` (default `avx512`) sets the instruction set of NInfer's CPU Vision encoder, which
 encodes images with `--vision-residency cpu`. Upstream compiles it for the compiler's baseline (SSE2 on
 MSVC x64). The fork's `qwen-vision-cpu-isa` NInfer patch compiles that one file with `/arch:AVX512`
-or `/arch:AVX2`, plus `/fp:contract` so MSVC fuses multiply-adds. An `avx512` build runs only on
+or `/arch:AVX2`, plus `/fp:contract` so MSVC fuses multiply-adds. With `avx512` the encoder's
+projection tile also uses AVX-512 FMA intrinsics: the flags alone sped encoding up by only about 2%.
+With CPU Vision the worker logs `CPU Vision encoder isa=avx512` (or `avx2`, `baseline`) at startup,
+which shows the encoder was really compiled that way. An `avx512` build runs only on
 CPUs with AVX-512, such as Ryzen 7000 and 9000; most Intel desktop CPUs lack it. Choose `avx2` for
 any recent x64 CPU, or `baseline` for upstream's build. A non-baseline choice is added to the
 build ID (`...-sm120a-cpuvision-avx512`) and to the artifact name. FMA rounds differently, so image

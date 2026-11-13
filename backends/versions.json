@@ -62,7 +62,7 @@
     "base_commit": "6cc1f9fa438b7094685ae417dfa40e1ca324e617",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
-    "patched_tree": "ba602544b817f2594c10ecdb500bbfb37116361b",
+    "patched_tree": "8353ec0f01f6af7bbe2e5c42f0853786096f3ba8",
     "patches": [
       {
         "id": "kvmem",
@@ -594,12 +594,12 @@
       {
         "id": "qwen-vision-cpu-isa",
         "path": "backends/patches/ninfer-qwen-vision-cpu-isa.patch",
-        "sha256": "f9022fe12b0c851b079905f0edb2b9968816448a0084201ed06ba99abe5d27e2",
+        "sha256": "76ba25aec19060c861ae3e5a7a7889beceb473465d4891ea1eca3ee82acf67ac",
         "requires": [
           "gguf-ragged-rows"
         ],
-        "after_tree": "ba602544b817f2594c10ecdb500bbfb37116361b",
-        "source": "This fork: the NINFER_QWEN_VISION_CPU_ISA CMake option (empty, AVX2 or AVX512) compiles the Qwen3.5-family CPU Vision encoder, src/models/qwen3_5/execution/vision_cpu.cpp, for that instruction set with fused multiply-add allowed (/fp:contract on MSVC). Empty keeps upstream's baseline build"
+        "after_tree": "8353ec0f01f6af7bbe2e5c42f0853786096f3ba8",
+        "source": "This fork: the NINFER_QWEN_VISION_CPU_ISA CMake option (empty, AVX2 or AVX512) compiles the Qwen3.5-family CPU Vision encoder, src/models/qwen3_5/execution/vision_cpu.cpp, for that instruction set with fused multiply-add allowed (/fp:contract on MSVC). With AVX512 the encoder's 4x16 projection tile uses AVX-512 FMA intrinsics, rather than relying on the compiler to vectorize the portable loop. At startup the engine logs the encoder's ISA (CPU Vision encoder isa=...). Empty keeps upstream's baseline build"
       }
     ]
   },
