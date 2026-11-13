@@ -23,6 +23,10 @@ so the jobs check out the commit history (`fetch-depth: 0`, `filter: tree:0`) fo
 | `ui` | `scripts/build-webui.py`, the lightweight chat the console requires |
 | `package` | Links `ninfer-serve.exe`, packages and archives the release |
 
+The CUDA install includes `nvml_dev` for `nvml.h`. Without that header, the workers compile out
+their GPU monitor, and the console's GPU card shows no load, VRAM, temperature or power. The workers
+load `nvml.dll` from the NVIDIA driver at run time, so no NVML file is packaged.
+
 The artifact is `KVMem-<version>-windows-x64-cuda<CUDA>-sm<archs>`, containing the ZIP and its
 SHA-256. Extract it and run `START-HERE-EN.bat` or `START-HERE-CN.bat`.
 

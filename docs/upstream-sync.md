@@ -1,7 +1,10 @@
 # Syncing this fork with kvmem/kvmem
 
 `master` is kvmem/kvmem plus this fork's additions: two NInfer patches (`exl3`, then
-`gguf-ragged-rows`), the pruned-vocabulary tools and the Windows release workflow.
+`gguf-ragged-rows`), the pruned-vocabulary tools, the Windows release workflow and the console's
+`--reasoning-loop` and `--request-log-jsonl` native options (`scripts/launcher/config.py`,
+`NATIVE_CHOICES` and `NATIVE_OUTPUT_FILES`). An upstream change to the console's `WorkerArgs`
+checks can conflict with them.
 `.github/workflows/upstream-sync.yml` keeps it current. Every Monday, or from
 **Actions → Upstream sync → Run workflow**, it does the following:
 

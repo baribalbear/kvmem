@@ -29,7 +29,10 @@ env:
   CUDA_VERSION: ${{ inputs.cuda || '13.4.3' }}
   CUDA_ARCHS: ${{ inputs.archs || '120a' }}
   # CUDA 13 installer packages, as in NInfer's native release (CUDA 12 has no crt/nvvm entries).
-  CUDA_PACKAGES: '["nvcc", "crt", "nvvm", "cudart", "cublas", "cublas_dev", "nvtx", "thrust", "cuda_profiler_api", "cuobjdump", "nvprune"]'
+  # nvml_dev supplies nvml.h. Without it the workers compile out their GPU monitor
+  # (kvmem/include/kvmem/monitor_hardware.hpp), and the console shows no GPU readings. The workers
+  # load nvml.dll from the driver at run time, so nothing NVML is packaged.
+  CUDA_PACKAGES: '["nvcc", "crt", "nvvm", "cudart", "cublas", "cublas_dev", "nvtx", "thrust", "cuda_profiler_api", "cuobjdump", "nvprune", "nvml_dev"]'
   SHARDS: 4
   CCACHE_DIR: ${{ github.workspace }}/.cache/ninfer-objects
   CCACHE_MAXSIZE: 8Gi

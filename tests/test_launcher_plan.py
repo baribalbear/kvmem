@@ -270,6 +270,12 @@ class PlanTest(unittest.TestCase):
                 self.plan(WorkerArgs=args)
         args = self.plan(WorkerArgs=['--threads', '8'])['argv']
         self.assertEqual(args[-2:], ['--threads', '8'])
+        args = self.plan(WorkerArgs=['--reasoning-loop', 'conclude'])['argv']
+        self.assertEqual(args[-2:], ['--reasoning-loop', 'conclude'])
+        with tempfile.TemporaryDirectory() as logs:
+            log = str(Path(logs, 'requests.jsonl').resolve())
+            args = self.plan(WorkerArgs=['--request-log-jsonl', log])['argv']
+            self.assertEqual(args[-2:], ['--request-log-jsonl', log])
 
     def test_backend_native_mcp_file_options(self):
         path = self.directory / 'mcp config.json'
