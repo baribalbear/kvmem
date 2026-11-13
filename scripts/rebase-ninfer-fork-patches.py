@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 # The fork's NInfer patches, in series order, after all of upstream's.
-FORK_PATCHES = ('exl3', 'gguf-ragged-rows')
+FORK_PATCHES = ('exl3', 'gguf-ragged-rows', 'qwen-vision-cpu-isa')
 spec = importlib.util.spec_from_file_location('prepare_backends', ROOT / 'scripts/prepare-backends.py')
 prepare = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare)

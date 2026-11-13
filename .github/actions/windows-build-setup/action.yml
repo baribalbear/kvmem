@@ -16,6 +16,9 @@ inputs:
   ninfer:
     description: Prepare and configure the NInfer worker build
     default: 'true'
+  vision_cpu_isa:
+    description: NInfer CPU Vision encoder instruction set (baseline, avx2 or avx512)
+    default: baseline
 outputs:
   vcpkg-key:
     description: Cache key of the vcpkg binary archives
@@ -42,6 +45,7 @@ runs:
       shell: pwsh
       env:
         ARCHS: ${{ inputs.archs }}
+        VISION_CPU_ISA: ${{ inputs.vision_cpu_isa }}
       run: |
         # NInfer logs `<version>+<build id>`. Without these it reports its nearest release tag, or
         # `untagged` in a shallow checkout, and the pinned upstream revision, marked dirty by the
@@ -57,7 +61,8 @@ runs:
         $archs = $env:ARCHS -replace '[^0-9A-Za-z]+', '-'
         "KVMEM_VERSION=$version" >> $env:GITHUB_ENV
         "NINFER_VERSION=$version" >> $env:GITHUB_ENV
-        "NINFER_BUILD_ID=kvmem-$commit-ninfer-$tree-sm$archs" >> $env:GITHUB_ENV
+        $isa = if ($env:VISION_CPU_ISA -eq 'baseline') { '' } else { "-cpuvision-$env:VISION_CPU_ISA" }
+        "NINFER_BUILD_ID=kvmem-$commit-ninfer-$tree-sm$archs$isa" >> $env:GITHUB_ENV
     - name: Install the official CUDA Toolkit
       shell: pwsh
       env:
@@ -129,6 +134,7 @@ runs:
       working-directory: backends/ninfer
       env:
         ARCHS: ${{ inputs.archs }}
+        VISION_CPU_ISA: ${{ inputs.vision_cpu_isa }}
       run: |
         $vcpkg = Join-Path $env:GITHUB_WORKSPACE '.vcpkg'
         & "$vcpkg\bootstrap-vcpkg.bat" -disableMetrics
@@ -139,6 +145,13 @@ runs:
         # A one-element array from an if statement unwraps to a string, so build the list explicitly.
         $native = @()
         if ($env:ARCHS -eq '120a') { $native += '-DNINFER_SM120_NATIVE=ON' }
+        # The fork's qwen-vision-cpu-isa patch: build the CPU Vision encoder for this ISA.
+        switch ($env:VISION_CPU_ISA) {
+          'baseline' { }
+          'avx2' { $native += '-DNINFER_QWEN_VISION_CPU_ISA=AVX2' }
+          'avx512' { $native += '-DNINFER_QWEN_VISION_CPU_ISA=AVX512' }
+          default { throw "Unknown vision_cpu_isa: $env:VISION_CPU_ISA" }
+        }
         cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release `
           "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake" `
           -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_HOST_TRIPLET=x64-windows `

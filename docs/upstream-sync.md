@@ -1,7 +1,7 @@
 # Syncing this fork with kvmem/kvmem
 
-`master` is kvmem/kvmem plus this fork's additions: two NInfer patches (`exl3`, then
-`gguf-ragged-rows`), the pruned-vocabulary tools, the Windows release workflow and the console's
+`master` is kvmem/kvmem plus this fork's additions: three NInfer patches (`exl3`,
+`gguf-ragged-rows`, then `qwen-vision-cpu-isa`), the pruned-vocabulary tools, the Windows release workflow and the console's
 `--reasoning-loop` and `--request-log-jsonl` native options (`scripts/launcher/config.py`,
 `NATIVE_CHOICES` and `NATIVE_OUTPUT_FILES`). An upstream change to the console's `WorkerArgs`
 checks can conflict with them.
@@ -30,6 +30,7 @@ The fork's patches come last in the NInfer series, in the order of `FORK_PATCHES
 |---|---|
 | `exl3` | EXL3 weights ([ninfer-exl3.md](ninfer-exl3.md)) |
 | `gguf-ragged-rows` | GGUF matrices whose rows are no multiple of 128, such as a pruned output head ([ninfer-pruned-vocab.md](ninfer-pruned-vocab.md)) |
+| `qwen-vision-cpu-isa` | `NINFER_QWEN_VISION_CPU_ISA` (empty, `AVX2`, `AVX512`) builds the Qwen CPU Vision encoder for that instruction set ([windows-release-ci.md](windows-release-ci.md)) |
 
 They must apply to the tree that upstream's last patch produces, so they break whenever upstream
 changes the NInfer pin or its patches. Upstream's `backends/versions.json` then has a new series

@@ -1,0 +1,154 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9f893f06f22a05bfec046b526935cf23fd094225..ec4c99b0d5052131c8cc506edf301c8103edb6d4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -92,6 +92,17 @@ option(NINFER_SM120_NATIVE
+ if(NINFER_SM120_NATIVE AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
+   message(FATAL_ERROR "NINFER_SM120_NATIVE requires CMAKE_CUDA_ARCHITECTURES=120a")
+ endif()
++# kvmem: instruction set of the Qwen3.5-family CPU Vision encoder
++# (src/models/qwen3_5/execution/vision_cpu.cpp), whose loops rely on the compiler to vectorize.
++# Empty keeps the compiler's baseline (SSE2 on MSVC x64). AVX2 and AVX512 also allow fused
++# multiply-add. The whole file is compiled for that ISA, so the worker then needs a CPU that has it.
++set(NINFER_QWEN_VISION_CPU_ISA "" CACHE STRING
++    "Instruction set for the Qwen CPU Vision encoder: empty (baseline), AVX2 or AVX512")
++set_property(CACHE NINFER_QWEN_VISION_CPU_ISA PROPERTY STRINGS "" AVX2 AVX512)
++if(NOT NINFER_QWEN_VISION_CPU_ISA STREQUAL "" AND NOT NINFER_QWEN_VISION_CPU_ISA STREQUAL "AVX2"
++   AND NOT NINFER_QWEN_VISION_CPU_ISA STREQUAL "AVX512")
++  message(FATAL_ERROR "NINFER_QWEN_VISION_CPU_ISA must be empty, AVX2 or AVX512")
++endif()
+ if(NOT NINFER_SM120_NATIVE)
+   set(NINFER_COMPAT_PATH ON)
+   add_compile_definitions(NINFER_SM8X_COMPAT=1)
+diff --git a/src/models/qwen3_5/execution/vision_cpu.cpp b/src/models/qwen3_5/execution/vision_cpu.cpp
+index 4098a26ec87447768cd09cf52745a6f1b676dd0b..edc4c595aba99fdd51ffd5e0443e890d6dab85f7 100644
+--- a/src/models/qwen3_5/execution/vision_cpu.cpp
++++ b/src/models/qwen3_5/execution/vision_cpu.cpp
+@@ -11,7 +11,22 @@
+ #include <stdexcept>
+ #include <utility>
+ 
++#if defined(__AVX512F__)
++#include <immintrin.h>
++#endif
++
+ namespace ninfer::models::qwen3_5::execution {
++
++const char* cpu_vision_isa() noexcept {
++#if defined(__AVX512F__)
++    return "avx512";
++#elif defined(__AVX2__)
++    return "avx2";
++#else
++    return "baseline";
++#endif
++}
++
+ namespace {
+ 
+ constexpr float kNormEpsilon = 1.0e-6F;
+@@ -153,6 +168,32 @@ constexpr std::int32_t kTileTokens = 16;
+ // contiguous), accumulated as a register tile over the whole inner dimension.
+ void linear_tile(const float* w, std::int32_t k, const float* bias, const float* panel,
+                  std::int32_t width, Matrix& y, std::int32_t row, std::int32_t token) {
++#if defined(__AVX512F__)
++    // kvmem: one 16-token panel row is one 512-bit vector, so the 4x16 tile is four accumulator
++    // registers fed by fused multiply-adds, not left to the compiler to vectorize from the portable
++    // loop below. Each output still sums its products in inner order, as that loop does.
++    static_assert(kTileRows == 4 && kTileTokens == 16, "the AVX-512 tile is 4 rows x 16 tokens");
++    const float* w0 = w + static_cast<std::size_t>(row) * k;
++    const float* w1 = w0 + k;
++    const float* w2 = w1 + k;
++    const float* w3 = w2 + k;
++    __m512 a0       = _mm512_set1_ps(bias[row]);
++    __m512 a1       = _mm512_set1_ps(bias[row + 1]);
++    __m512 a2       = _mm512_set1_ps(bias[row + 2]);
++    __m512 a3       = _mm512_set1_ps(bias[row + 3]);
++    for (std::int32_t inner = 0; inner < k; ++inner) {
++        const __m512 xs = _mm512_loadu_ps(panel + static_cast<std::size_t>(inner) * kTileTokens);
++        a0              = _mm512_fmadd_ps(_mm512_set1_ps(w0[inner]), xs, a0);
++        a1              = _mm512_fmadd_ps(_mm512_set1_ps(w1[inner]), xs, a1);
++        a2              = _mm512_fmadd_ps(_mm512_set1_ps(w2[inner]), xs, a2);
++        a3              = _mm512_fmadd_ps(_mm512_set1_ps(w3[inner]), xs, a3);
++    }
++    const auto mask = static_cast<__mmask16>((1U << width) - 1U);
++    _mm512_mask_storeu_ps(y.row(row) + token, mask, a0);
++    _mm512_mask_storeu_ps(y.row(row + 1) + token, mask, a1);
++    _mm512_mask_storeu_ps(y.row(row + 2) + token, mask, a2);
++    _mm512_mask_storeu_ps(y.row(row + 3) + token, mask, a3);
++#else
+     float acc[kTileRows][kTileTokens];
+     for (int r = 0; r < kTileRows; ++r) {
+         for (int t = 0; t < kTileTokens; ++t) { acc[r][t] = bias[row + r]; }
+@@ -170,6 +211,7 @@ void linear_tile(const float* w, std::int32_t k, const float* bias, const float*
+         float* out = y.row(row + r) + token;
+         for (std::int32_t t = 0; t < width; ++t) { out[t] = acc[r][t]; }
+     }
++#endif
+ }
+ 
+ void linear_row(const float* w, std::int32_t k, const float* bias, const float* panel,
+diff --git a/src/models/qwen3_5/execution/vision_cpu.h b/src/models/qwen3_5/execution/vision_cpu.h
+index 95f1e647e93f066a872229e13d37593132173515..7f130261f36ca384311b64ef30a2ef163c3f154e 100644
+--- a/src/models/qwen3_5/execution/vision_cpu.h
++++ b/src/models/qwen3_5/execution/vision_cpu.h
+@@ -29,6 +29,10 @@ encode_vision_on_cpu(const CpuVisionWeights& weights, std::span<const std::uint1
+                      const VisionItemControl& control, unsigned threads = 0,
+                      const std::atomic<bool>* cancelled = nullptr);
+ 
++// kvmem: the instruction set encode_vision_on_cpu was compiled for: "avx512", "avx2" or
++// "baseline" (NINFER_QWEN_VISION_CPU_ISA).
++[[nodiscard]] const char* cpu_vision_isa() noexcept;
++
+ // One Vision prefill session's host encoder: at most one item in flight, encoded on a worker
+ // thread beside other lanes' decode and handed over as BF16 host embeddings. Two result buffers
+ // alternate, so the next item can encode while prefill still reads the previous one.
+diff --git a/src/models/qwen3_5/execution_sources.cmake b/src/models/qwen3_5/execution_sources.cmake
+index ceb369877bdd92ee0d1f2f0641e73e0c83192c75..85724d7995896742008439d8cd3adb34dc5ebfc4 100644
+--- a/src/models/qwen3_5/execution_sources.cmake
++++ b/src/models/qwen3_5/execution_sources.cmake
+@@ -13,3 +13,21 @@ target_sources(ninfer_model_runtime PRIVATE
+   "${CMAKE_CURRENT_LIST_DIR}/execution/draft.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/execution/visual_scatter.cpp"
+ )
++
++# kvmem: build the CPU Vision encoder for NINFER_QWEN_VISION_CPU_ISA (see CMakeLists.txt).
++# /fp:contract lets MSVC fuse multiply-adds, which its default /fp:precise does not.
++set(qwen3_5_vision_cpu "${CMAKE_CURRENT_LIST_DIR}/execution/vision_cpu.cpp")
++if(NINFER_QWEN_VISION_CPU_ISA STREQUAL "AVX2")
++  if(MSVC)
++    set_source_files_properties("${qwen3_5_vision_cpu}" PROPERTIES COMPILE_OPTIONS "/arch:AVX2;/fp:contract")
++  else()
++    set_source_files_properties("${qwen3_5_vision_cpu}" PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
++  endif()
++elseif(NINFER_QWEN_VISION_CPU_ISA STREQUAL "AVX512")
++  if(MSVC)
++    set_source_files_properties("${qwen3_5_vision_cpu}" PROPERTIES COMPILE_OPTIONS "/arch:AVX512;/fp:contract")
++  else()
++    set_source_files_properties("${qwen3_5_vision_cpu}"
++      PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512vl;-mavx512bw;-mavx512dq;-mfma")
++  endif()
++endif()
+diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
+index 61015071510a72fe32f76c60bd8f54921ccdcb2f..459251ce73799446e826a8a3f8ad0cb6acceb4e4 100644
+--- a/src/runtime/engine/model_instance.cpp
++++ b/src/runtime/engine/model_instance.cpp
+@@ -21,6 +21,7 @@
+ #include "models/qwen3_5/frontend/graft.h"
+ #include "models/qwen3_5/load.h"
+ #include "models/qwen3_5/execution/expert_runtime.h"
++#include "models/qwen3_5/execution/vision_cpu.h"
+ #include "models/qwen3_5/expert_admission.h"
+ #include "models/qwen3_5/measurement.h"
+ #include "runtime/engine/host_memory.h"
+@@ -384,6 +385,10 @@ EngineOptions normalize_engine_options(EngineOptions options) {
+     if (options.kvmem.selected_tokens)
+         publish_diagnostic(options.diagnostic_observer,DiagnosticLevel::Info,"KVMEM_RECALL_STRATEGY strategy=%s",
+             kvmem::recall_strategy_name(options.kvmem.recall_strategy));
++    // kvmem: which instruction set the CPU Vision encoder was built for (qwen-vision-cpu-isa).
++    if (options.enable_vision && options.vision_residency == VisionResidency::Cpu)
++        publish_diagnostic(options.diagnostic_observer,DiagnosticLevel::Info,"CPU Vision encoder isa=%s",
++            models::qwen3_5::execution::cpu_vision_isa());
+     if (options.kvmem.selected_tokens && options.kvmem.recall_strategy==kvmem::RecallStrategy::Layerwise) {
+         const auto& limits=options.kvmem.layerwise;
+         publish_diagnostic(options.diagnostic_observer,DiagnosticLevel::Info,
