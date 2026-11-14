@@ -97,7 +97,7 @@
     SinkTokens:12288,RecentTokens:1024,Concurrency:1,RetainedSessions:1,ThinkingBudget:16384,
     ReasoningEffort:'xhigh',PreserveThinking:true,SpeculativeMode:'mtp',VisionResidency:'cpu',VisionTokens:1024,
     QueryScorer:'page-softmax',GraphAlpha:0.2,Lrfu:false,ScoreAggregation:'mean',QueryMaxTokens:512,QueryReplayMaxTokens:2048};
-  const ninferDefaultPreset={...commonPreset,Backend:'ninfer',ThinkingMode:'default',ThinkingBudget:0,KvType:'int8',Prefill:256,DraftTokens:4,DraftPolicy:'adaptive',NgramDrafts:31,NgramMinMatch:12,FastPrefill:true,DeviceProfile:'auto',Vision:true};
+  const ninferDefaultPreset={...commonPreset,Backend:'ninfer',QueryMaxTokens:0,QueryReplayMaxTokens:0,ThinkingMode:'default',ThinkingBudget:0,KvType:'int8',Prefill:256,DraftTokens:4,DraftPolicy:'adaptive',NgramDrafts:31,NgramMinMatch:12,FastPrefill:true,DeviceProfile:'auto',Vision:true};
   const presets = [
     {id:'radiance',title:['RX 9000 系列 16GB · 极速档','RX 9000 Series 16GB · Speed'],note:['256K 上下文 · 36K KV · CPU 视觉','256K context · 36K KV · CPU vision'],parameters:{...commonPreset,"Backend":"radiance","Budget":36864,"Reserve":4096,"KvType":"fp8","StateCacheType":"f32","Prefill":256,"SpeculativeMode":"dflash2","DraftTokens":7,"DraftPolicy":"fixed","Vision":true,"ThinkingMode":"default","ThinkingBudget":0,"VramReserveMiB":256,"EmbeddingPlacement":"ram","CpuThreads":8,"VisionCacheMiB":64,"VisionTokens":256,"NgramDrafts":0,"NgramMinMatch":12}},
     {id:'ninfer-speed',title:['NInfer · 极速档','NInfer · Speed'],
@@ -276,7 +276,7 @@
     const model=health?.model||{},facts=[model.format,model.architecture,model.files?tr(`${model.files} 个文件`,`${model.files} file(s)`):'',model.bytes?`${(model.bytes/1024**3).toFixed(2)} GiB`:''].filter(Boolean);
     if(facts.length)box.append(make('p',{class:'l-health-meta'},facts.join(' · ')));
     box.append(make('p',{class:'l-health-note'},tr('仅检查文件与资源；worker 加载、显存用量与推理结果尚未验证。','Files and resources only; worker loading, VRAM use and inference remain unverified.')));
-    const features=make('div',{class:'l-health-features'}),states={present:['已包含','Included'],absent:['未包含','Absent'],unknown:['未确认','Unverified'],external:['需外部文件','External file']};
+    const features=make('div',{class:'l-health-features'}),states={present:['已包含','Included'],absent:['未包含','Absent'],unknown:['未确认','Unverified'],external:['需外部文件','External file'],external_ready:['外部文件已选','External file selected']};
     for(const [key,zh,en] of [['text','文本','Text'],['vision','图像','Vision'],['mtp','MTP','MTP'],['dflash2','DFlash2','DFlash2'],['tokenizer','分词器','Tokenizer'],['template','聊天模板','Chat template']]){
       const state=health?.features?.[key];if(!state)continue;
       features.append(make('span',{'data-feature':key,'data-state':state},tr(zh,en)+' · '+tr(...(states[state]||states.unknown))));
@@ -970,13 +970,14 @@
     const scorer=p.QueryScorer||(legacyScoring&&(!p.NoLrfu||p.ScoreAggregation==='max'||'LrfuLambda' in p||'LrfuTopFraction' in p)?'meanq-cosine':'page-softmax');
     p={...p,QueryScorer:scorer,ScoreAggregation:p.ScoreAggregation??(scorer==='meanq-cosine'?'max':'mean'),
       GraphAlpha:p.GraphAlpha??(scorer==='meanq-cosine'?0:0.2),Lrfu:p.Lrfu??('NoLrfu' in p?!p.NoLrfu:scorer==='meanq-cosine'),
-      QueryMaxTokens:p.QueryMaxTokens??512,QueryReplayMaxTokens:p.QueryReplayMaxTokens??2048};
+      QueryMaxTokens:p.QueryMaxTokens??(p.Backend==='ninfer'?0:512),QueryReplayMaxTokens:p.QueryReplayMaxTokens??(p.Backend==='ninfer'?0:2048)};
     let refreshGpuOrder=()=>{};
     const b=p.Backend,n=b==='ninfer',l=b==='llamacpp',poly=b==='polystrata',rad=b==='radiance';
     if(n)p.CheckpointExtraRecomputeTokens??=0;
+    p.CacheMinTokens??=0;
     // Resolve the launcher's omitted values before rendering; keep explicit 0/false.
     const concreteDefaults={Prefill:rad?256:poly?512:defaults.Prefill,ThinkingBudget:0,Concurrency:1,VisionTokens:1024,NgramDrafts:0,NgramMinMatch:12,
-      DeviceProfile:'off',LogLevel:'info',QueryMaxTokens:512,ReplayMaxTokens:2048};
+      DeviceProfile:'off',LogLevel:'info',QueryMaxTokens:n?0:512,ReplayMaxTokens:2048};
     for(const [key,value] of Object.entries(concreteDefaults))if(p[key]===undefined||p[key]===null||p[key]==='')p[key]=value;
     if(p.RetainedSessions===undefined||p.RetainedSessions===null||p.RetainedSessions==='')p.RetainedSessions=poly?Math.max(4,Number(p.Concurrency)+1):4;
     if(!p.ThinkingMode||p.ThinkingMode==='default')p.ThinkingMode=(n||rad)?'default':poly?(p.ReasoningEffort==='none'?'off':'on'):'off';
@@ -1178,6 +1179,7 @@
     ['SinkTokens','RecentTokens','RetainedSessions'].forEach(k=>{const el=panels[0].querySelector(`[data-param="${k}"]`);if(el)retention.append(el.closest('label'));});
     const target=field(retention,p,'LayerwiseCheckpointTarget','实例热检查点目标','Hot checkpoints per instance','number');
     target.min='1';target.required=false;
+    {const minimum=field(retention,p,'CacheMinTokens','会话缓存最低长度 · tokens','Minimum cached history · tokens','number',null,['0 关闭。保存时按可恢复的完整会话长度判断，包含历史输入和已提交的输出；短会话不占保留名额，仍可读取已有缓存。','0 disables filtering. At save time, count the complete restorable history, including input and committed output. Short histories do not use a retention slot; existing prefixes remain reusable.']);minimum.min='0';minimum.max='2147483647';minimum.required=true;}
     if(n){const extra=field(retention,p,'CheckpointExtraRecomputeTokens','快照额外重算上限 · tokens','Checkpoint extra recompute limit · tokens','number',null,['0 关闭。允许用附近较早点替代低收益快照；执行中的 Query 回放点仍受保护。重试可能需要重新保存快照或读取 SSD，因此该值不是耗时上限。','0 disables this optimization. Nearby earlier states can replace low-value checkpoints; active Query replay points remain protected. Retries may rebuild checkpoints or read SSD, so this is not a latency limit.']);extra.min='0';extra.max='2147483647';extra.required=true;}
     if(legacyScoring)scoring.before(make('p',{class:'l-muted','data-scoring-migration':''},tr('已将旧检索设置转换为明确参数；请检查下方评分器和历史累计选项。','Legacy retrieval settings were converted to explicit controls. Review the scorer and LRFU settings below.')));
     field(scoring,p,'QueryScorer','召回评分算法','Recall scoring algorithm','text',[['page-softmax','Page softmax'],['meanq-cosine','Mean-Q cosine']],['评分器、图传播与历史累计可以独立组合。','Scorer, graph propagation and LRFU can be combined independently.']);
@@ -1186,7 +1188,7 @@
     const history=field(scoring,p,'Lrfu','历史累计 · LRFU','LRFU history','checkbox',null,['对历次问题的重要性做衰减累计。top-fraction 只筛正向奖励，负分仍保留。','Accumulate decayed relevance across queries. Top-fraction gates positive rewards while retaining negative evidence.']);history.dataset.explicitBoolean='true';
     const decay=field(scoring,{LrfuLambda:0.5,...p},'LrfuLambda','历史衰减系数','History decay','number');decay.max='1';decay.step='any';decay.required=true;
     const fraction=field(scoring,{LrfuTopFraction:0.9,...p},'LrfuTopFraction','正向奖励候选比例','Positive reward fraction','number');fraction.min='0';fraction.max='1';fraction.step='any';fraction.required=true;
-    for(const [key,zh,en,note] of [['QueryMaxTokens','问题评分上限 · tokens','Query score limit · tokens',['仅使用当前问题末尾的这些 tokens 评分。','Score with at most this many trailing tokens of the current question.']],['QueryReplayMaxTokens','完整回放上限 · tokens','Causal replay limit · tokens',['超过上限时保持驻留视图并使用 Pressure；不会截断因果回放。','Above this limit, retain the resident view with Pressure; causal replay is not truncated.']]]){const limit=field(scoring,p,key,zh,en,'number',null,note);limit.min='1';limit.required=true;}
+    for(const [key,zh,en,note] of [['QueryMaxTokens','问题评分上限 · tokens','Query score limit · tokens',['仅使用当前问题末尾的这些 tokens 评分。','Score with at most this many trailing tokens of the current question.']],['QueryReplayMaxTokens','完整回放上限 · tokens','Causal replay limit · tokens',['超过上限时保持驻留视图并使用 Pressure；不会截断因果回放。','Above this limit, retain the resident view with Pressure; causal replay is not truncated.']]]){const limit=field(scoring,p,key,zh,en,'number',null,note);limit.min=p.Backend==='ninfer'?'0':'1';limit.required=true;if(p.Backend==='ninfer')limit.title=tr('0 表示不限制长度；正数设置上限。','0 means unlimited; a positive value sets a cap.');}
     const scoringAdvanced=recallAdvanced(scoring,'scoring','评分与回放细节','Scoring and replay details');
     for(const key of ['ScoreAggregation','LrfuLambda','LrfuTopFraction','QueryMaxTokens','QueryReplayMaxTokens'])scoringAdvanced.append(scoring.querySelector(`[data-param=${key}]`).closest('label'));
     field(panels[1],p,'Prefill','预填充块大小 · tokens','Prefill chunk · tokens','number');
