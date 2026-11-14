@@ -11,7 +11,7 @@ SPECULATIVE_PROFILES = json.loads((ROOT / 'scripts/speculative-capabilities.json
 DEFAULTS = dict(Backend='ninfer', Model='', Worker='', Gpu='', Context=262144,
                 Budget=32768, Reserve=1024, HostMiB=16384, Prefill=128,
                 MaxTokens=1024, Port=18200, ListenHost='127.0.0.1',
-                SinkTokens=12288, RecentTokens=1024)
+                SinkTokens=12288, RecentTokens=1024, CacheMinTokens=0)
 # Initial UI recipes; never merge engine-specific flags into saved configurations.
 ENGINE_DEFAULTS = {'ninfer': {'Context': 262144,
             'Budget': 47104,
@@ -28,9 +28,10 @@ ENGINE_DEFAULTS = {'ninfer': {'Context': 262144,
             'ScoreAggregation': 'mean',
             'GraphAlpha': 0.2,
             'Lrfu': False,
-            'QueryMaxTokens': 512,
-            'QueryReplayMaxTokens': 2048,
+            'QueryMaxTokens': 0,
+            'QueryReplayMaxTokens': 0,
             'CheckpointExtraRecomputeTokens': 0,
+            'CacheMinTokens': 0,
             'ThinkingMode': 'default',
             'KvType': 'int8',
             'Prefill': 256,
@@ -124,7 +125,7 @@ STRINGS = {'StateCacheType', 'EmbeddingPlacement', 'RadianceHome', 'RocmPath', '
 INTEGERS = {'CpuThreads', 'VisionCacheMiB', 'BlockTokens', 'VramReserveMiB', 'Context', 'Budget', 'Reserve', 'HostMiB', 'Prefill', 'MaxTokens', 'Port',
             'MtpDrafts', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions',
             'VisionTokens', 'ThinkingBudget', 'SinkTokens', 'RecentTokens', 'DiskMiB', 'DraftTokens',
-            'QueryMaxTokens', 'QueryReplayMaxTokens', 'ReplayMaxTokens', 'CheckpointExtraRecomputeTokens'}
+            'QueryMaxTokens', 'QueryReplayMaxTokens', 'ReplayMaxTokens', 'CheckpointExtraRecomputeTokens', 'CacheMinTokens'}
 BOOLEANS = {'AdaptiveMtp', 'FastPrefill', 'Vision', 'NoLrfu', 'Lrfu', 'PreserveThinking', 'TensorParallel'}
 DECIMALS = {'LrfuLambda', 'LrfuTopFraction', 'GraphAlpha'}
 STRINGS.update(('RecallStrategy', 'LayerwiseMtpHistory'))
@@ -202,8 +203,9 @@ def normalize(data, backends, *, path_root=None):
     if p.get('ScoreAggregation', 'mean') not in {'mean', 'max'}:
         raise ValueError('Unsupported ScoreAggregation')
     for key in ('QueryMaxTokens', 'QueryReplayMaxTokens'):
-        if key in p and p[key] <= 0:
-            raise ValueError(f'{key} must be positive')
+        minimum = 0 if p['Backend'] == 'ninfer' else 1
+        if key in p and p[key] < minimum:
+            raise ValueError(f'{key} must be >= {minimum}; zero means unlimited for NInfer')
     if p['Backend'] != 'radiance' and {'CpuThreads','VisionCacheMiB'} & p.keys():
         raise ValueError('CpuThreads and VisionCacheMiB currently configure Radiance only')
     if 'CheckpointExtraRecomputeTokens' in p and p['Backend'] != 'ninfer':
