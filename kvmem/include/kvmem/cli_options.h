@@ -67,6 +67,11 @@ struct CliOptions {
         return uint32_t(number);
     }
 
+    // `need` may return const char * (NInfer's CLI) or std::string (NInfer's bench). Each value is
+    // used within the full expression that asked for it, so a returned string outlives its use.
+    static const char * value_text(const char * value) { return value; }
+    static const char * value_text(const std::string & value) { return value.c_str(); }
+
     template<class Need> bool parse(const std::string & arg, const Need & need) {
         reject_retired_storage_option(arg);
         if (arg == "--kvmem" || arg == "--no-kvmem") {
@@ -74,16 +79,16 @@ struct CliOptions {
             return true;
         }
         if (arg == "--kvmem-budget") {
-            budget = integer(arg, need(arg.c_str()), 1);
+            budget = integer(arg, value_text(need(arg.c_str())), 1);
             budget_set = true;
             return true;
         }
-        if (arg == "--kvmem-recall-strategy") recall_strategy = parse_recall_strategy(need(arg.c_str()));
-        else if (arg == "--kvmem-layerwise-mtp-history") layerwise_mtp_history = parse_layerwise_mtp_history(need(arg.c_str()));
+        if (arg == "--kvmem-recall-strategy") recall_strategy = parse_recall_strategy(value_text(need(arg.c_str())));
+        else if (arg == "--kvmem-layerwise-mtp-history") layerwise_mtp_history = parse_layerwise_mtp_history(value_text(need(arg.c_str())));
         else if (arg == "--kvmem-layerwise-activation-ram-mib" || arg == "--kvmem-layerwise-activation-disk-mib" ||
                  arg == "--kvmem-layerwise-staging-mib" || arg == "--kvmem-layerwise-metadata-mib" ||
                  arg == "--kvmem-layerwise-activation-metadata-mib") {
-            const auto bytes=uint64_t(integer(arg,need(arg.c_str()),
+            const auto bytes=uint64_t(integer(arg,value_text(need(arg.c_str())),
                 arg=="--kvmem-layerwise-activation-ram-mib" || arg=="--kvmem-layerwise-activation-disk-mib" ? 0:1))<<20;
             if (arg=="--kvmem-layerwise-activation-ram-mib") layerwise.activation_ram_bytes=bytes;
             else if (arg=="--kvmem-layerwise-activation-disk-mib") layerwise.activation_disk_bytes=bytes;
@@ -92,35 +97,35 @@ struct CliOptions {
             else layerwise.activation_metadata_bytes=bytes;
             layerwise_limits_set=true;
         }
-        else if (arg == "--kvmem-gen-reserve") gen_reserve = integer(arg, need(arg.c_str()), 1);
-        else if (arg == "--kvmem-sink-tokens") {sink_tokens = integer(arg, need(arg.c_str()), 0);sink_tokens_set=true;}
-        else if (arg == "--kvmem-recent-tokens") {recent_tokens = integer(arg, need(arg.c_str()), 0);recent_tokens_set=true;}
+        else if (arg == "--kvmem-gen-reserve") gen_reserve = integer(arg, value_text(need(arg.c_str())), 1);
+        else if (arg == "--kvmem-sink-tokens") {sink_tokens = integer(arg, value_text(need(arg.c_str())), 0);sink_tokens_set=true;}
+        else if (arg == "--kvmem-recent-tokens") {recent_tokens = integer(arg, value_text(need(arg.c_str())), 0);recent_tokens_set=true;}
         else if (arg == "--kvmem-cache-min-tokens") {
-            cache_min_tokens = integer(arg, need(arg.c_str()), 0);
+            cache_min_tokens = integer(arg, value_text(need(arg.c_str())), 0);
             auxiliary_set |= cache_min_tokens != 0;
             return true;
         }
         else if (arg == "--kvmem-sessions") {
-            sessions = integer(arg, need(arg.c_str()), 1);
+            sessions = integer(arg, value_text(need(arg.c_str())), 1);
             sessions_set = true;
-        } else if (arg == "--kvmem-host-mib") payload_host_bytes = uint64_t(integer(arg, need(arg.c_str()), 1)) << 20;
+        } else if (arg == "--kvmem-host-mib") payload_host_bytes = uint64_t(integer(arg, value_text(need(arg.c_str())), 1)) << 20;
         else if (arg == "--kvmem-disk-mib") {
-            payload_disk_bytes = uint64_t(integer(arg, need(arg.c_str()), 0)) << 20;
+            payload_disk_bytes = uint64_t(integer(arg, value_text(need(arg.c_str())), 0)) << 20;
             return true;
         }
         else if (arg == "--kvmem-disk-path") {
-            payload_disk_dir = need(arg.c_str());
+            payload_disk_dir = value_text(need(arg.c_str()));
             if (payload_disk_dir.empty()) throw std::invalid_argument(arg + " must not be empty");
         } else if (arg == "--kvmem-lrfu" || arg == "--no-kvmem-lrfu") {
             lrfu = arg == "--kvmem-lrfu";
             lrfu_set = true;
             return true;
         }
-        else if (arg == "--kvmem-query-scorer") query_scorer = parse_query_scorer(need(arg.c_str()));
-        else if (arg == "--kvmem-graph-alpha") { graph_alpha = parse_graph_alpha(need(arg.c_str())); graph_alpha_set = true; }
-        else if (arg == "--kvmem-lrfu-lambda") { lrfu_lambda = parse_lrfu_real(need(arg.c_str()), true); lrfu_tuning_set = true; }
-        else if (arg == "--kvmem-lrfu-top-frac") { lrfu_top_fraction = parse_lrfu_real(need(arg.c_str()), false); lrfu_tuning_set = true; }
-        else if (arg == "--kvmem-score-agg") { score_agg = parse_score_aggregation(need(arg.c_str())); score_agg_set = true; }
+        else if (arg == "--kvmem-query-scorer") query_scorer = parse_query_scorer(value_text(need(arg.c_str())));
+        else if (arg == "--kvmem-graph-alpha") { graph_alpha = parse_graph_alpha(value_text(need(arg.c_str()))); graph_alpha_set = true; }
+        else if (arg == "--kvmem-lrfu-lambda") { lrfu_lambda = parse_lrfu_real(value_text(need(arg.c_str())), true); lrfu_tuning_set = true; }
+        else if (arg == "--kvmem-lrfu-top-frac") { lrfu_top_fraction = parse_lrfu_real(value_text(need(arg.c_str())), false); lrfu_tuning_set = true; }
+        else if (arg == "--kvmem-score-agg") { score_agg = parse_score_aggregation(value_text(need(arg.c_str()))); score_agg_set = true; }
         else return false;
         auxiliary_set = true;
         return true;
